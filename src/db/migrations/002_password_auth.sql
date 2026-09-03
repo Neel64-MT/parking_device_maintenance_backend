@@ -1,0 +1,8 @@
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT NOT NULL DEFAULT '';
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_unique ON users (email) WHERE email IS NOT NULL;
+
+ALTER TABLE users ALTER COLUMN password_hash DROP DEFAULT;
+
+DROP TABLE IF EXISTS otp_challenges;
