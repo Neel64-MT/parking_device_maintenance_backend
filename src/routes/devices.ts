@@ -202,7 +202,8 @@ router.get('/scan', authorize('Scan QR', 'v'), async (req: AuthedRequest, res) =
     const result = await query(
       `SELECT d.*, r.name AS road_name,
          ot.public_id AS open_ticket_id, ot.status AS open_ticket_status,
-         ot.assignee_id, COALESCE(fs.name, rs.name) AS issue_name,
+         ot.assignee_id, ot.raised_at AS open_ticket_raised_at,
+         COALESCE(fs.name, rs.name) AS issue_name,
          COALESCE(fs.severity, rs.severity) AS severity,
          (SELECT COUNT(*)::int FROM tickets t
           WHERE t.device_id = d.id AND t.raised_at >= NOW() - INTERVAL '6 months'
@@ -228,7 +229,39 @@ router.get('/scan', authorize('Scan QR', 'v'), async (req: AuthedRequest, res) =
       assigneeId: row.assignee_id,
       severity: row.severity,
     })
+    const lat = row.latitude != null ? String(row.latitude) : null
+    const lng = row.longitude != null ? String(row.longitude) : null
+    let openTicketAge: string | null = null
+    if (row.open_ticket_raised_at) {
+      const days = Math.max(
+        0,
+        Math.floor(
+          (Date.now() - new Date(row.open_ticket_raised_at).getTime()) / (1000 * 60 * 60 * 24),
+        ),
+      )
+      openTicketAge = days === 1 ? '1 day' : `${days} days`
+    }
+    const deviceName = row.model
+      ? String(row.model)
+      : `Parking device ${row.public_id}`
+    const statusDate = row.open_ticket_raised_at
+      ? new Date(row.open_ticket_raised_at).toISOString().slice(0, 10)
+      : row.installed_on
     return ok(res, {
+      // Canonical scan fields (Phase 17)
+      deviceId: row.public_id,
+      deviceName,
+      locationSite: row.road_name,
+      slot: row.slot_number,
+      currentStatus: status,
+      statusDate,
+      ticketsLast6Months: row.tickets_6m,
+      openTicketId: row.open_ticket_id || null,
+      openTicketAge,
+      openTicketIssue: row.open_ticket_id ? row.issue_name || 'Open' : null,
+      latitude: lat,
+      longitude: lng,
+      // Legacy shape (ScanQr / older clients)
       id: row.public_id,
       location: `${row.road_name} · Slot ${row.slot_number}`,
       status,
@@ -243,8 +276,9 @@ router.get('/scan', authorize('Scan QR', 'v'), async (req: AuthedRequest, res) =
         },
         { label: 'Tickets in 6 months', value: String(row.tickets_6m) },
         { label: 'Road / slot', value: `${row.road_name} · ${row.slot_number}` },
+        { label: 'Latitude', value: lat || '—' },
+        { label: 'Longitude', value: lng || '—' },
       ],
-      openTicketId: row.open_ticket_id || null,
       deviceUuid: row.id,
       roadId: row.road_id,
     })

@@ -11,7 +11,7 @@ export function deriveDeviceStatus(args: {
     return 'Under repair'
   }
   if (args.assigneeId) return 'Under repair'
-  // Unassigned open/new
+  // Unassigned open ticket
   if (args.severity === 'Minor') return 'Working'
   return 'Not working'
 }

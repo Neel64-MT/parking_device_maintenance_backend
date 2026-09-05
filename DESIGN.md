@@ -82,7 +82,7 @@ All other roles: list/export/aggregate SQL adds
 
 Detail, updates, close-preview, close call `assertTicketAccess` after load (plus existing road/holder rules).
 
-**Assign exception:** `POST /api/tickets/:id/assign` uses `assertRoadAccess` only (not `assertTicketAccess`) so Control room can assign tickets they did not raise. List, detail, dashboard, devices, and work report remain visibility-scoped.
+**Assign exception:** `POST /api/tickets/:id/assign` uses `assertCanAssignTickets` (Control room / Admin / Project manager only) plus `assertRoadAccess` (not `assertTicketAccess`) so Control room can assign tickets they did not raise. Technicians cannot assign, reassign, or handover (`handoverToUserId` is rejected unless the caller can assign). List, detail, dashboard, devices, and work report remain visibility-scoped.
 
 Helpers live in `src/lib/ticket-access.ts` — single reusable rule reused by:
 
@@ -108,3 +108,57 @@ Approval remains `PATCH /api/users/:id` with `status: 'Active'` (and optional `r
 Project manager Users permission: `vce...` (view, create, edit). Roles & permissions stay view-only.
 
 No new signup-request table or approve endpoint.
+
+---
+
+# Design — QR Scan Payload & One-Open-Ticket Rule
+
+## Scan API
+
+Canonical endpoint: `GET /api/devices/scan?q={identifier}` (`authorize('Scan QR', 'v')`).
+
+Matches `public_id`, `qr_code`, or `slot_number` (case-insensitive). Applies road scope and ticket visibility on the open-ticket lateral / 6-month count.
+
+Canonical response fields (Phase 17): `deviceId`, `deviceName` (from `model`), `locationSite` (road name), `slot`, `currentStatus` (derived), `statusDate` (open ticket raised date when open, else installed date), `ticketsLast6Months`, `openTicketId`, `openTicketAge`, `openTicketIssue`, `latitude`, `longitude`.
+
+Legacy fields (`id`, `location`, `status`, `statusTone`, `facts`, `deviceUuid`, `roadId`) remain for older ScanQr clients.
+
+No `/api/devices/:id/scan-details` path — avoids conflict with `GET /:deviceId`.
+
+## Device coordinates
+
+`devices.latitude` / `devices.longitude` are TEXT (migration `001_init`). Seed populates Ahmedabad-area dummy strings. Create/PATCH accept optional string coords.
+
+## One open ticket
+
+Before insert on `POST /api/tickets`, query non-`Closed` tickets for the device. If any exist → `ApiError(409, ..., 'OPEN_TICKET_EXISTS', { ticketId, openTicketId })`.
+
+Frontend should redirect to `openTicketId` instead of creating another ticket.
+
+---
+
+# Design — Ticket Status (Open, not New)
+
+## Stored statuses
+
+Exactly four values on `tickets.status`:
+
+| Status | Written by |
+|--------|------------|
+| `Open` | `POST /api/tickets` when `assigneeId` is omitted |
+| `Under repair` | Raise with assignee; `POST /:id/assign`; most site updates |
+| `Waiting for spare` | Site update `updateType === 'Waiting for spare'` |
+| `Closed` | `POST /:id/close` |
+
+There is no `New` status. Schema default is already `Open` (`001_init`). Migration `007_ticket_status_open.sql` updates any remaining `New` rows.
+
+## “Open” vs “open ticket”
+
+- Status **`Open`**: unassigned, newly raised.
+- **Open ticket** (one-per-device / dashboard overlays): any ticket with `status <> 'Closed'` (`Open`, `Under repair`, or `Waiting for spare`).
+
+## List UI
+
+The tickets list tab query `tab=new` still means “unassigned / not yet attended”. That tab key is not a stored status. Badges must render `Open`.
+
+**FRONTEND CHANGE REQUIRED:** replace `New` badges with `Open`.

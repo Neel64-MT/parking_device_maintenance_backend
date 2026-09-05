@@ -11,8 +11,12 @@
 - Soft-inactivate users; never hard-delete (ticket history must remain readable).
 - Soft-deactivate issue sub-categories that have been used on tickets; hard-delete only when unused.
 - Derive device operational status from open tickets after go-live (do not trust client status for runtime).
-- One open ticket per device; closed ticket within 7 days reopens the same ticket.
-- Only the current ticket holder may update or close; handover transfers that right.
+- One open ticket per device (`status <> 'Closed'`); closed ticket within 7 days reopens the same ticket.
+- Ticket `status` is one of `Open`, `Under repair`, `Waiting for spare`, `Closed`. Never persist `New`; unassigned raise uses `Open`.
+- Duplicate raise must return `409` / `OPEN_TICKET_EXISTS` with `details.openTicketId` (and `ticketId`) for UI redirect — never create a second open ticket.
+- QR scan details use `GET /api/devices/scan?q=` (do not invent a second `/scan-details` route that fights `/:deviceId`).
+- Device `latitude` / `longitude` are optional TEXT; seed and create/PATCH may set them.
+- Only the current ticket holder may update or close. Assign / reassign is Control room, Admin, or Project manager only — technicians cannot handover.
 - Admin and Project manager retain city-wide ticket visibility; other roles only see tickets they raised or are assigned to (SQL + detail asserts).
 - Apply the same ticket visibility helper to dashboard metrics, device ticket overlays/history, and work report rows — do not duplicate Admin/PM branches per route.
 - Backend authorization is mandatory; frontend filtering is not a security boundary.
@@ -57,8 +61,9 @@
 
 - Technician / Site attendant / Control room / AMC officer: ticket list/detail/export, dashboard ticket stats, device open-ticket overlays/history, and work report ticket rows limited to `assignee_id = me OR raised_by_user_id = me` (plus road scope when `assigned_roads`).
 - Admin / Project manager: city-wide ticket visibility (road scope still `all_roads`).
-- Technician: no Work report cost visibility when matrix denies Work report.
+- Technician: no Work report cost visibility when matrix denies Work report. Cannot assign or reassign (`All tickets` has no `a`); cannot send `handoverToUserId`.
 - Site attendant: raise + scan on assigned roads; cannot assign/close.
+- Assign / reassign: Control room, Admin, or Project manager only (`assertCanAssignTickets`). Technicians cannot use `/assign` or `handoverToUserId`.
 - Control room: raise/assign; cannot close; list/dashboard visibility is assignee/raiser only; assign uses road access so CR can route tickets they did not raise.
 - AMC officer: view only.
 - Project manager: Users `vce...` — can approve Pending signups and edit users; Roles matrix remains view-only.

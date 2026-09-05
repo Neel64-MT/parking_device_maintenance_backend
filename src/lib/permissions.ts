@@ -78,13 +78,13 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     },
   },
   Technician: {
-    note: 'Sees only devices and tickets on assigned roads, and tickets they hold.',
+    note: 'Sees only devices and tickets on assigned roads, and tickets they hold. Cannot assign or reassign.',
     scope: 'assigned_roads',
     p: {
       Dashboard: '......',
       'Raise ticket': 'vc....',
       'Update ticket': 'vce.x.',
-      'All tickets': 'v..a..',
+      'All tickets': 'v.....',
       'Work report': '......',
       'Device list': 'v.....',
       'Add device': '......',

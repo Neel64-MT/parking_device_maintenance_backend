@@ -72,6 +72,39 @@ async function main() {
     console.log('OK', path)
   }
 
+  // Ensure seeded coords exist for scan shape check (idempotent if seed already ran)
+  await query(
+    `UPDATE devices SET
+       latitude = COALESCE(latitude, '23.079200'),
+       longitude = COALESCE(longitude, '72.497500')
+     WHERE public_id = 'PD-0428'`,
+  )
+  const scan = await call('/api/devices/scan?q=PD-0428', { headers: auth })
+  assert(scan.status === 200 && scan.body.success, 'scan recheck failed')
+  const scanData = scan.body.data as Record<string, unknown>
+  for (const key of [
+    'deviceId',
+    'deviceName',
+    'locationSite',
+    'slot',
+    'currentStatus',
+    'statusDate',
+    'ticketsLast6Months',
+    'openTicketId',
+    'openTicketAge',
+    'openTicketIssue',
+    'latitude',
+    'longitude',
+  ]) {
+    assert(key in scanData, `scan missing field ${key}`)
+  }
+  assert(scanData.deviceId === 'PD-0428', 'scan deviceId mismatch')
+  assert(typeof scanData.latitude === 'string' && scanData.latitude, 'scan latitude required')
+  assert(typeof scanData.longitude === 'string' && scanData.longitude, 'scan longitude required')
+  assert(scanData.openTicketId === 'TK-1042', 'PD-0428 should have open TK-1042')
+  assert(typeof scanData.openTicketAge === 'string' && scanData.openTicketAge, 'openTicketAge required when open')
+  console.log('OK scan canonical payload')
+
   const bad = await call('/api/auth/login', {
     method: 'POST',
     body: JSON.stringify({ identifier: 'abc', password: 'x' }),
@@ -434,6 +467,22 @@ async function main() {
   assert(pmDetail.status === 200, 'PM must still open any ticket')
   console.log('OK PM city-wide ticket access')
 
+  // Site attendant sees tickets they raised even when the device road is outside their assignment
+  const attendantLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9016374408', password: 'Password123' }),
+  })
+  assert(attendantLogin.status === 200 && attendantLogin.body.data?.token, 'site attendant login failed')
+  const attendantAuth = { Authorization: `Bearer ${attendantLogin.body.data.token as string}` }
+  const attendantTickets = await call('/api/tickets?tab=new', { headers: attendantAuth })
+  assert(attendantTickets.status === 200, 'site attendant ticket list failed')
+  const attendantIds = (attendantTickets.body.data || []).map((t: { id: string }) => t.id)
+  assert(attendantIds.includes('TK-1099'), 'raiser must see Open ticket on a non-assigned road (TK-1099)')
+  assert(attendantIds.includes('TK-1101'), 'raiser must see own Science City Open ticket (TK-1101)')
+  const attendantDetail = await call('/api/tickets/TK-1099', { headers: attendantAuth })
+  assert(attendantDetail.status === 200, 'raiser must open own ticket detail on non-assigned road')
+  console.log('OK site attendant sees tickets they raised across roads')
+
   // Control room can assign a ticket they did not raise (road access only)
   const crLogin = await call('/api/auth/login', {
     method: 'POST',
@@ -459,6 +508,28 @@ async function main() {
     `control room assign must succeed: ${assignOpen.status} ${JSON.stringify(assignOpen.body)}`,
   )
   console.log('OK control room assign without ownership')
+
+  const techAssign = await call('/api/tickets/TK-1078/assign', {
+    method: 'POST',
+    headers: techAuth,
+    body: JSON.stringify({ assigneeId: techAssignee.id, reason: 'tech must not assign' }),
+  })
+  assert(techAssign.status === 403, 'technician must not assign or reassign')
+  console.log('OK tech cannot assign')
+
+  const otherTech = techUsers.body.data.find((u: { name: string }) => u.name === 'Jignesh Solanki')
+  assert(otherTech?.id, 'need another technician for handover test')
+  const techHandover = await call('/api/tickets/TK-1042/updates', {
+    method: 'POST',
+    headers: techAuth,
+    body: JSON.stringify({
+      updateType: 'Site visit — not resolved',
+      workDone: 'Handover attempt',
+      handoverToUserId: otherTech.id,
+    }),
+  })
+  assert(techHandover.status === 403, 'technician must not handover/reassign on update')
+  console.log('OK tech cannot handover')
 
   // Control room has Dashboard v but is not Admin/PM — openTickets must respect visibility
   const crDash = await call('/api/dashboard', { headers: crAuth })

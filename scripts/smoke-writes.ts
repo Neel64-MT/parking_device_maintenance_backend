@@ -178,6 +178,10 @@ async function main() {
     }),
   })
   assert(dup.status === 409 && dup.body.code === 'OPEN_TICKET_EXISTS', 'expected OPEN_TICKET_EXISTS')
+  assert(
+    dup.body.details?.openTicketId && dup.body.details?.ticketId,
+    'OPEN_TICKET_EXISTS must include openTicketId and ticketId',
+  )
   console.log('OK one-open-ticket rule')
 
   // Issues: create unused subcategory, hard-delete OK; used subcategory → deactivate-only

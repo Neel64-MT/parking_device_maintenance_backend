@@ -5,17 +5,23 @@
 - Phase 0–11 — foundation through forgot-password / password_version
 - Phase 12 — Ticket visibility (assignee/raiser) + Project manager Users `vce...` for signup approval
 - Phase 13 — Role-based ticket scope consistency: dashboard (already), devices open-ticket/history, work report reuse `ticket-access.ts`
+- Phase 17 — QR scan canonical payload + seed lat/lng + `OPEN_TICKET_EXISTS.openTicketId`
+- Phase 18 — Ticket status `New` removed; unassigned tickets use `Open` (`007_ticket_status_open.sql`)
+- Phase 19 — Assign/reassign restricted to Control room, Admin, Project manager (no technician handover)
 
 ## Currently Working On
 
-- (idle — ticket scope consistency complete)
+- (idle — assign/reassign role lock complete)
 
 ## Pending
 
 ### FRONTEND CHANGE REQUIRED (do not implement until authorized)
 
 - Feature screens still on mocks / partial wiring
+- Wire Scan QR to `GET /api/devices/scan?q=`; on raise `409 OPEN_TICKET_EXISTS` redirect via `details.openTicketId`
 - When wiring Dashboard / All Tickets / Devices / Work report, trust API ticket scope — no client-side role filters
+- All Tickets / detail status badge: show `Open`, never `New`
+- Hide technician reassign / handover; only Control room, Admin, Project manager assign
 - Signup success copy: “Admin” → “Admin or Project manager” (optional; API already unlocks Approve for PM)
 
 ## Important Decisions
@@ -23,7 +29,12 @@
 - Ticket visibility privileged roles: only `Admin` and `Project manager`
 - Other roles: `assignee_id = me OR raised_by_user_id = me` in SQL + `assertTicketAccess`
 - Same helper scopes dashboard ticket metrics, device ticket overlays/history, and work report rows
+- Assign / reassign: Control room, Admin, or Project manager only; technicians cannot `/assign` or `handoverToUserId`
 - Assign stays road-only (`assertRoadAccess`) for Control room routing; list/detail/dashboard/devices/reports stay visibility-scoped
+- Scan details stay on `GET /api/devices/scan?q=` (no `/scan-details` alias)
+- One open ticket per device means `status <> 'Closed'`; unassigned stored status is `Open` (not `New`)
+- Duplicate raise 409 includes both `ticketId` and `openTicketId`
+- Device lat/lng are TEXT strings; seed includes Ahmedabad-area dummies
 - PM Users permission: `vce...` (approve Pending via existing PATCH); Roles matrix remains view-only
 - No separate signup-request table
 - Control room is scoped like other non-privileged roles for viewing (per product requirement)

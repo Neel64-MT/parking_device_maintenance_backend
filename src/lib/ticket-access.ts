@@ -19,7 +19,8 @@ export function appendTicketVisibilitySql(user: AuthUser, params: unknown[]): st
 
 /**
  * Enforce ticket visibility on detail/mutation paths.
- * Also applies existing road scope for assigned_roads roles.
+ * Raiser and assignee always have access (even outside assigned roads).
+ * Admin / Project manager keep city-wide access.
  */
 export function assertTicketAccess(
   user: AuthUser,
@@ -29,8 +30,27 @@ export function assertTicketAccess(
     raised_by_user_id: string | null
   },
 ) {
-  assertRoadAccess(user, ticket.road_id)
   if (isTicketPrivilegedRole(user)) return
   if (ticket.assignee_id === user.id || ticket.raised_by_user_id === user.id) return
+  assertRoadAccess(user, ticket.road_id)
   throw new ApiError(403, 'Forbidden', 'FORBIDDEN')
+}
+
+/** Assign / reassign: Control room, Admin, or Project manager only. Technicians cannot. */
+export function canAssignTickets(user: AuthUser) {
+  return (
+    user.roleName === 'Admin' ||
+    user.roleName === 'Project manager' ||
+    user.roleName === 'Control room'
+  )
+}
+
+export function assertCanAssignTickets(user: AuthUser) {
+  if (!canAssignTickets(user)) {
+    throw new ApiError(
+      403,
+      'Only Control room, Admin, or Project manager can assign tickets',
+      'FORBIDDEN',
+    )
+  }
 }

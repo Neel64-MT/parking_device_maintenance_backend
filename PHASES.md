@@ -119,3 +119,53 @@
 **Testing:** smoke covers tech device open-ticket leak, CR dashboard + work report scoping, existing ticket visibility + CR assign
 
 **Done when:** smoke passes; docs match implementation; frontend remaining as FRONTEND CHANGE REQUIRED only
+
+## Phase 17 — QR Scan Payload & One-Open-Ticket Hardening
+
+**Status:** Complete
+
+**Objective:** Finalize scan-details contract for frontend QR flow; ensure seed lat/lng; surface `openTicketId` on duplicate-raise 409.
+
+**APIs:**
+- `GET /api/devices/scan?q=` — canonical fields (`deviceId`, `deviceName`, `locationSite`, `slot`, `currentStatus`, `statusDate`, `ticketsLast6Months`, open-ticket fields, `latitude`, `longitude`) + legacy shape
+- `POST /api/tickets` — already enforces one open ticket; details now include `openTicketId` and `ticketId`
+
+**Database:** no new migration (`latitude`/`longitude` already TEXT); seed updated
+
+**Files:** `src/db/seed.ts`, `src/routes/devices.ts`, `src/routes/tickets.ts`, smoke scripts, docs
+
+**Testing:** `npm run test:smoke` (scan canonical payload); `npm run test:smoke:writes` (OPEN_TICKET_EXISTS + openTicketId)
+
+**Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED for Scan QR wiring only
+
+## Phase 18 — Ticket Status Open (drop New)
+
+**Status:** Complete
+
+**Objective:** Align stored ticket status with the UI `Open` badge. Unassigned tickets must not use `New`.
+
+**Statuses:** `Open` · `Under repair` · `Waiting for spare` · `Closed`
+
+**APIs:** `POST /api/tickets` writes `Open` when no assignee; list tab `new` still means unassigned/`Open`
+
+**Database:** migration `007_ticket_status_open.sql` (`UPDATE tickets SET status = 'Open' WHERE status = 'New'`)
+
+**Files:** `src/routes/tickets.ts`, `src/db/seed.ts`, `src/lib/device-status.ts`, docs
+
+**Done when:** docs match implementation; UI wiring of badge text remains FRONTEND CHANGE REQUIRED
+
+## Phase 19 — Assign / Reassign Roles
+
+**Status:** Complete
+
+**Objective:** Technicians must not reassign or handover tickets. Only Control room, Admin, and Project manager may change the assignee.
+
+**APIs:** `POST /api/tickets/:id/assign` + `handoverToUserId` on updates both call `assertCanAssignTickets`
+
+**Database:** migration `008_tech_cannot_assign.sql` (Technician All tickets `can_assign = false`)
+
+**Files:** `src/lib/ticket-access.ts`, `src/lib/permissions.ts`, `src/routes/tickets.ts`, smoke, docs
+
+**Testing:** smoke — Control room assign still works; technician assign and handover return 403
+
+**Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED to hide technician handover UI
