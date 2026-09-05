@@ -30,7 +30,12 @@ function initialsFromName(name: string) {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
 }
 
-export async function loadAuthUser(userId: string, jti: string, exp: number): Promise<AuthUser> {
+export async function loadAuthUser(
+  userId: string,
+  jti: string,
+  exp: number,
+  tokenPv?: number,
+): Promise<AuthUser> {
   const userResult = await query<{
     id: string
     full_name: string
@@ -40,8 +45,10 @@ export async function loadAuthUser(userId: string, jti: string, exp: number): Pr
     role_id: string
     role_name: string
     scope: RoadScope
+    password_version: number
   }>(
     `SELECT u.id, u.full_name, u.email, u.mobile, u.status, u.role_id,
+            COALESCE(u.password_version, 0) AS password_version,
             r.name AS role_name, r.scope
      FROM users u
      JOIN roles r ON r.id = u.role_id
@@ -51,6 +58,9 @@ export async function loadAuthUser(userId: string, jti: string, exp: number): Pr
   const row = userResult.rows[0]
   if (!row) throw new ApiError(401, 'Unauthorized', 'UNAUTHORIZED')
   if (row.status !== 'Active') throw new ApiError(403, 'Account is inactive', 'INACTIVE')
+  if (tokenPv == null || tokenPv !== row.password_version) {
+    throw new ApiError(401, 'Unauthorized', 'UNAUTHORIZED')
+  }
 
   const roads = await query<{ road_id: string; name: string }>(
     `SELECT ur.road_id, rd.name
@@ -107,7 +117,7 @@ export async function requireAuth(req: AuthedRequest, res: Response, next: NextF
       throw new ApiError(401, 'Unauthorized', 'UNAUTHORIZED')
     }
     const token = header.slice(7)
-    let payload: { sub: string; jti: string; exp: number }
+    let payload: { sub: string; jti: string; exp: number; iat: number; pv?: number }
     try {
       payload = verifyAccessToken(token)
     } catch {
@@ -116,7 +126,7 @@ export async function requireAuth(req: AuthedRequest, res: Response, next: NextF
     if (await isTokenDenied(payload.jti)) {
       throw new ApiError(401, 'Unauthorized', 'UNAUTHORIZED')
     }
-    req.user = await loadAuthUser(payload.sub, payload.jti, payload.exp)
+    req.user = await loadAuthUser(payload.sub, payload.jti, payload.exp, payload.pv ?? 0)
     await query('UPDATE users SET last_active_at = NOW() WHERE id = $1', [req.user.id])
     next()
   } catch (error) {

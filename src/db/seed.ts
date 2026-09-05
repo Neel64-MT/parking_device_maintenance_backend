@@ -10,7 +10,7 @@ function emailFromName(name: string) {
     .normalize('NFKD')
     .replace(/[^a-z0-9]+/g, '.')
     .replace(/^\.+|\.+$/g, '')
-  return `${slug}@pdm.local`
+  return `${slug}@yopmail.com`
 }
 
 const ISSUE_MASTER = [
@@ -220,7 +220,7 @@ async function seed() {
   console.log('Seeding…')
 
   // Clear in dependency order
-  await query('TRUNCATE ticket_assignments, ticket_events, tickets, devices, user_roads, users, role_permissions, roles, issue_subcategories, issue_categories, parts, roads, token_denylist, id_counters RESTART IDENTITY CASCADE')
+  await query('TRUNCATE ticket_assignments, ticket_events, tickets, devices, user_roads, password_reset_tokens, users, role_permissions, roles, issue_subcategories, issue_categories, parts, roads, token_denylist, id_counters RESTART IDENTITY CASCADE')
 
   const roleIds: Record<string, string> = {}
   for (const [name, def] of Object.entries(DEFAULT_ROLE_PERMS)) {
@@ -560,7 +560,7 @@ async function seed() {
   }
 
   console.log('Seed complete')
-  console.log(`Demo login: 9825012345 or alkesh.patel@pdm.local / ${DEMO_PASSWORD}`)
+  console.log(`Demo login: 9825012345 or alkesh.patel@yopmail.com / ${DEMO_PASSWORD}`)
   await closeDb()
 }
 

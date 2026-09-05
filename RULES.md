@@ -7,7 +7,7 @@
 - Validate **body, params, and query** with Zod on every endpoint.
 - Enforce **authorization server-side** via `authorize(screen, flag)` plus road scope and ticket holder checks.
 - Store secrets only in environment variables (`.env` / `.env.local`).
-- Never return passwords, password hashes, JWT secrets, or stack traces to clients.
+- Never return passwords, password hashes, JWT secrets, raw reset tokens, or stack traces to clients.
 - Soft-inactivate users; never hard-delete (ticket history must remain readable).
 - Soft-deactivate issue sub-categories that have been used on tickets; hard-delete only when unused.
 - Derive device operational status from open tickets after go-live (do not trust client status for runtime).
@@ -15,6 +15,11 @@
 - Only the current ticket holder may update or close; handover transfers that right.
 - Keep the sibling `frontend/` directory **read-only** — document needed UI wiring as FRONTEND CHANGE REQUIRED.
 - Update `MEMORY.md` / `PHASES.md` after each meaningful phase.
+- Forgot-password responses must not reveal whether an account exists.
+- Reset tokens must expire, be one-time-use, and be stored hashed only.
+- Admin password changes require server-side `authorize('Users', 'e')`; reuse existing user PATCH.
+- Reuse existing auth hashing, Zod password rules, and JWT middleware; avoid duplicate auth stacks.
+- Do not modify unrelated working login/logout flows except where password-reset/session invalidation requires it.
 
 ## What to avoid
 

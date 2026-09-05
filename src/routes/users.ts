@@ -4,7 +4,14 @@ import { ApiError, handleApiError } from '../lib/api-error.js'
 import { created, ok } from '../lib/respond.js'
 import { query } from '../db/pool.js'
 import { authorize, requireAuth, type AuthedRequest } from '../middleware/auth.js'
-import { hashPassword, normalizeEmail, normalizeMobile, omitPasswordHash } from '../lib/auth.js'
+import {
+  hashPassword,
+  markPasswordChanged,
+  normalizeEmail,
+  normalizeMobile,
+  omitPasswordHash,
+  passwordSchema,
+} from '../lib/auth.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -12,14 +19,25 @@ router.use(requireAuth)
 router.get('/', authorize('Users', 'v'), async (req: AuthedRequest, res) => {
   try {
     const q = String(req.query.q || '').trim().toLowerCase()
+    const statusFilter = String(req.query.status || '').trim()
     const params: unknown[] = []
-    let where = ''
+    const clauses: string[] = []
+
     if (q) {
       params.push(`%${q}%`)
-      where = `WHERE LOWER(u.full_name) LIKE $1 OR u.mobile LIKE $1 OR LOWER(COALESCE(u.email, '')) LIKE $1 OR LOWER(r.name) LIKE $1`
+      clauses.push(
+        `(LOWER(u.full_name) LIKE $${params.length} OR u.mobile LIKE $${params.length} OR LOWER(COALESCE(u.email, '')) LIKE $${params.length} OR LOWER(r.name) LIKE $${params.length})`,
+      )
     }
+    if (statusFilter === 'Active' || statusFilter === 'Inactive' || statusFilter === 'Pending') {
+      params.push(statusFilter)
+      clauses.push(`u.status = $${params.length}`)
+    }
+
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
     const result = await query(
-      `SELECT u.id, u.full_name, u.email, u.mobile, u.status, u.last_active_at, r.name AS role,
+      `SELECT u.id, u.full_name, u.email, u.mobile, u.status, u.last_active_at, u.role_id,
+              r.name AS role,
               COALESCE(string_agg(DISTINCT rd.name, ', ' ORDER BY rd.name), 'All roads') AS roads,
               (
                 SELECT COUNT(*)::int FROM tickets t
@@ -30,28 +48,28 @@ router.get('/', authorize('Users', 'v'), async (req: AuthedRequest, res) => {
        LEFT JOIN user_roads ur ON ur.user_id = u.id
        LEFT JOIN roads rd ON rd.id = ur.road_id
        ${where}
-       GROUP BY u.id, u.full_name, u.email, u.mobile, u.status, u.last_active_at, r.name
-       ORDER BY u.full_name`,
+       GROUP BY u.id, u.full_name, u.email, u.mobile, u.status, u.last_active_at, u.role_id, r.name
+       ORDER BY CASE u.status WHEN 'Pending' THEN 0 WHEN 'Active' THEN 1 ELSE 2 END, u.full_name`,
       params,
     )
 
     const tiles = await query(`
       SELECT
         COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE u.status = 'Pending')::int AS pending,
         COUNT(*) FILTER (WHERE r.name = 'Technician')::int AS technicians,
         COUNT(*) FILTER (WHERE r.name = 'Site attendant')::int AS attendants,
-        COUNT(*) FILTER (WHERE r.name = 'Control room')::int AS control_room,
-        COUNT(*) FILTER (WHERE r.name = 'AMC officer')::int AS amc
+        COUNT(*) FILTER (WHERE r.name = 'Control room')::int AS control_room
       FROM users u JOIN roles r ON r.id = u.role_id
     `)
 
     return ok(res, {
       tiles: [
         { value: String(tiles.rows[0].total), label: 'Total users' },
+        { value: String(tiles.rows[0].pending), label: 'Pending approval' },
         { value: String(tiles.rows[0].technicians), label: 'Technicians' },
         { value: String(tiles.rows[0].attendants), label: 'Site attendants' },
         { value: String(tiles.rows[0].control_room), label: 'Control room' },
-        { value: String(tiles.rows[0].amc), label: 'AMC officer' },
       ],
       users: result.rows.map((row) => ({
         id: row.id,
@@ -60,12 +78,14 @@ router.get('/', authorize('Users', 'v'), async (req: AuthedRequest, res) => {
         email: row.email,
         mobile: row.mobile,
         role: row.role,
+        roleId: row.role_id,
         roads: row.roads,
         openTickets: row.open_tickets || null,
         openBad: Number(row.open_tickets) >= 5,
         lastActive: row.last_active_at,
         status: row.status,
-        statusTone: row.status === 'Active' ? 'ok' : 'grey',
+        statusTone:
+          row.status === 'Active' ? 'ok' : row.status === 'Pending' ? 'warn' : 'grey',
       })),
     })
   } catch (error) {
@@ -77,10 +97,10 @@ const userBody = z.object({
   fullName: z.string().min(2),
   mobile: z.string().min(10),
   email: z.union([z.string().email(), z.literal('')]).optional(),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
+  password: passwordSchema,
   roleId: z.string().uuid(),
   roadIds: z.array(z.string().uuid()).default([]),
-  status: z.enum(['Active', 'Inactive']).optional(),
+  status: z.enum(['Active', 'Inactive', 'Pending']).optional(),
 })
 
 function emailOrNull(email?: string) {
@@ -156,6 +176,10 @@ router.patch('/:id', authorize('Users', 'e'), async (req, res) => {
         body.email !== undefined,
       ],
     )
+
+    if (body.password) {
+      await markPasswordChanged(req.params.id)
+    }
 
     if (body.roadIds) {
       await query('DELETE FROM user_roads WHERE user_id = $1', [req.params.id])
