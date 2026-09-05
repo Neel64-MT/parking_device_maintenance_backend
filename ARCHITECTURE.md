@@ -111,3 +111,41 @@ Admin
 | Helpers | `src/lib/auth.ts` (hash/reset tokens/`pv`), `src/lib/mail.ts` |
 | DB | `password_reset_tokens`, `users.password_changed_at`, `users.password_version` |
 | Design | `DESIGN.md` |
+
+## Ticket visibility
+
+```text
+Admin / Project manager
+  → all tickets (all_roads)
+
+Other roles
+  → SQL: assignee_id = me OR raised_by_user_id = me
+  → Detail/update/close: assertTicketAccess
+  → Assign: assertRoadAccess only (Control room routing exception)
+```
+
+Single helper: [`src/lib/ticket-access.ts`](src/lib/ticket-access.ts) (`appendTicketVisibilitySql`, `assertTicketAccess`).
+
+Consumed by:
+
+| Area | Route file |
+|------|------------|
+| Ticket list / export / detail / mutations | [`src/routes/tickets.ts`](src/routes/tickets.ts) |
+| Dashboard fleet overlay, down reasons, open list, open-over-3 | [`src/routes/dashboard.ts`](src/routes/dashboard.ts) |
+| Device list / export / scan open ticket + 6m counts; device history tickets/parts/fail ranks | [`src/routes/devices.ts`](src/routes/devices.ts) |
+| Work report + CSV export | [`src/routes/reports.ts`](src/routes/reports.ts) |
+
+Road/user/issue-master aggregate catalogs stay city-wide admin metrics (not personal ticket scope).
+
+**FRONTEND CHANGE REQUIRED:** when Dashboard / All Tickets / Device screens leave mocks, trust API scope — do not re-filter by role in the browser.
+
+## Signup approval
+
+```text
+POST /api/auth/signup → status Pending
+Admin or Project manager (Users v/c/e)
+  → GET /api/users?status=Pending
+  → PATCH /api/users/:id { status: Active, roleId, ... }
+```
+
+Project manager Users permission: `vce...` (migration `006_pm_users_edit.sql`).

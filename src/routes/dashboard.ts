@@ -5,6 +5,7 @@ import { ok } from '../lib/respond.js'
 import { query } from '../db/pool.js'
 import { authorize, requireAuth, type AuthedRequest } from '../middleware/auth.js'
 import { deriveDeviceStatus } from '../lib/device-status.js'
+import { appendTicketVisibilitySql } from '../lib/ticket-access.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -26,6 +27,9 @@ router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => 
       roadFilter = `AND r.name = $${params.length}`
     }
 
+    const visibility = appendTicketVisibilitySql(req.user!, params)
+    const visFilter = visibility ? `AND ${visibility}` : ''
+
     const devices = await query(
       `SELECT d.id, d.road_id, r.name AS road_name, r.stretch_from, r.stretch_to,
               ot.status AS open_status, ot.assignee_id,
@@ -34,6 +38,7 @@ router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => 
        JOIN roads r ON r.id = d.road_id
        LEFT JOIN LATERAL (
          SELECT * FROM tickets t WHERE t.device_id = d.id AND t.status <> 'Closed'
+         ${visFilter}
          ORDER BY t.raised_at DESC LIMIT 1
        ) ot ON TRUE
        LEFT JOIN issue_subcategories fs ON fs.id = ot.found_subcategory_id
@@ -69,7 +74,7 @@ router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => 
        LEFT JOIN issue_categories fc ON fc.id = t.found_category_id
        LEFT JOIN issue_subcategories rs ON rs.id = t.reported_subcategory_id
        LEFT JOIN issue_categories rc ON rc.id = t.reported_category_id
-       WHERE t.status <> 'Closed' ${roadFilter}
+       WHERE t.status <> 'Closed' ${roadFilter} ${visFilter}
        GROUP BY 1, 2
        ORDER BY n DESC
        LIMIT 10`,
@@ -123,7 +128,7 @@ router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => 
        LEFT JOIN users au ON au.id = t.assignee_id
        LEFT JOIN issue_subcategories rs ON rs.id = COALESCE(t.found_subcategory_id, t.reported_subcategory_id)
        LEFT JOIN issue_categories rc ON rc.id = COALESCE(t.found_category_id, t.reported_category_id)
-       WHERE t.status <> 'Closed' ${roadFilter}
+       WHERE t.status <> 'Closed' ${roadFilter} ${visFilter}
        ORDER BY t.raised_at ASC
        LIMIT 8`,
       params,
@@ -133,7 +138,8 @@ router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => 
       `SELECT COUNT(*)::int AS n FROM tickets t
        JOIN devices d ON d.id = t.device_id
        JOIN roads r ON r.id = d.road_id
-       WHERE t.status <> 'Closed' AND t.raised_at < NOW() - INTERVAL '3 days' ${roadFilter}`,
+       WHERE t.status <> 'Closed' AND t.raised_at < NOW() - INTERVAL '3 days'
+         ${roadFilter} ${visFilter}`,
       params,
     )
 

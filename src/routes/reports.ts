@@ -4,6 +4,7 @@ import { handleApiError } from '../lib/api-error.js'
 import { ok } from '../lib/respond.js'
 import { query } from '../db/pool.js'
 import { authorize, hasPermission, requireAuth, type AuthedRequest } from '../middleware/auth.js'
+import { appendTicketVisibilitySql } from '../lib/ticket-access.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -39,6 +40,9 @@ router.get('/work', authorize('Work report', 'v'), async (req: AuthedRequest, re
       params.push(filters.road)
       where.push(`r.name = $${params.length}`)
     }
+
+    const visibility = appendTicketVisibilitySql(req.user!, params)
+    if (visibility) where.push(visibility)
 
     const events = await query(
       `SELECT e.*, u.id AS user_id, u.full_name, r.name AS role_name,
@@ -143,14 +147,19 @@ router.get('/work', authorize('Work report', 'v'), async (req: AuthedRequest, re
 
 router.get('/work/export', authorize('Work report', 'v'), async (req: AuthedRequest, res) => {
   try {
-    // Reuse same filters lightly
+    const params: unknown[] = []
+    const visibility = appendTicketVisibilitySql(req.user!, params)
+    const visFilter = visibility ? `WHERE ${visibility}` : ''
+
     const result = await query(
       `SELECT u.full_name, t.public_id, e.event_type, e.cost, e.created_at
        FROM ticket_events e
        JOIN users u ON u.id = e.actor_user_id
        JOIN tickets t ON t.id = e.ticket_id
+       ${visFilter}
        ORDER BY e.created_at DESC
        LIMIT 5000`,
+      params,
     )
     const header = 'Person,Ticket,Event,Cost,When\n'
     const lines = result.rows.map(

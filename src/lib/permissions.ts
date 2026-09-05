@@ -40,7 +40,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     },
   },
   'Project manager': {
-    note: 'Everything except creating users and deleting masters.',
+    note: 'City-wide ops; can manage users and approve signups; cannot delete masters.',
     scope: 'all_roads',
     p: {
       Dashboard: 'v.....',
@@ -54,7 +54,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
       'Scan QR': 'v.....',
       'Issue master': 'vce...',
       'Road master': 'vce...',
-      Users: 'v.....',
+      Users: 'vce...',
       'Roles & permissions': 'v.....',
     },
   },

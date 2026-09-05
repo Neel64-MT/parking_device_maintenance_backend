@@ -8,10 +8,12 @@ import {
   assertRoadAccess,
   authorize,
   requireAuth,
+  type AuthUser,
   type AuthedRequest,
 } from '../middleware/auth.js'
 import { nextPublicId, qrFromDeviceId } from '../lib/ids.js'
 import { deriveDeviceStatus, statusTone } from '../lib/device-status.js'
+import { appendTicketVisibilitySql } from '../lib/ticket-access.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -25,7 +27,11 @@ const listSchema = z.object({
   limit: z.coerce.number().int().positive().max(200).default(50),
 })
 
-async function deviceListQuery(filters: z.infer<typeof listSchema>, roadIds?: string[]) {
+async function deviceListQuery(
+  filters: z.infer<typeof listSchema>,
+  user: AuthUser,
+  roadIds?: string[],
+) {
   const params: unknown[] = []
   const where: string[] = []
 
@@ -44,6 +50,9 @@ async function deviceListQuery(filters: z.infer<typeof listSchema>, roadIds?: st
     where.push(`r.name = $${params.length}`)
   }
 
+  const visibility = appendTicketVisibilitySql(user, params)
+  const visFilter = visibility ? `AND ${visibility}` : ''
+
   const sql = `
     SELECT d.*, r.name AS road_name,
       ot.public_id AS open_ticket_id,
@@ -53,14 +62,16 @@ async function deviceListQuery(filters: z.infer<typeof listSchema>, roadIds?: st
       COALESCE(fs.name, rs.name) AS issue_name,
       COALESCE(fs.severity, rs.severity) AS severity,
       (
-        SELECT COUNT(*)::int FROM tickets t2
-        WHERE t2.device_id = d.id AND t2.raised_at >= NOW() - INTERVAL '6 months'
+        SELECT COUNT(*)::int FROM tickets t
+        WHERE t.device_id = d.id AND t.raised_at >= NOW() - INTERVAL '6 months'
+        ${visFilter}
       ) AS tickets_6m
     FROM devices d
     JOIN roads r ON r.id = d.road_id
     LEFT JOIN LATERAL (
       SELECT t.* FROM tickets t
       WHERE t.device_id = d.id AND t.status NOT IN ('Closed')
+      ${visFilter}
       ORDER BY t.raised_at DESC LIMIT 1
     ) ot ON TRUE
     LEFT JOIN issue_subcategories fs ON fs.id = ot.found_subcategory_id
@@ -76,7 +87,7 @@ router.get('/', authorize('Device list', 'v'), async (req: AuthedRequest, res) =
     const filters = listSchema.parse(req.query)
     const scoped =
       req.user!.scope === 'assigned_roads' ? req.user!.roadIds : undefined
-    const result = await deviceListQuery(filters, scoped)
+    const result = await deviceListQuery(filters, req.user!, scoped)
 
     let rows = result.rows.map((row) => {
       const status = deriveDeviceStatus({
@@ -148,7 +159,7 @@ router.get('/export', authorize('Device list', 'v'), async (req: AuthedRequest, 
     const filters = listSchema.parse(req.query)
     const scoped =
       req.user!.scope === 'assigned_roads' ? req.user!.roadIds : undefined
-    const result = await deviceListQuery(filters, scoped)
+    const result = await deviceListQuery(filters, req.user!, scoped)
     const header = 'Device ID,QR,Road,Slot,Status,Tickets6m\n'
     const lines = result.rows.map((r) => {
       const status = deriveDeviceStatus({
@@ -184,23 +195,30 @@ router.get('/scan', authorize('Scan QR', 'v'), async (req: AuthedRequest, res) =
     const q = String(req.query.q || '').trim().toUpperCase()
     if (!q) throw new ApiError(400, 'Query is required', 'VALIDATION_ERROR')
 
+    const params: unknown[] = [q]
+    const visibility = appendTicketVisibilitySql(req.user!, params)
+    const visFilter = visibility ? `AND ${visibility}` : ''
+
     const result = await query(
       `SELECT d.*, r.name AS road_name,
          ot.public_id AS open_ticket_id, ot.status AS open_ticket_status,
          ot.assignee_id, COALESCE(fs.name, rs.name) AS issue_name,
          COALESCE(fs.severity, rs.severity) AS severity,
-         (SELECT COUNT(*)::int FROM tickets t WHERE t.device_id = d.id AND t.raised_at >= NOW() - INTERVAL '6 months') AS tickets_6m
+         (SELECT COUNT(*)::int FROM tickets t
+          WHERE t.device_id = d.id AND t.raised_at >= NOW() - INTERVAL '6 months'
+          ${visFilter}) AS tickets_6m
        FROM devices d
        JOIN roads r ON r.id = d.road_id
        LEFT JOIN LATERAL (
          SELECT * FROM tickets t WHERE t.device_id = d.id AND t.status <> 'Closed'
+         ${visFilter}
          ORDER BY t.raised_at DESC LIMIT 1
        ) ot ON TRUE
        LEFT JOIN issue_subcategories fs ON fs.id = ot.found_subcategory_id
        LEFT JOIN issue_subcategories rs ON rs.id = ot.reported_subcategory_id
        WHERE UPPER(d.public_id) = $1 OR UPPER(d.qr_code) = $1 OR UPPER(d.slot_number) = $1
        LIMIT 1`,
-      [q],
+      params,
     )
     if (!result.rowCount) throw new ApiError(404, 'No device matches that code', 'NOT_FOUND')
     const row = result.rows[0]
@@ -311,14 +329,19 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
     const d = device.rows[0]
     assertRoadAccess(req.user!, d.road_id)
 
+    const ticketParams: unknown[] = [d.id]
+    const visibility = appendTicketVisibilitySql(req.user!, ticketParams)
+    const visFilter = visibility ? `AND ${visibility}` : ''
+
     const open = await query(
       `SELECT t.*, COALESCE(fs.severity, rs.severity) AS severity
        FROM tickets t
        LEFT JOIN issue_subcategories fs ON fs.id = t.found_subcategory_id
        LEFT JOIN issue_subcategories rs ON rs.id = t.reported_subcategory_id
        WHERE t.device_id = $1 AND t.status <> 'Closed'
+       ${visFilter}
        ORDER BY t.raised_at DESC LIMIT 1`,
-      [d.id],
+      ticketParams,
     )
     const status = deriveDeviceStatus({
       openTicketStatus: open.rows[0]?.status || null,
@@ -335,8 +358,9 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
        LEFT JOIN issue_categories fc ON fc.id = t.found_category_id
        LEFT JOIN issue_subcategories fs ON fs.id = t.found_subcategory_id
        WHERE t.device_id = $1
+       ${visFilter}
        ORDER BY t.raised_at DESC`,
-      [d.id],
+      ticketParams,
     )
 
     const parts = await query(
@@ -347,8 +371,9 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
        LEFT JOIN issue_subcategories fs ON fs.id = t.found_subcategory_id
        LEFT JOIN issue_subcategories rs ON rs.id = t.reported_subcategory_id
        WHERE t.device_id = $1 AND jsonb_array_length(e.parts) > 0
+       ${visFilter}
        ORDER BY e.created_at DESC`,
-      [d.id],
+      ticketParams,
     )
 
     const partHistory: Array<{ date: string; part: string; why: string; ticketId: string }> = []
@@ -393,9 +418,10 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
        LEFT JOIN issue_categories fc ON fc.id = t.found_category_id
        LEFT JOIN issue_categories rc ON rc.id = t.reported_category_id
        WHERE t.device_id = $1
+       ${visFilter}
        GROUP BY COALESCE(fc.name, rc.name)
        ORDER BY n DESC`,
-      [d.id],
+      ticketParams,
     )
     const maxN = failRanks.rows[0]?.n || 1
 

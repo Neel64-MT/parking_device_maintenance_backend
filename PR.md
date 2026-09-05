@@ -11,29 +11,44 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 | Role | Purpose |
 |------|---------|
 | Admin | Full control including users and masters |
-| Project manager | All screens except creating users / deleting masters |
+| Project manager | City-wide ops; can approve Pending signups and manage users (Users `vce...`); cannot delete masters |
 | Control room | Raise and route tickets; does not close or edit masters |
 | Technician | Attend/update/close tickets on assigned roads only |
 | Site attendant | Scan QR and raise tickets on assigned roads |
 | AMC officer | View-only everywhere |
 | Custom roles | Created via Roles & permissions UI |
 
-**Login:** Email or 10-digit mobile plus password. Ticket alerts still go to the mobile number. No public signup — Admin creates users.
+**Login:** Email or 10-digit mobile plus password. Self-signup creates `Pending` users (Site attendant) until Admin or Project manager approves via Users.
 
 ## Features (API-backed)
 
 1. **Authentication** — Email or mobile + password, JWT session, logout, current user (`/me`), forgot password, reset password
 2. **Authorization** — Screen × flag matrix (`v c e a x d`), road scope, ticket holder rules
 3. **Dashboard** — Fleet status, down reasons, road-wise status, oldest open tickets
-4. **Tickets** — List (tabs/filters), raise, detail, assign, site-update, close; one open ticket per device; 7-day reopen = same ticket
+4. **Tickets** — List (tabs/filters), raise, detail, assign, site-update, close; one open ticket per device; 7-day reopen = same ticket. **Visibility:** Admin and Project manager see all (within road scope). All other roles see only tickets where `assignee_id` or `raised_by_user_id` is the current user (enforced in SQL and on detail/mutations).
 5. **Devices** — List, add, history, QR scan/lookup, QR label PNG, export
 6. **Issue master** — Categories / sub-categories with severity; deactivate if used (no hard delete when used)
 7. **Road master** — CRUD roads; sequential `RD-xx` codes
-8. **Users & roles** — Create/edit/inactivate users (Admin may set/change passwords via `PATCH /api/users/:id`); role permission matrix; never hard-delete users
+8. **Users & roles** — Create/edit/inactivate users; Admin and Project manager may approve Pending signups, update details/role/password via `PATCH /api/users/:id`; role permission matrix; never hard-delete users
 9. **Work report** — Day/week/month/range technician load and outcomes
 10. **Lookups** — Roads, technicians, parts, issue categories, road slots
 11. **Uploads** — Multipart photos for tickets/devices
 12. **Exports** — CSV for tickets, devices, roads, work report
+
+### Ticket visibility requirements
+
+- Admin and Project manager retain city-wide ticket list/detail/export access.
+- Every other role may only access tickets assigned to them or raised by them.
+- Restrictions are enforced server-side on ticket list, export, detail, update, and close.
+- The same visibility scope applies to dashboard ticket metrics, device open-ticket overlays/history counts, and work report ticket rows/export.
+- Assign (`POST /api/tickets/:id/assign`) remains road-scoped only so Control room can route tickets they did not raise; list/detail/dashboard stay visibility-scoped.
+- Frontend role filtering is presentation only; never the security boundary.
+
+### Signup approval requirements
+
+- `POST /api/auth/signup` creates `Pending` users.
+- Admin or Project manager can list Pending users, update details/role, and set `status: Active` to approve.
+- Normal users cannot call Users create/edit APIs.
 
 ### Password security requirements
 

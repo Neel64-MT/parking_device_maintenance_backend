@@ -86,3 +86,36 @@
 **Testing:** `npm run test:smoke` covers forgot/reset/admin password + JWT `pv` invalidation + regression login
 
 **Done when:** smoke passes; docs match implementation; frontend remaining as FRONTEND CHANGE REQUIRED only
+
+## Phase 12 — Ticket Visibility + PM Signup Approval
+
+**Status:** Complete
+
+**Objective:** Restrict non-Admin/non-PM ticket access to assignee or raiser; let Project manager approve/edit Pending signups.
+
+**APIs:** `/api/tickets*` (scoped), `/api/users*` (PM gains `c`/`e`)
+
+**Database:** migration `006_pm_users_edit.sql`
+
+**Files:** `src/lib/ticket-access.ts`, `src/routes/tickets.ts`, `src/lib/permissions.ts`
+
+**Testing:** smoke covers tech list/detail scoping, PM city-wide access, PM approve Pending, tech forbidden on Users edit
+
+**Done when:** smoke passes; docs match implementation; frontend remaining as FRONTEND CHANGE REQUIRED only
+
+## Phase 13 — Ticket Scope Consistency (Dashboard / Devices / Reports)
+
+**Status:** Complete
+
+**Objective:** Ensure every ticket-related API uses the same visibility rule as tickets list/detail (Admin/PM = all; others = assignee or raiser). Close leaks on devices and work report; dashboard already scoped in Phase 12.
+
+**APIs:**
+- `GET /api/dashboard` — already scoped (no change)
+- `GET /api/devices`, `/export`, `/scan`, `/:id` — open ticket + history/counts scoped
+- `GET /api/reports/work`, `/work/export` — events/CSV scoped
+
+**Files:** `src/routes/devices.ts`, `src/routes/reports.ts`, `src/lib/ticket-access.ts` (reuse), docs, `scripts/smoke-inprocess.ts`
+
+**Testing:** smoke covers tech device open-ticket leak, CR dashboard + work report scoping, existing ticket visibility + CR assign
+
+**Done when:** smoke passes; docs match implementation; frontend remaining as FRONTEND CHANGE REQUIRED only

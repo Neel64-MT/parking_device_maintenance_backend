@@ -9,6 +9,7 @@ import {
   requireAuth,
   type AuthedRequest,
 } from '../middleware/auth.js'
+import { appendTicketVisibilitySql, assertTicketAccess } from '../lib/ticket-access.js'
 import { nextPublicId } from '../lib/ids.js'
 
 const router = Router()
@@ -46,10 +47,8 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
       params.push(req.user!.roadIds)
       where.push(`d.road_id = ANY($${params.length})`)
     }
-    if (req.user!.roleName === 'Technician') {
-      params.push(req.user!.id)
-      where.push(`(t.assignee_id = $${params.length} OR t.assignee_id IS NULL)`)
-    }
+    const visibility = appendTicketVisibilitySql(req.user!, params)
+    if (visibility) where.push(visibility)
     if (filters.road && filters.road !== 'All roads') {
       params.push(filters.road)
       where.push(`r.name = $${params.length}`)
@@ -175,12 +174,23 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
 
 router.get('/export', authorize('All tickets', 'v'), async (req: AuthedRequest, res) => {
   try {
+    const params: unknown[] = []
+    const where: string[] = []
+    if (req.user!.scope === 'assigned_roads') {
+      params.push(req.user!.roadIds)
+      where.push(`d.road_id = ANY($${params.length})`)
+    }
+    const visibility = appendTicketVisibilitySql(req.user!, params)
+    if (visibility) where.push(visibility)
+
     const result = await query(
       `SELECT t.public_id, d.public_id AS device, r.name AS road, t.status, t.raised_at
        FROM tickets t
        JOIN devices d ON d.id = t.device_id
        JOIN roads r ON r.id = d.road_id
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
        ORDER BY t.raised_at DESC`,
+      params,
     )
     const header = 'Ticket,Device,Road,Status,Raised\n'
     const lines = result.rows.map(
@@ -314,7 +324,7 @@ router.get('/:ticketId', authorize('All tickets', 'v'), async (req: AuthedReques
     )
     if (!result.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
     const t = result.rows[0]
-    assertRoadAccess(req.user!, t.road_id)
+    assertTicketAccess(req.user!, t)
 
     const events = await query(
       `SELECT e.*, u.full_name AS actor_name, c.name AS cat_name, s.name AS sub_name
@@ -420,6 +430,8 @@ router.post('/:ticketId/assign', authorize('All tickets', 'a'), async (req: Auth
     if (!ticket.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
     const t = ticket.rows[0]
     if (t.status === 'Closed') throw new ApiError(409, 'Ticket is closed', 'CLOSED')
+    /* Assign: road scope only — Control room must assign tickets they did not raise. */
+    assertRoadAccess(req.user!, t.road_id)
 
     await query(`UPDATE tickets SET assignee_id = $2, status = 'Under repair', updated_at = NOW() WHERE id = $1`, [
       t.id,
@@ -471,7 +483,7 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
     if (!ticket.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
     const t = ticket.rows[0]
     if (t.status === 'Closed') throw new ApiError(409, 'Ticket is closed', 'CLOSED')
-    assertRoadAccess(req.user!, t.road_id)
+    assertTicketAccess(req.user!, t)
     assertHolder(req, t.assignee_id)
 
     let newStatus = t.status
@@ -547,13 +559,16 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
   }
 })
 
-router.get('/:ticketId/close-preview', authorize('Update ticket', 'x'), async (req, res) => {
+router.get('/:ticketId/close-preview', authorize('Update ticket', 'x'), async (req: AuthedRequest, res) => {
   try {
     const ticket = await query(
-      `SELECT t.* FROM tickets t WHERE t.public_id = $1 OR t.id::text = $1`,
+      `SELECT t.*, d.road_id FROM tickets t
+       JOIN devices d ON d.id = t.device_id
+       WHERE t.public_id = $1 OR t.id::text = $1`,
       [req.params.ticketId],
     )
     if (!ticket.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
+    assertTicketAccess(req.user!, ticket.rows[0])
     const events = await query(
       `SELECT created_at, work_done, title, cost FROM ticket_events
        WHERE ticket_id = $1 AND cost IS NOT NULL
@@ -597,7 +612,7 @@ router.post('/:ticketId/close', authorize('Update ticket', 'x'), async (req: Aut
     if (!ticket.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
     const t = ticket.rows[0]
     if (t.status === 'Closed') throw new ApiError(409, 'Already closed', 'CLOSED')
-    assertRoadAccess(req.user!, t.road_id)
+    assertTicketAccess(req.user!, t)
     assertHolder(req, t.assignee_id)
 
     await withTransaction(async (client) => {
