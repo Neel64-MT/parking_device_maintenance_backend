@@ -1,0 +1,235 @@
+import { z } from 'zod'
+import jwt from 'jsonwebtoken'
+import { Router } from 'express'
+import { ApiError, handleApiError } from '../lib/api-error.js'
+import {
+  consumePasswordResetToken,
+  hashPassword,
+  isEmailIdentifier,
+  issuePasswordResetToken,
+  markPasswordChanged,
+  markPasswordResetTokenUsed,
+  normalizeEmail,
+  normalizeMobile,
+  passwordSchema,
+  signAccessToken,
+  verifyPassword,
+} from '../lib/auth.js'
+import { sendPasswordResetEmail } from '../lib/mail.js'
+import { ok } from '../lib/respond.js'
+import { query } from '../db/pool.js'
+import {
+  loadAuthUser,
+  logoutCurrentToken,
+  requireAuth,
+  type AuthedRequest,
+} from '../middleware/auth.js'
+
+const router = Router()
+
+const GENERIC_FORGOT_MESSAGE =
+  'If an account exists for this email, a password reset link has been sent.'
+
+const PENDING_APPROVAL_MESSAGE = 'Please ask the admin to approve your request.'
+
+const loginSchema = z.object({
+  identifier: z.string().trim().min(3).max(254),
+  password: z.string().min(1, 'Password is required'),
+})
+
+const signupSchema = z.object({
+  fullName: z.string().trim().min(2).max(120),
+  mobile: z.string().trim().min(10).max(20),
+  email: z.string().trim().email('Valid email is required'),
+  password: passwordSchema,
+})
+
+const forgotSchema = z.object({
+  email: z.string().trim().email('Valid email is required'),
+})
+
+const resetSchema = z.object({
+  token: z.string().min(1, 'Token is required'),
+  password: passwordSchema,
+})
+
+function resolveLoginIdentifier(raw: string) {
+  if (isEmailIdentifier(raw)) {
+    const email = normalizeEmail(raw)
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new ApiError(400, 'Identifier must be a valid email or 10-digit mobile', 'VALIDATION_ERROR')
+    }
+    return email
+  }
+  const mobile = normalizeMobile(raw)
+  if (!/^\d{10}$/.test(mobile)) {
+    throw new ApiError(400, 'Identifier must be a valid email or 10-digit mobile', 'VALIDATION_ERROR')
+  }
+  return mobile
+}
+
+router.post('/signup', async (req, res) => {
+  try {
+    const body = signupSchema.parse(req.body)
+    const mobile = normalizeMobile(body.mobile)
+    if (!/^\d{10}$/.test(mobile)) {
+      throw new ApiError(400, 'Mobile must be a 10-digit number', 'VALIDATION_ERROR')
+    }
+    const email = normalizeEmail(body.email)
+    const passwordHash = await hashPassword(body.password)
+
+    const roleResult = await query<{ id: string }>(
+      `SELECT id FROM roles WHERE name = 'Site attendant' LIMIT 1`,
+    )
+    if (!roleResult.rowCount) {
+      throw new ApiError(500, 'Default signup role is not configured', 'INTERNAL_ERROR')
+    }
+
+    await query(
+      `INSERT INTO users (full_name, mobile, email, password_hash, role_id, status)
+       VALUES ($1, $2, $3, $4, $5, 'Pending')`,
+      [body.fullName.trim(), mobile, email, passwordHash, roleResult.rows[0].id],
+    )
+
+    return ok(
+      res,
+      null,
+      'Signup request received. Please ask the admin to approve your request before signing in.',
+    )
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
+router.post('/login', async (req, res) => {
+  try {
+    const { identifier: raw, password } = loginSchema.parse(req.body)
+    const identifier = resolveLoginIdentifier(raw)
+
+    const userResult = await query<{ id: string; status: string; password_hash: string; password_version: number }>(
+      `SELECT id, status, password_hash, COALESCE(password_version, 0) AS password_version FROM users
+       WHERE mobile = $1 OR LOWER(email) = LOWER($1)`,
+      [identifier],
+    )
+    if (!userResult.rowCount) {
+      throw new ApiError(401, 'Invalid credentials', 'INVALID_CREDENTIALS')
+    }
+
+    const user = userResult.rows[0]
+    const passwordOk = await verifyPassword(password, user.password_hash)
+    if (!passwordOk) {
+      throw new ApiError(401, 'Invalid credentials', 'INVALID_CREDENTIALS')
+    }
+
+    if (user.status === 'Pending') {
+      throw new ApiError(403, PENDING_APPROVAL_MESSAGE, 'PENDING_APPROVAL')
+    }
+    if (user.status !== 'Active') {
+      throw new ApiError(403, 'Account is inactive', 'INACTIVE')
+    }
+
+    const { token, jti } = signAccessToken(user.id, undefined, user.password_version)
+    const decoded = jwt.decode(token) as { exp: number }
+    const authUser = await loadAuthUser(user.id, jti, decoded.exp, user.password_version)
+
+    return ok(
+      res,
+      {
+        token,
+        user: {
+          id: authUser.id,
+          name: authUser.fullName,
+          email: authUser.email,
+          mobile: authUser.mobile,
+          role: authUser.roleName,
+          initials: authUser.initials,
+          scope: authUser.scope,
+          roads: authUser.roadNames,
+          permissions: authUser.permissions,
+        },
+      },
+      'Logged in',
+    )
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { email: rawEmail } = forgotSchema.parse(req.body)
+    const email = normalizeEmail(rawEmail)
+
+    const userResult = await query<{ id: string; email: string }>(
+      `SELECT id, email FROM users
+       WHERE LOWER(email) = LOWER($1) AND status = 'Active'`,
+      [email],
+    )
+
+    if (userResult.rowCount) {
+      const user = userResult.rows[0]
+      const rawToken = await issuePasswordResetToken(user.id)
+      try {
+        await sendPasswordResetEmail(user.email, rawToken)
+      } catch {
+        // Do not reveal email delivery failures (same generic response).
+      }
+    }
+
+    return ok(res, null, GENERIC_FORGOT_MESSAGE)
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { token, password } = resetSchema.parse(req.body)
+    const row = await consumePasswordResetToken(token)
+    if (!row) {
+      throw new ApiError(400, 'Invalid or expired reset token', 'INVALID_RESET_TOKEN')
+    }
+
+    const passwordHash = await hashPassword(password)
+    await query(`UPDATE users SET password_hash = $2, updated_at = NOW() WHERE id = $1`, [
+      row.user_id,
+      passwordHash,
+    ])
+    await markPasswordResetTokenUsed(row.id)
+    await markPasswordChanged(row.user_id)
+
+    return ok(res, null, 'Password updated')
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
+router.get('/me', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const u = req.user!
+    return ok(res, {
+      id: u.id,
+      name: u.fullName,
+      email: u.email,
+      mobile: u.mobile,
+      role: u.roleName,
+      initials: u.initials,
+      scope: u.scope,
+      roads: u.roadNames,
+      permissions: u.permissions,
+    })
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
+router.post('/logout', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    await logoutCurrentToken(req.user!)
+    return ok(res, null, 'Logged out')
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
+export default router
