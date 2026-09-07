@@ -186,3 +186,19 @@
 **Files:** `src/routes/tickets.ts`, docs
 
 **Done when:** docs match; FRONTEND CHANGE REQUIRED to bind closed-tab aging to `daysAfterClose` and trust list `status`
+
+## Phase 21 — List API pagination (Tickets + Devices)
+
+**Status:** Complete
+
+**Objective:** Enforce DB-level pagination with default limit 10 and allowed limits 10/25/50/100; stop in-memory fetch-all + slice.
+
+**APIs:**
+- `GET /api/tickets` — `LIMIT`/`OFFSET` + `COUNT` after visibility and filters; tiles/tabCounts via SQL aggregates
+- `GET /api/devices` — CTE with derived status; filter then count/page; export unpaginated
+
+**Files:** `src/lib/pagination.ts`, `src/routes/tickets.ts`, `src/routes/devices.ts`, smoke, docs
+
+**Testing:** smoke — default page/limit, allowed/invalid limits, page 2, tech total ≤ PM total
+
+**Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED for TicketList pager/defaults

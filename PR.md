@@ -25,8 +25,8 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 1. **Authentication** — Email or mobile + password, JWT session, logout, current user (`/me`), forgot password, reset password
 2. **Authorization** — Screen × flag matrix (`v c e a x d`), road scope, ticket holder rules
 3. **Dashboard** — Fleet status, down reasons, road-wise status, oldest open tickets
-4. **Tickets** — List (tabs/filters), raise, detail, assign, site-update, close; one non-`Closed` ticket per device (`409 OPEN_TICKET_EXISTS` with `openTicketId`); 7-day reopen = same ticket. List rows include `daysOpen` and `daysAfterClose` (whole days since `closed_at`, or `null` if still open). **Statuses:** `Open`, `Under repair`, `Waiting for spare`, `Closed` (no `New`). **Visibility:** Admin and Project manager see all (within road scope). All other roles see only tickets where `assignee_id` or `raised_by_user_id` is the current user (enforced in SQL and on detail/mutations).
-5. **Devices** — List, add, history, QR scan/lookup (`GET /api/devices/scan?q=`), QR label PNG, export; optional `latitude` / `longitude` (TEXT)
+4. **Tickets** — List (tabs/filters), raise, detail, assign, site-update, close; one non-`Closed` ticket per device (`409 OPEN_TICKET_EXISTS` with `openTicketId`); 7-day reopen = same ticket. List rows include `daysOpen` and `daysAfterClose` (whole days since `closed_at`, or `null` if still open). **Pagination:** `page`/`limit` with default `page=1`, `limit=10`; allowed limits `10|25|50|100`; DB `LIMIT`/`OFFSET` after visibility + filters; response `pagination: { page, limit, total, totalPages }`. **Statuses:** `Open`, `Under repair`, `Waiting for spare`, `Closed` (no `New`). **Visibility:** Admin and Project manager see all (within road scope). All other roles see only tickets where `assignee_id` or `raised_by_user_id` is the current user (enforced in SQL and on detail/mutations).
+5. **Devices** — List, add, history, QR scan/lookup (`GET /api/devices/scan?q=`), QR label PNG, export; optional `latitude` / `longitude` (TEXT). **Pagination:** same `page`/`limit` rules as tickets (DB-level after road scope + status/repeats filters).
 6. **Issue master** — Categories / sub-categories with severity; deactivate if used (no hard delete when used)
 7. **Road master** — CRUD roads; sequential `RD-xx` codes
 8. **Users & roles** — Create/edit/inactivate users; Admin and Project manager may approve Pending signups, update details/role/password via `PATCH /api/users/:id`; role permission matrix; never hard-delete users
@@ -75,6 +75,17 @@ Canonical `tickets.status` values (exactly four; never `New`):
 - `GET /api/tickets` each row: `daysOpen` (raised → closed or now) and `daysAfterClose` (now → `closed_at`, or `null` if not closed).
 - `daysAfterClose` is list-only (not ticket detail). Supports the 7-day reopen rule in the UI.
 - List tiles (`underRepair`, `waitingSpare`, `openOver3`) and CSV export use the same list presentation status rules as row `status`.
+
+### List pagination requirements
+
+- `GET /api/tickets` and `GET /api/devices` paginate at the database (`LIMIT`/`OFFSET` + `COUNT`), never by loading all rows into memory.
+- Defaults when omitted: `page=1`, `limit=10`.
+- Allowed `limit` values only: `10`, `25`, `50`, `100` (others → Zod 400).
+- Response keeps `pagination: { page, limit, total, totalPages }` (no duplicate `hasNextPage` fields).
+- Ticket `total` / pages respect visibility (Admin/PM all; others assignee/raiser) after search/filters.
+- Users/Roads lists remain unpaginated (no table consumer yet).
+
+**FRONTEND CHANGE REQUIRED:** TicketList service default `limit` is still 50 and UI hardcodes 100 — align to allowed limits and use `pagination` for a pager when authorized.
 
 ### Signup approval requirements
 

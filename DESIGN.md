@@ -196,3 +196,42 @@ Some rows can have `assignee_id` set while stored `status` remains `Open` (legac
 For **list, tiles, and CSV only**, `listStatus(status, assigneeId)` maps assigned + `Open` → `Under repair` so the Assigned tab pills match the Under repair tile without a data migration.
 
 Detail and mutate paths keep stored status (with `New` → `Open` display normalization where applied).
+
+---
+
+# Design — List pagination (Phase 21)
+
+## Parameters
+
+| Param | Default | Rules |
+|-------|---------|-------|
+| `page` | `1` | Positive int (Zod coerce); `0` / negative → 400 |
+| `limit` | `10` | Exactly `10`, `25`, `50`, or `100` |
+
+Shared: `src/lib/pagination.ts`.
+
+## Response
+
+Unchanged envelope sibling:
+
+```json
+{ "success": true, "data": [], "pagination": { "page": 1, "limit": 10, "total": 42, "totalPages": 5 } }
+```
+
+Tickets also return `tiles` / `tabCounts` (aggregated over visibility + base filters, not only the current page). Devices return status tiles over the filtered device set.
+
+## Tickets SQL
+
+1. Base WHERE: visibility + `q` / road / category / assignee  
+2. Aggregate query → tiles + tabCounts  
+3. Page WHERE = base + tab/status SQL  
+4. `COUNT(*)` → `pagination.total`  
+5. `SELECT ... ORDER BY raised_at DESC LIMIT/OFFSET`
+
+## Devices SQL
+
+CTE with open-ticket LATERAL + derived status `CASE` (mirrors `deriveDeviceStatus`) + `tickets_6m`. Outer WHERE applies status/repeats; then COUNT aggregates + `LIMIT/OFFSET`. Export uses same CTE without paging.
+
+## Frontend
+
+**FRONTEND CHANGE REQUIRED:** align TicketList `limit` defaults with allowed values; render pager from `pagination` when authorized. Do not add client-side page slicing of full lists.

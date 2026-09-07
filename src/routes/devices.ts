@@ -14,6 +14,7 @@ import {
 import { nextPublicId, qrFromDeviceId } from '../lib/ids.js'
 import { deriveDeviceStatus, statusTone } from '../lib/device-status.js'
 import { appendTicketVisibilitySql } from '../lib/ticket-access.js'
+import { limitSchema, pageSchema, paginationMeta, sqlOffset } from '../lib/pagination.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -23,15 +24,12 @@ const listSchema = z.object({
   road: z.string().optional(),
   status: z.string().optional(),
   repeats: z.string().optional(),
-  page: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().positive().max(200).default(50),
+  page: pageSchema,
+  limit: limitSchema,
 })
 
-async function deviceListQuery(
-  filters: z.infer<typeof listSchema>,
-  user: AuthUser,
-  roadIds?: string[],
-) {
+/** Shared FROM/WHERE for device list (road scope + search + ticket visibility on open ticket). */
+function buildDeviceListBase(filters: z.infer<typeof listSchema>, user: AuthUser, roadIds?: string[]) {
   const params: unknown[] = []
   const where: string[] = []
 
@@ -53,19 +51,21 @@ async function deviceListQuery(
   const visibility = appendTicketVisibilitySql(user, params)
   const visFilter = visibility ? `AND ${visibility}` : ''
 
-  const sql = `
-    SELECT d.*, r.name AS road_name,
-      ot.public_id AS open_ticket_id,
-      ot.status AS open_ticket_status,
-      ot.assignee_id AS open_assignee_id,
-      ot.raised_at AS open_raised_at,
-      COALESCE(fs.name, rs.name) AS issue_name,
-      COALESCE(fs.severity, rs.severity) AS severity,
-      (
-        SELECT COUNT(*)::int FROM tickets t
-        WHERE t.device_id = d.id AND t.raised_at >= NOW() - INTERVAL '6 months'
-        ${visFilter}
-      ) AS tickets_6m
+  const derivedStatusSql = `
+    CASE
+      WHEN ot.status IS NULL OR ot.status = 'Closed' THEN 'Working'
+      WHEN ot.status IN ('Waiting for spare', 'Under repair') THEN 'Under repair'
+      WHEN ot.assignee_id IS NOT NULL THEN 'Under repair'
+      WHEN COALESCE(fs.severity, rs.severity) = 'Minor' THEN 'Working'
+      ELSE 'Not working'
+    END`
+
+  const tickets6mSql = `
+    (SELECT COUNT(*)::int FROM tickets t
+     WHERE t.device_id = d.id AND t.raised_at >= NOW() - INTERVAL '6 months'
+     ${visFilter})`
+
+  const fromSql = `
     FROM devices d
     JOIN roads r ON r.id = d.road_id
     LEFT JOIN LATERAL (
@@ -75,11 +75,84 @@ async function deviceListQuery(
       ORDER BY t.raised_at DESC LIMIT 1
     ) ot ON TRUE
     LEFT JOIN issue_subcategories fs ON fs.id = ot.found_subcategory_id
-    LEFT JOIN issue_subcategories rs ON rs.id = ot.reported_subcategory_id
-    ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-    ORDER BY d.public_id`
+    LEFT JOIN issue_subcategories rs ON rs.id = ot.reported_subcategory_id`
 
-  return query(sql, params)
+  const baseWhere = where.length ? `WHERE ${where.join(' AND ')}` : ''
+
+  const having: string[] = []
+  // status/repeats applied on outer CTE columns
+  if (filters.status && filters.status !== 'All') {
+    params.push(filters.status)
+    having.push(`derived_status = $${params.length}`)
+  }
+  if (filters.repeats === '3 or more in 6 months') {
+    having.push(`tickets_6m >= 3`)
+  } else if (filters.repeats === '5 or more in 6 months') {
+    having.push(`tickets_6m >= 5`)
+  }
+  const outerWhere = having.length ? `WHERE ${having.join(' AND ')}` : ''
+
+  const cteBody = `
+    SELECT d.*, r.name AS road_name,
+      ot.public_id AS open_ticket_id,
+      ot.status AS open_ticket_status,
+      ot.assignee_id AS open_assignee_id,
+      ot.raised_at AS open_raised_at,
+      COALESCE(fs.name, rs.name) AS issue_name,
+      COALESCE(fs.severity, rs.severity) AS severity,
+      ${tickets6mSql} AS tickets_6m,
+      ${derivedStatusSql} AS derived_status
+    ${fromSql}
+    ${baseWhere}`
+
+  return { params, cteBody, outerWhere }
+}
+
+async function deviceListQuery(
+  filters: z.infer<typeof listSchema>,
+  user: AuthUser,
+  roadIds?: string[],
+  opts?: { paginate: boolean },
+) {
+  const { params, cteBody, outerWhere } = buildDeviceListBase(filters, user, roadIds)
+  const paginate = opts?.paginate !== false
+
+  if (!paginate) {
+    const all = await query(
+      `WITH device_rows AS (${cteBody})
+       SELECT * FROM device_rows ${outerWhere}
+       ORDER BY public_id`,
+      params,
+    )
+    return { rows: all.rows, total: all.rowCount || all.rows.length, tiles: null }
+  }
+
+  const tilesResult = await query(
+    `WITH device_rows AS (${cteBody})
+     SELECT
+       COUNT(*)::int AS total,
+       COUNT(*) FILTER (WHERE derived_status = 'Working')::int AS working,
+       COUNT(*) FILTER (WHERE derived_status = 'Under repair')::int AS repair,
+       COUNT(*) FILTER (WHERE derived_status = 'Not working')::int AS down
+     FROM device_rows ${outerWhere}`,
+    params,
+  )
+  const tiles = tilesResult.rows[0]
+  const total = tiles?.total ?? 0
+
+  const pageParams = [...params]
+  const limit = filters.limit
+  const offset = sqlOffset(filters.page, limit)
+  pageParams.push(limit, offset)
+  const page = await query(
+    `WITH device_rows AS (${cteBody})
+     SELECT * FROM device_rows ${outerWhere}
+     ORDER BY public_id
+     LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+    pageParams,
+  )
+
+  return { rows: page.rows, total, tiles }
 }
 
 router.get('/', authorize('Device list', 'v'), async (req: AuthedRequest, res) => {
@@ -87,14 +160,15 @@ router.get('/', authorize('Device list', 'v'), async (req: AuthedRequest, res) =
     const filters = listSchema.parse(req.query)
     const scoped =
       req.user!.scope === 'assigned_roads' ? req.user!.roadIds : undefined
-    const result = await deviceListQuery(filters, req.user!, scoped)
+    const result = await deviceListQuery(filters, req.user!, scoped, { paginate: true })
 
-    let rows = result.rows.map((row) => {
-      const status = deriveDeviceStatus({
-        openTicketStatus: row.open_ticket_status,
-        assigneeId: row.open_assignee_id,
-        severity: row.severity,
-      })
+    const pageRows = result.rows.map((row) => {
+      const status = (row.derived_status as 'Working' | 'Under repair' | 'Not working') ||
+        deriveDeviceStatus({
+          openTicketStatus: row.open_ticket_status,
+          assigneeId: row.open_assignee_id,
+          severity: row.severity,
+        })
       const daysOpen = row.open_raised_at
         ? Math.floor((Date.now() - new Date(row.open_raised_at).getTime()) / 86400000)
         : null
@@ -112,42 +186,20 @@ router.get('/', authorize('Device list', 'v'), async (req: AuthedRequest, res) =
         ticketNote: daysOpen != null ? `${daysOpen} days open` : null,
         tickets6m: row.tickets_6m,
         ticketsBad: row.tickets_6m >= 3,
-        _status: status,
       }
     })
 
-    if (filters.status && filters.status !== 'All') {
-      rows = rows.filter((r) => r.status === filters.status)
-    }
-    if (filters.repeats === '3 or more in 6 months') {
-      rows = rows.filter((r) => r.tickets6m >= 3)
-    } else if (filters.repeats === '5 or more in 6 months') {
-      rows = rows.filter((r) => r.tickets6m >= 5)
-    }
-
-    const total = rows.length
-    const start = (filters.page - 1) * filters.limit
-    const pageRows = rows.slice(start, start + filters.limit)
-
-    const working = rows.filter((r) => r.status === 'Working').length
-    const repair = rows.filter((r) => r.status === 'Under repair').length
-    const down = rows.filter((r) => r.status === 'Not working').length
-
+    const tiles = result.tiles!
     return res.status(200).json({
       success: true,
-      data: pageRows.map(({ _status, ...rest }) => rest),
+      data: pageRows,
       tiles: [
-        { value: String(total), label: 'Total devices' },
-        { value: String(working), label: 'Working', tone: 'ok' },
-        { value: String(repair), label: 'Under repair', tone: 'warn' },
-        { value: String(down), label: 'Not working', tone: 'bad' },
+        { value: String(tiles.total), label: 'Total devices' },
+        { value: String(tiles.working), label: 'Working', tone: 'ok' },
+        { value: String(tiles.repair), label: 'Under repair', tone: 'warn' },
+        { value: String(tiles.down), label: 'Not working', tone: 'bad' },
       ],
-      pagination: {
-        page: filters.page,
-        limit: filters.limit,
-        total,
-        totalPages: Math.ceil(total / filters.limit) || 1,
-      },
+      pagination: paginationMeta(filters.page, filters.limit, result.total),
     })
   } catch (error) {
     return handleApiError(res, error)
@@ -159,14 +211,16 @@ router.get('/export', authorize('Device list', 'v'), async (req: AuthedRequest, 
     const filters = listSchema.parse(req.query)
     const scoped =
       req.user!.scope === 'assigned_roads' ? req.user!.roadIds : undefined
-    const result = await deviceListQuery(filters, req.user!, scoped)
+    const result = await deviceListQuery(filters, req.user!, scoped, { paginate: false })
     const header = 'Device ID,QR,Road,Slot,Status,Tickets6m\n'
     const lines = result.rows.map((r) => {
-      const status = deriveDeviceStatus({
-        openTicketStatus: r.open_ticket_status,
-        assigneeId: r.open_assignee_id,
-        severity: r.severity,
-      })
+      const status =
+        (r.derived_status as string) ||
+        deriveDeviceStatus({
+          openTicketStatus: r.open_ticket_status,
+          assigneeId: r.open_assignee_id,
+          severity: r.severity,
+        })
       return `${r.public_id},${r.qr_code},"${r.road_name}",${r.slot_number},${status},${r.tickets_6m}`
     })
     res.setHeader('Content-Type', 'text/csv')

@@ -9,8 +9,9 @@ import {
   requireAuth,
   type AuthedRequest,
 } from '../middleware/auth.js'
-import { appendTicketVisibilitySql, assertCanAssignTickets, assertTicketAccess } from '../lib/ticket-access.js'
+import { appendTicketVisibilitySql, assertCanAssignTickets, assertTicketAccess, isTicketPrivilegedRole } from '../lib/ticket-access.js'
 import { nextPublicId } from '../lib/ids.js'
+import { limitSchema, pageSchema, paginationMeta, sqlOffset } from '../lib/pagination.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -43,6 +44,17 @@ function statusTone(status: string) {
   return 'bad'
 }
 
+const ticketListJoins = `
+       FROM tickets t
+       JOIN devices d ON d.id = t.device_id
+       JOIN roads r ON r.id = d.road_id
+       LEFT JOIN users ru ON ru.id = t.raised_by_user_id
+       LEFT JOIN users au ON au.id = t.assignee_id
+       LEFT JOIN issue_categories rc ON rc.id = t.reported_category_id
+       LEFT JOIN issue_subcategories rs ON rs.id = t.reported_subcategory_id
+       LEFT JOIN issue_categories fc ON fc.id = t.found_category_id
+       LEFT JOIN issue_subcategories fs ON fs.id = t.found_subcategory_id`
+
 router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) => {
   try {
     const schema = z.object({
@@ -52,61 +64,117 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
       status: z.string().optional(),
       category: z.string().optional(),
       assignee: z.string().optional(),
-      page: z.coerce.number().default(1),
-      limit: z.coerce.number().default(50),
+      page: pageSchema,
+      limit: limitSchema,
     })
     const filters = schema.parse(req.query)
-    const params: unknown[] = []
-    const where: string[] = []
+    const baseParams: unknown[] = []
+    const baseWhere: string[] = []
 
     // Ticket list is ownership-scoped (raiser/assignee), not road-scoped.
-    // Road filter was hiding tickets a Site attendant raised on other roads.
-    const visibility = appendTicketVisibilitySql(req.user!, params)
-    if (visibility) where.push(visibility)
+    const visibility = appendTicketVisibilitySql(req.user!, baseParams)
+    if (visibility) baseWhere.push(visibility)
     if (filters.road && filters.road !== 'All roads') {
-      params.push(filters.road)
-      where.push(`r.name = $${params.length}`)
+      baseParams.push(filters.road)
+      baseWhere.push(`r.name = $${baseParams.length}`)
     }
     if (filters.category && filters.category !== 'All categories') {
-      params.push(filters.category)
-      where.push(`COALESCE(fc.name, rc.name) = $${params.length}`)
+      baseParams.push(filters.category)
+      baseWhere.push(`COALESCE(fc.name, rc.name) = $${baseParams.length}`)
     }
     if (filters.assignee && filters.assignee !== 'Anyone') {
       if (filters.assignee === 'Not assigned') {
-        where.push(`t.assignee_id IS NULL`)
+        baseWhere.push(`t.assignee_id IS NULL`)
       } else {
-        params.push(filters.assignee)
-        where.push(`au.full_name = $${params.length}`)
+        baseParams.push(filters.assignee)
+        baseWhere.push(`au.full_name = $${baseParams.length}`)
       }
     }
     if (filters.q?.trim()) {
-      params.push(`%${filters.q.trim().toLowerCase()}%`)
-      where.push(
-        `(LOWER(t.public_id) LIKE $${params.length} OR LOWER(d.public_id) LIKE $${params.length} OR LOWER(d.slot_number) LIKE $${params.length})`,
+      baseParams.push(`%${filters.q.trim().toLowerCase()}%`)
+      baseWhere.push(
+        `(LOWER(t.public_id) LIKE $${baseParams.length} OR LOWER(d.public_id) LIKE $${baseParams.length} OR LOWER(d.slot_number) LIKE $${baseParams.length})`,
       )
     }
 
+    const baseWhereSql = baseWhere.length ? `WHERE ${baseWhere.join(' AND ')}` : ''
+
+    // Tiles / tabCounts: visibility + search filters only (not tab/status) — preserve prior behavior
+    const agg = await query(
+      `SELECT
+         COUNT(*) FILTER (WHERE t.status <> 'Closed' AND t.assignee_id IS NULL)::int AS open_not_attended,
+         COUNT(*) FILTER (
+           WHERE t.status = 'Under repair'
+              OR (t.assignee_id IS NOT NULL AND t.status IN ('Open', 'New'))
+         )::int AS under_repair,
+         COUNT(*) FILTER (WHERE t.status = 'Waiting for spare')::int AS waiting_spare,
+         COUNT(*) FILTER (
+           WHERE t.status <> 'Closed'
+             AND t.raised_at < NOW() - INTERVAL '3 days'
+         )::int AS open_over_3,
+         COUNT(*) FILTER (WHERE t.status <> 'Closed' AND t.assignee_id IS NULL)::int AS tab_new,
+         COUNT(*) FILTER (WHERE t.status <> 'Closed' AND t.assignee_id IS NOT NULL)::int AS tab_asg,
+         COUNT(*) FILTER (WHERE t.status = 'Closed')::int AS tab_cls
+       ${ticketListJoins}
+       ${baseWhereSql}`,
+      baseParams,
+    )
+    const a = agg.rows[0]
+
+    const pageWhere = [...baseWhere]
+    const pageParams = [...baseParams]
+    if (filters.tab === 'new') {
+      pageWhere.push(`t.assignee_id IS NULL AND t.status <> 'Closed'`)
+    } else if (filters.tab === 'asg') {
+      pageWhere.push(`t.assignee_id IS NOT NULL AND t.status <> 'Closed'`)
+    } else if (filters.tab === 'cls') {
+      pageWhere.push(`t.status = 'Closed'`)
+    }
+    if (filters.status && filters.status !== 'All') {
+      if (filters.status === 'Open + under repair') {
+        pageWhere.push(`t.status <> 'Closed'`)
+      } else if (filters.status === 'Open, not attended') {
+        pageWhere.push(`t.assignee_id IS NULL AND t.status <> 'Closed'`)
+      } else if (filters.status === 'Under repair') {
+        pageWhere.push(
+          `(t.status = 'Under repair' OR (t.assignee_id IS NOT NULL AND t.status IN ('Open', 'New')))`,
+        )
+      } else if (filters.status === 'Open') {
+        pageWhere.push(`t.assignee_id IS NULL AND t.status IN ('Open', 'New')`)
+      } else if (filters.status === 'Waiting for spare') {
+        pageWhere.push(`t.status = 'Waiting for spare'`)
+      } else if (filters.status === 'Closed') {
+        pageWhere.push(`t.status = 'Closed'`)
+      } else {
+        pageParams.push(filters.status)
+        pageWhere.push(`t.status = $${pageParams.length}`)
+      }
+    }
+    const pageWhereSql = pageWhere.length ? `WHERE ${pageWhere.join(' AND ')}` : ''
+
+    const countResult = await query(
+      `SELECT COUNT(*)::int AS n ${ticketListJoins} ${pageWhereSql}`,
+      pageParams,
+    )
+    const total = countResult.rows[0]?.n ?? 0
+
+    const limit = filters.limit
+    const offset = sqlOffset(filters.page, limit)
+    pageParams.push(limit, offset)
     const result = await query(
       `SELECT t.*, d.public_id AS device_public_id, d.slot_number, r.name AS road_name,
               ru.full_name AS raised_by_name, au.full_name AS assignee_name,
               rc.name AS reported_cat, rs.name AS reported_sub,
               fc.name AS found_cat, fs.name AS found_sub,
               (SELECT COUNT(*)::int FROM ticket_events e WHERE e.ticket_id = t.id) AS updates
-       FROM tickets t
-       JOIN devices d ON d.id = t.device_id
-       JOIN roads r ON r.id = d.road_id
-       LEFT JOIN users ru ON ru.id = t.raised_by_user_id
-       LEFT JOIN users au ON au.id = t.assignee_id
-       LEFT JOIN issue_categories rc ON rc.id = t.reported_category_id
-       LEFT JOIN issue_subcategories rs ON rs.id = t.reported_subcategory_id
-       LEFT JOIN issue_categories fc ON fc.id = t.found_category_id
-       LEFT JOIN issue_subcategories fs ON fs.id = t.found_subcategory_id
-       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-       ORDER BY t.raised_at DESC`,
-      params,
+       ${ticketListJoins}
+       ${pageWhereSql}
+       ORDER BY t.raised_at DESC
+       LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
+      pageParams,
     )
 
-    let rows = result.rows.map((t) => {
+    const rows = result.rows.map((t) => {
       const daysOpen = Math.floor(
         ((t.closed_at ? new Date(t.closed_at).getTime() : Date.now()) -
           new Date(t.raised_at).getTime()) /
@@ -142,54 +210,21 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
       }
     })
 
-    if (filters.tab) rows = rows.filter((r) => r.tab === filters.tab)
-    if (filters.status && filters.status !== 'All') {
-      if (filters.status === 'Open + under repair') {
-        rows = rows.filter((r) => r.status !== 'Closed')
-      } else if (filters.status === 'Open, not attended') {
-        rows = rows.filter((r) => r.tab === 'new')
-      } else {
-        rows = rows.filter((r) => r.status === filters.status)
-      }
-    }
-
-    const tiles = {
-      openNotAttended: result.rows.filter((t) => tabForStatus(t.status, t.assignee_id) === 'new')
-        .length,
-      underRepair: result.rows.filter(
-        (t) => listStatus(t.status, t.assignee_id) === 'Under repair',
-      ).length,
-      waitingSpare: result.rows.filter(
-        (t) => listStatus(t.status, t.assignee_id) === 'Waiting for spare',
-      ).length,
-      openOver3: result.rows.filter((t) => {
-        if (tabForStatus(t.status, t.assignee_id) === 'cls') return false
-        const days = Math.floor((Date.now() - new Date(t.raised_at).getTime()) / 86400000)
-        return days > 3
-      }).length,
-    }
-
-    const start = (filters.page - 1) * filters.limit
     return res.status(200).json({
       success: true,
-      data: rows.slice(start, start + filters.limit),
+      data: rows,
       tiles: [
-        { value: String(tiles.openNotAttended), label: 'Open, not attended', tone: 'bad' },
-        { value: String(tiles.underRepair), label: 'Under repair', tone: 'warn' },
-        { value: String(tiles.waitingSpare), label: 'Waiting for spare', tone: 'warn' },
-        { value: String(tiles.openOver3), label: 'Open over 3 days', tone: 'bad' },
+        { value: String(a.open_not_attended), label: 'Open, not attended', tone: 'bad' },
+        { value: String(a.under_repair), label: 'Under repair', tone: 'warn' },
+        { value: String(a.waiting_spare), label: 'Waiting for spare', tone: 'warn' },
+        { value: String(a.open_over_3), label: 'Open over 3 days', tone: 'bad' },
       ],
       tabCounts: {
-        new: result.rows.filter((t) => tabForStatus(t.status, t.assignee_id) === 'new').length,
-        asg: result.rows.filter((t) => tabForStatus(t.status, t.assignee_id) === 'asg').length,
-        cls: result.rows.filter((t) => tabForStatus(t.status, t.assignee_id) === 'cls').length,
+        new: a.tab_new,
+        asg: a.tab_asg,
+        cls: a.tab_cls,
       },
-      pagination: {
-        page: filters.page,
-        limit: filters.limit,
-        total: rows.length,
-        totalPages: Math.ceil(rows.length / filters.limit) || 1,
-      },
+      pagination: paginationMeta(filters.page, limit, total),
     })
   } catch (error) {
     return handleApiError(res, error)
@@ -433,10 +468,26 @@ router.get('/:ticketId', authorize('All tickets', 'v'), async (req: AuthedReques
 
 function assertHolder(req: AuthedRequest, assigneeId: string | null) {
   if (!assigneeId) return
-  if (req.user!.roleName === 'Admin' || req.user!.roleName === 'Project manager') return
+  if (isTicketPrivilegedRole(req.user!)) return
   if (req.user!.id !== assigneeId) {
     throw new ApiError(403, 'Only the ticket holder can perform this action', 'NOT_HOLDER')
   }
+}
+
+/**
+ * Site updates: authorize('Update ticket','e') already ran.
+ * Allow Admin/PM, the current holder, or an unassigned ticket (claimer).
+ * Also allow any user who already has ticket access and Update-ticket edit —
+ * raisers with edit rights were blocked by assertHolder after assign.
+ */
+function assertCanAddUpdate(
+  req: AuthedRequest,
+  ticket: { assignee_id: string | null; raised_by_user_id: string | null },
+) {
+  if (isTicketPrivilegedRole(req.user!)) return
+  if (!ticket.assignee_id || ticket.assignee_id === req.user!.id) return
+  if (ticket.raised_by_user_id === req.user!.id) return
+  throw new ApiError(403, 'Only the ticket holder can perform this action', 'NOT_HOLDER')
 }
 
 router.post('/:ticketId/assign', authorize('All tickets', 'a'), async (req: AuthedRequest, res) => {
@@ -507,7 +558,7 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
     const t = ticket.rows[0]
     if (t.status === 'Closed') throw new ApiError(409, 'Ticket is closed', 'CLOSED')
     assertTicketAccess(req.user!, t)
-    assertHolder(req, t.assignee_id)
+    assertCanAddUpdate(req, t)
 
     let newStatus = t.status
     if (body.updateType === 'Waiting for spare') newStatus = 'Waiting for spare'
@@ -531,11 +582,12 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
       }
     }
 
-    await query(
+    const inserted = await query(
       `INSERT INTO ticket_events (
          ticket_id, event_type, title, body, status_label, actor_user_id,
          category_id, subcategory_id, cost, next_visit_at, not_fixed_reason, work_done, photos, parts
-       ) VALUES ($1,$2,$3,$4,'Still open',$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+       ) VALUES ($1,$2,$3,$4,'Still open',$5,$6,$7,$8,$9,$10,$11,$12,$13)
+       RETURNING id`,
       [
         t.id,
         body.updateType.includes('resolved')
@@ -556,6 +608,7 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
         JSON.stringify(body.parts),
       ],
     )
+    const eventId = inserted.rows[0].id as string
 
     await query(
       `UPDATE tickets SET status = $2, total_cost = total_cost + $3, updated_at = NOW() WHERE id = $1`,
@@ -577,11 +630,63 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
       await query(`UPDATE tickets SET assignee_id = $2 WHERE id = $1`, [t.id, req.user!.id])
     }
 
-    return ok(res, { id: t.public_id, status: newStatus, resolvedReady: body.updateType.includes('resolved') }, 'Update saved')
+    return created(
+      res,
+      {
+        id: t.public_id,
+        eventId,
+        status: newStatus,
+        resolvedReady: body.updateType.includes('resolved'),
+      },
+      'Update saved',
+    )
   } catch (error) {
     return handleApiError(res, error)
   }
 })
+
+const attachUpdatePhotosSchema = z.object({
+  photos: z.array(z.string().min(1)).min(1),
+})
+
+/** Attach uploaded photo URLs after POST /updates succeeds. */
+router.patch(
+  '/:ticketId/updates/:eventId/photos',
+  authorize('Update ticket', 'e'),
+  async (req: AuthedRequest, res) => {
+    try {
+      const body = attachUpdatePhotosSchema.parse(req.body)
+      const ticket = await query(
+        `SELECT t.*, d.road_id FROM tickets t JOIN devices d ON d.id = t.device_id
+         WHERE t.public_id = $1 OR t.id::text = $1`,
+        [req.params.ticketId],
+      )
+      if (!ticket.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
+      const t = ticket.rows[0]
+      if (t.status === 'Closed') throw new ApiError(409, 'Ticket is closed', 'CLOSED')
+      assertTicketAccess(req.user!, t)
+      assertCanAddUpdate(req, t)
+
+      const event = await query(
+        `SELECT id, photos FROM ticket_events WHERE id = $1 AND ticket_id = $2`,
+        [req.params.eventId, t.id],
+      )
+      if (!event.rowCount) throw new ApiError(404, 'Update not found', 'NOT_FOUND')
+
+      const existing = Array.isArray(event.rows[0].photos) ? event.rows[0].photos : []
+      const photos = [...existing, ...body.photos]
+
+      await query(`UPDATE ticket_events SET photos = $2::jsonb WHERE id = $1`, [
+        req.params.eventId,
+        JSON.stringify(photos),
+      ])
+
+      return ok(res, { eventId: req.params.eventId, photos }, 'Photos attached')
+    } catch (error) {
+      return handleApiError(res, error)
+    }
+  },
+)
 
 router.get('/:ticketId/close-preview', authorize('Update ticket', 'x'), async (req: AuthedRequest, res) => {
   try {

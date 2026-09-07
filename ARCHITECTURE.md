@@ -207,3 +207,21 @@ List/export row `status` and tiles use presentation helpers (DB unchanged):
 | `daysAfterClose` | Whole days since `closed_at`, or `null` if not closed |
 
 List-only. Ticket detail still uses a “Days open” header fact, not `daysAfterClose`.
+
+## List pagination (Tickets + Devices)
+
+```text
+Request page/limit (+ filters)
+  → Auth + authorize(screen, v)
+  → Scope (ticket visibility / device road scope)
+  → SQL search/filters (incl. ticket tab/status; device derived status/repeats)
+  → COUNT(*) for total (+ tile aggregates)
+  → SELECT ... ORDER BY ... LIMIT/OFFSET
+  → { data, pagination: { page, limit, total, totalPages }, tiles... }
+```
+
+Shared helpers: [`src/lib/pagination.ts`](src/lib/pagination.ts) (`pageSchema`, `limitSchema`, `paginationMeta`, `sqlOffset`).
+
+Defaults: `page=1`, `limit=10`. Allowed limits: `10|25|50|100`.
+
+Routes: [`src/routes/tickets.ts`](src/routes/tickets.ts), [`src/routes/devices.ts`](src/routes/devices.ts). Export CSVs stay full-set (unpaginated).

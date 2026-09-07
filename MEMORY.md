@@ -9,10 +9,11 @@
 - Phase 18 — Ticket status `New` removed; unassigned tickets use `Open` (`007_ticket_status_open.sql`)
 - Phase 19 — Assign/reassign restricted to Control room, Admin, Project manager (no technician handover)
 - Phase 20 — Ticket list `daysAfterClose` + tab `new` = unassigned only; list presents assigned+`Open` as `Under repair`
+- Phase 21 — DB-level pagination for tickets + devices (`page`/`limit`, default 10, allowed 10/25/50/100)
 
 ## Currently Working On
 
-- (idle — ticket list aging / listStatus presentation documented)
+- (idle — list pagination complete)
 
 ## Pending
 
@@ -21,6 +22,7 @@
 - Feature screens still on mocks / partial wiring
 - Wire Scan QR to `GET /api/devices/scan?q=`; on raise `409 OPEN_TICKET_EXISTS` redirect via `details.openTicketId`
 - When wiring Dashboard / All Tickets / Devices / Work report, trust API ticket scope — no client-side role filters
+- TicketList: change default `limit` from 50/100 to allowed values; use `pagination` for pager UI
 - All Tickets / detail status badge: show `Open`, never `New`
 - Closed tickets list: use `daysAfterClose` (null when still open)
 - Trust list `status` for Assigned-tab vs Under repair tile (do not remap assigned Open in the browser)
@@ -38,6 +40,8 @@
 - One open ticket per device means `status <> 'Closed'`; unassigned stored status is `Open` (not `New`)
 - List tab `new` = unassigned non-closed; list may show assigned+`Open` as `Under repair` without DB update
 - Ticket list `daysAfterClose` is days since `closed_at` (`null` if open); list-only
+- List pagination: `page`/`limit`, default limit **10**, allowed **10|25|50|100**, SQL LIMIT/OFFSET after scope/filters; shared `src/lib/pagination.ts`
+- Pagination response shape stays `{ page, limit, total, totalPages }` (no hasNextPage)
 - Duplicate raise 409 includes both `ticketId` and `openTicketId`
 - Device lat/lng are TEXT strings; seed includes Ahmedabad-area dummies
 - PM Users permission: `vce...` (approve Pending via existing PATCH); Roles matrix remains view-only
