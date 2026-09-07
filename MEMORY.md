@@ -8,10 +8,11 @@
 - Phase 17 — QR scan canonical payload + seed lat/lng + `OPEN_TICKET_EXISTS.openTicketId`
 - Phase 18 — Ticket status `New` removed; unassigned tickets use `Open` (`007_ticket_status_open.sql`)
 - Phase 19 — Assign/reassign restricted to Control room, Admin, Project manager (no technician handover)
+- Phase 20 — Ticket list `daysAfterClose` + tab `new` = unassigned only; list presents assigned+`Open` as `Under repair`
 
 ## Currently Working On
 
-- (idle — assign/reassign role lock complete)
+- (idle — ticket list aging / listStatus presentation documented)
 
 ## Pending
 
@@ -21,6 +22,8 @@
 - Wire Scan QR to `GET /api/devices/scan?q=`; on raise `409 OPEN_TICKET_EXISTS` redirect via `details.openTicketId`
 - When wiring Dashboard / All Tickets / Devices / Work report, trust API ticket scope — no client-side role filters
 - All Tickets / detail status badge: show `Open`, never `New`
+- Closed tickets list: use `daysAfterClose` (null when still open)
+- Trust list `status` for Assigned-tab vs Under repair tile (do not remap assigned Open in the browser)
 - Hide technician reassign / handover; only Control room, Admin, Project manager assign
 - Signup success copy: “Admin” → “Admin or Project manager” (optional; API already unlocks Approve for PM)
 
@@ -33,6 +36,8 @@
 - Assign stays road-only (`assertRoadAccess`) for Control room routing; list/detail/dashboard/devices/reports stay visibility-scoped
 - Scan details stay on `GET /api/devices/scan?q=` (no `/scan-details` alias)
 - One open ticket per device means `status <> 'Closed'`; unassigned stored status is `Open` (not `New`)
+- List tab `new` = unassigned non-closed; list may show assigned+`Open` as `Under repair` without DB update
+- Ticket list `daysAfterClose` is days since `closed_at` (`null` if open); list-only
 - Duplicate raise 409 includes both `ticketId` and `openTicketId`
 - Device lat/lng are TEXT strings; seed includes Ahmedabad-area dummies
 - PM Users permission: `vce...` (approve Pending via existing PATCH); Roles matrix remains view-only

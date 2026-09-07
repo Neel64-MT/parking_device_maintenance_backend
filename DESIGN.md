@@ -159,6 +159,40 @@ There is no `New` status. Schema default is already `Open` (`001_init`). Migrati
 
 ## List UI
 
-The tickets list tab query `tab=new` still means “unassigned / not yet attended”. That tab key is not a stored status. Badges must render `Open`.
+The tickets list tab query `tab=new` means **unassigned and not closed**. Tab key `new` is not a stored status. Tab `asg` = has assignee; `cls` = Closed.
 
-**FRONTEND CHANGE REQUIRED:** replace `New` badges with `Open`.
+List/export/tiles presentation (`listStatus` in `tickets.ts`):
+
+- Stored `New` → `Open`
+- Has `assignee_id` and stored `Open` → list shows `Under repair` (DB unchanged; detail still returns stored status)
+
+Badges for unassigned tickets must render `Open`, never `New`.
+
+**FRONTEND CHANGE REQUIRED:** replace `New` badges with `Open`; trust list `status` for Assigned vs Under repair alignment.
+
+---
+
+# Design — Ticket list `daysAfterClose`
+
+`GET /api/tickets` already returned `daysOpen` (life of the ticket until close or now). Closed rows now also return `daysAfterClose`:
+
+```text
+if closed_at set → floor((now - closed_at) / 1 day)
+else → null
+```
+
+Purpose: All Tickets closed tab / 7-day reopen copy can show “N days since close” without the client parsing dates.
+
+Not added to `GET /api/tickets/:id` (detail still has “Days open” in `header.facts`). No migration.
+
+**FRONTEND CHANGE REQUIRED:** bind closed-ticket aging to `daysAfterClose`.
+
+---
+
+# Design — List presentation for assigned `Open`
+
+Some rows can have `assignee_id` set while stored `status` remains `Open` (legacy / edge cases). Assign path normally writes `Under repair`.
+
+For **list, tiles, and CSV only**, `listStatus(status, assigneeId)` maps assigned + `Open` → `Under repair` so the Assigned tab pills match the Under repair tile without a data migration.
+
+Detail and mutate paths keep stored status (with `New` → `Open` display normalization where applied).

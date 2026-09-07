@@ -179,4 +179,31 @@ Stored values: `Open` | `Under repair` | `Waiting for spare` | `Closed`. Do not 
 
 Migration `007_ticket_status_open.sql` rewrites leftover `New` → `Open`.
 
-“One open ticket per device” = any row with `status <> 'Closed'`. List tab `new` filters unassigned/`Open` tickets; it is not a status name.
+“One open ticket per device” = any row with `status <> 'Closed'`.
+
+## Ticket list presentation (`GET /api/tickets`)
+
+Tabs (query `tab`):
+
+| Tab key | Meaning |
+|---------|---------|
+| `new` | Unassigned and not closed |
+| `asg` | Has assignee (not closed) |
+| `cls` | Closed |
+
+List/export row `status` and tiles use presentation helpers (DB unchanged):
+
+- `New` → display as `Open`
+- Assigned + stored `Open` → list shows `Under repair` (so Assigned-tab pills align with Under repair tile)
+- Detail (`GET /api/tickets/:id`) still returns stored status (`New` normalized to `Open` only)
+
+## Ticket list aging
+
+`GET /api/tickets` row fields:
+
+| Field | Meaning |
+|-------|---------|
+| `daysOpen` | Whole days from `raised_at` to `closed_at` (or now if still open) |
+| `daysAfterClose` | Whole days since `closed_at`, or `null` if not closed |
+
+List-only. Ticket detail still uses a “Days open” header fact, not `daysAfterClose`.
