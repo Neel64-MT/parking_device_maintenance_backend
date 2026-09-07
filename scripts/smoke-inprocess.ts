@@ -72,6 +72,39 @@ async function main() {
     console.log('OK', path)
   }
 
+  // Ensure seeded coords exist for scan shape check (idempotent if seed already ran)
+  await query(
+    `UPDATE devices SET
+       latitude = COALESCE(latitude, '23.079200'),
+       longitude = COALESCE(longitude, '72.497500')
+     WHERE public_id = 'PD-0428'`,
+  )
+  const scan = await call('/api/devices/scan?q=PD-0428', { headers: auth })
+  assert(scan.status === 200 && scan.body.success, 'scan recheck failed')
+  const scanData = scan.body.data as Record<string, unknown>
+  for (const key of [
+    'deviceId',
+    'deviceName',
+    'locationSite',
+    'slot',
+    'currentStatus',
+    'statusDate',
+    'ticketsLast6Months',
+    'openTicketId',
+    'openTicketAge',
+    'openTicketIssue',
+    'latitude',
+    'longitude',
+  ]) {
+    assert(key in scanData, `scan missing field ${key}`)
+  }
+  assert(scanData.deviceId === 'PD-0428', 'scan deviceId mismatch')
+  assert(typeof scanData.latitude === 'string' && scanData.latitude, 'scan latitude required')
+  assert(typeof scanData.longitude === 'string' && scanData.longitude, 'scan longitude required')
+  assert(scanData.openTicketId === 'TK-1042', 'PD-0428 should have open TK-1042')
+  assert(typeof scanData.openTicketAge === 'string' && scanData.openTicketAge, 'openTicketAge required when open')
+  console.log('OK scan canonical payload')
+
   const bad = await call('/api/auth/login', {
     method: 'POST',
     body: JSON.stringify({ identifier: 'abc', password: 'x' }),
@@ -207,10 +240,10 @@ async function main() {
   const pmPatch = await call(`/api/users/${techUser.id}`, {
     method: 'PATCH',
     headers: pmAuth,
-    body: JSON.stringify({ password: 'ShouldFail1' }),
+    body: JSON.stringify({ fullName: techUser.name }),
   })
-  assert(pmPatch.status === 403, 'PM must not change passwords')
-  console.log('OK PM forbidden from password change')
+  assert(pmPatch.status === 200, 'PM should be able to edit users')
+  console.log('OK PM can edit users')
 
   const techLoginBefore = await call('/api/auth/login', {
     method: 'POST',
@@ -350,6 +383,208 @@ async function main() {
   })
   assert(afterApprove.status === 200 && afterApprove.body.data?.token, 'login after approve failed')
   console.log('OK login after approval')
+
+  // Project manager can approve pending signup
+  const signup2Suffix = String(Date.now()).slice(-8)
+  const signup2Mobile = `96${signup2Suffix}`.slice(0, 10)
+  const signup2Email = `signup.pm.${signup2Suffix}@yopmail.com`
+  const signup2 = await call('/api/auth/signup', {
+    method: 'POST',
+    body: JSON.stringify({
+      fullName: `PM Pending ${signup2Suffix}`,
+      mobile: signup2Mobile,
+      email: signup2Email,
+      password: 'PendingPass1',
+    }),
+  })
+  assert(signup2.status === 200, `second signup failed: ${JSON.stringify(signup2.body)}`)
+
+  const pmLoginApprove = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9825012345', password: 'Password123' }),
+  })
+  assert(pmLoginApprove.status === 200 && pmLoginApprove.body.data?.token, 'pm login for approve failed')
+  const pmAuthApprove = { Authorization: `Bearer ${pmLoginApprove.body.data.token as string}` }
+
+  const pendingForPm = await call('/api/users?status=Pending', { headers: pmAuthApprove })
+  assert(pendingForPm.status === 200, 'pm pending list failed')
+  const pending2 = pendingForPm.body.data.users.find(
+    (u: { email: string }) => u.email === signup2Email,
+  )
+  assert(pending2?.id, 'pending user for pm not found')
+
+  const pmApprove = await call(`/api/users/${pending2.id}`, {
+    method: 'PATCH',
+    headers: pmAuthApprove,
+    body: JSON.stringify({ status: 'Active' }),
+  })
+  assert(pmApprove.status === 200, `pm approve failed: ${JSON.stringify(pmApprove.body)}`)
+  console.log('OK PM approve pending user')
+
+  const techCannotApprove = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9099941128', password: 'Password123' }),
+  })
+  assert(techCannotApprove.status === 200, 'tech login failed')
+  const techAuth = { Authorization: `Bearer ${techCannotApprove.body.data.token as string}` }
+  const techPatchUser = await call(`/api/users/${pending2.id}`, {
+    method: 'PATCH',
+    headers: techAuth,
+    body: JSON.stringify({ status: 'Inactive' }),
+  })
+  assert(techPatchUser.status === 403, 'tech must not edit users')
+  console.log('OK tech forbidden from user approve/edit')
+
+  // Ticket visibility: non-privileged user cannot open unrelated tickets
+  const adminTickets = await call('/api/tickets', { headers: pmAuthApprove })
+  assert(adminTickets.status === 200 && Array.isArray(adminTickets.body.data), 'pm ticket list failed')
+  const foreign = adminTickets.body.data.find(
+    (t: { assignedTo: string | null; id: string }) =>
+      t.assignedTo && t.assignedTo !== 'Ramesh Vaghela',
+  )
+  assert(foreign?.id, 'need a ticket not assigned to Ramesh for visibility test')
+
+  const techList = await call('/api/tickets', { headers: techAuth })
+  assert(techList.status === 200, 'tech ticket list failed')
+  assert(
+    !techList.body.data.some((t: { id: string }) => t.id === foreign.id),
+    'tech list must not include unrelated ticket',
+  )
+  console.log('OK tech ticket list scoped')
+
+  const techDetail = await call(`/api/tickets/${foreign.id}`, { headers: techAuth })
+  assert(techDetail.status === 403, `tech detail must be forbidden: ${techDetail.status}`)
+  console.log('OK tech cannot open unrelated ticket by id')
+
+  const owned = techList.body.data[0]
+  if (owned?.id) {
+    const ownDetail = await call(`/api/tickets/${owned.id}`, { headers: techAuth })
+    assert(ownDetail.status === 200, 'tech should open own ticket')
+    console.log('OK tech can open own ticket')
+  }
+
+  const pmDetail = await call(`/api/tickets/${foreign.id}`, { headers: pmAuthApprove })
+  assert(pmDetail.status === 200, 'PM must still open any ticket')
+  console.log('OK PM city-wide ticket access')
+
+  // Site attendant sees tickets they raised even when the device road is outside their assignment
+  const attendantLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9016374408', password: 'Password123' }),
+  })
+  assert(attendantLogin.status === 200 && attendantLogin.body.data?.token, 'site attendant login failed')
+  const attendantAuth = { Authorization: `Bearer ${attendantLogin.body.data.token as string}` }
+  const attendantTickets = await call('/api/tickets?tab=new', { headers: attendantAuth })
+  assert(attendantTickets.status === 200, 'site attendant ticket list failed')
+  const attendantIds = (attendantTickets.body.data || []).map((t: { id: string }) => t.id)
+  assert(attendantIds.includes('TK-1099'), 'raiser must see Open ticket on a non-assigned road (TK-1099)')
+  assert(attendantIds.includes('TK-1101'), 'raiser must see own Science City Open ticket (TK-1101)')
+  const attendantDetail = await call('/api/tickets/TK-1099', { headers: attendantAuth })
+  assert(attendantDetail.status === 200, 'raiser must open own ticket detail on non-assigned road')
+  console.log('OK site attendant sees tickets they raised across roads')
+
+  // Control room can assign a ticket they did not raise (road access only)
+  const crLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '7990011002', password: 'Password123' }),
+  })
+  assert(crLogin.status === 200 && crLogin.body.data?.token, 'control room login failed')
+  const crAuth = { Authorization: `Bearer ${crLogin.body.data.token as string}` }
+
+  const techUsers = await call('/api/lookups/technicians', { headers: crAuth })
+  assert(techUsers.status === 200 && Array.isArray(techUsers.body.data), 'technicians lookup failed')
+  const techAssignee = techUsers.body.data.find(
+    (u: { name: string; id: string }) => u.name === 'Ramesh Vaghela' || u.id,
+  )
+  assert(techAssignee?.id, 'need a technician id to assign')
+
+  const assignOpen = await call('/api/tickets/TK-1078/assign', {
+    method: 'POST',
+    headers: crAuth,
+    body: JSON.stringify({ assigneeId: techAssignee.id, reason: 'Smoke assign by control room' }),
+  })
+  assert(
+    assignOpen.status === 200,
+    `control room assign must succeed: ${assignOpen.status} ${JSON.stringify(assignOpen.body)}`,
+  )
+  console.log('OK control room assign without ownership')
+
+  const techAssign = await call('/api/tickets/TK-1078/assign', {
+    method: 'POST',
+    headers: techAuth,
+    body: JSON.stringify({ assigneeId: techAssignee.id, reason: 'tech must not assign' }),
+  })
+  assert(techAssign.status === 403, 'technician must not assign or reassign')
+  console.log('OK tech cannot assign')
+
+  const otherTech = techUsers.body.data.find((u: { name: string }) => u.name === 'Jignesh Solanki')
+  assert(otherTech?.id, 'need another technician for handover test')
+  const techHandover = await call('/api/tickets/TK-1042/updates', {
+    method: 'POST',
+    headers: techAuth,
+    body: JSON.stringify({
+      updateType: 'Site visit — not resolved',
+      workDone: 'Handover attempt',
+      handoverToUserId: otherTech.id,
+    }),
+  })
+  assert(techHandover.status === 403, 'technician must not handover/reassign on update')
+  console.log('OK tech cannot handover')
+
+  // Control room has Dashboard v but is not Admin/PM — openTickets must respect visibility
+  const crDash = await call('/api/dashboard', { headers: crAuth })
+  assert(crDash.status === 200 && crDash.body.success, 'control room dashboard failed')
+  const dashIds = (crDash.body.data.openTickets || []).map((t: { id: string }) => t.id)
+  assert(!dashIds.includes(foreign.id), 'control room dashboard must not list unrelated open ticket')
+  console.log('OK control room dashboard openTickets scoped')
+
+  // Device list/history: open ticket overlays and history must respect visibility
+  const foreignOpen = adminTickets.body.data.find(
+    (t: { assignedTo: string | null; id: string; status: string; deviceId: string }) =>
+      t.assignedTo &&
+      t.assignedTo !== 'Ramesh Vaghela' &&
+      t.status !== 'Closed' &&
+      t.deviceId,
+  )
+  assert(foreignOpen?.deviceId, 'need an open unrelated ticket with device for device-scope test')
+
+  const techDevices = await call('/api/devices', { headers: techAuth })
+  assert(techDevices.status === 200 && Array.isArray(techDevices.body.data), 'tech devices failed')
+  assert(
+    !(techDevices.body.data || []).some(
+      (d: { ticketId: string | null }) => d.ticketId === foreignOpen.id,
+    ),
+    'tech device list must not expose unrelated open ticket',
+  )
+  console.log('OK tech device list open-ticket scoped')
+
+  const techDeviceDetail = await call(`/api/devices/${foreignOpen.deviceId}`, { headers: techAuth })
+  if (techDeviceDetail.status === 200) {
+    const histIds = (techDeviceDetail.body.data.tickets || []).map((t: { id: string }) => t.id)
+    assert(
+      !histIds.includes(foreignOpen.id),
+      'tech device history must not include unrelated ticket',
+    )
+    console.log('OK tech device history ticket scoped')
+  } else {
+    assert(
+      techDeviceDetail.status === 403,
+      `tech device detail unexpected: ${techDeviceDetail.status}`,
+    )
+    console.log('OK tech device detail blocked by road scope')
+  }
+
+  // Work report (Control room): ticket rows must respect visibility
+  const crWork = await call('/api/reports/work?view=month', { headers: crAuth })
+  assert(crWork.status === 200 && crWork.body.success, 'control room work report failed')
+  const workTicketIds = (crWork.body.data.people || []).flatMap(
+    (p: { tickets?: string[][] }) => (p.tickets || []).map((row) => row[0]),
+  )
+  assert(
+    !workTicketIds.includes(foreign.id),
+    'control room work report must not include unrelated ticket',
+  )
+  console.log('OK control room work report scoped')
 
   console.log('\nAll smoke checks passed')
   server.close()

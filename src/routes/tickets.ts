@@ -9,6 +9,7 @@ import {
   requireAuth,
   type AuthedRequest,
 } from '../middleware/auth.js'
+import { appendTicketVisibilitySql, assertCanAssignTickets, assertTicketAccess } from '../lib/ticket-access.js'
 import { nextPublicId } from '../lib/ids.js'
 
 const router = Router()
@@ -16,8 +17,13 @@ router.use(requireAuth)
 
 function tabForStatus(status: string, assigneeId: string | null) {
   if (status === 'Closed') return 'cls'
-  if (!assigneeId || status === 'New') return 'new'
+  if (!assigneeId || status === 'Open' || status === 'New') return 'new'
   return 'asg'
+}
+
+/** Legacy rows may still say New; product status is Open only. */
+function displayStatus(status: string) {
+  return status === 'New' ? 'Open' : status
 }
 
 function statusTone(status: string) {
@@ -42,14 +48,10 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
     const params: unknown[] = []
     const where: string[] = []
 
-    if (req.user!.scope === 'assigned_roads') {
-      params.push(req.user!.roadIds)
-      where.push(`d.road_id = ANY($${params.length})`)
-    }
-    if (req.user!.roleName === 'Technician') {
-      params.push(req.user!.id)
-      where.push(`(t.assignee_id = $${params.length} OR t.assignee_id IS NULL)`)
-    }
+    // Ticket list is ownership-scoped (raiser/assignee), not road-scoped.
+    // Road filter was hiding tickets a Site attendant raised on other roads.
+    const visibility = appendTicketVisibilitySql(req.user!, params)
+    if (visibility) where.push(visibility)
     if (filters.road && filters.road !== 'All roads') {
       params.push(filters.road)
       where.push(`r.name = $${params.length}`)
@@ -75,13 +77,14 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
 
     const result = await query(
       `SELECT t.*, d.public_id AS device_public_id, d.slot_number, r.name AS road_name,
-              au.full_name AS assignee_name,
+              ru.full_name AS raised_by_name, au.full_name AS assignee_name,
               rc.name AS reported_cat, rs.name AS reported_sub,
               fc.name AS found_cat, fs.name AS found_sub,
               (SELECT COUNT(*)::int FROM ticket_events e WHERE e.ticket_id = t.id) AS updates
        FROM tickets t
        JOIN devices d ON d.id = t.device_id
        JOIN roads r ON r.id = d.road_id
+       LEFT JOIN users ru ON ru.id = t.raised_by_user_id
        LEFT JOIN users au ON au.id = t.assignee_id
        LEFT JOIN issue_categories rc ON rc.id = t.reported_category_id
        LEFT JOIN issue_subcategories rs ON rs.id = t.reported_subcategory_id
@@ -99,6 +102,7 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
           86400000,
       )
       const tab = tabForStatus(t.status, t.assignee_id)
+      const status = displayStatus(t.status)
       return {
         id: t.public_id,
         uuid: t.id,
@@ -112,14 +116,15 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
           : null,
         issueFound: t.found_sub || null,
         issueFoundDetail: t.found_cat || null,
+        raisedBy: t.raised_by_name || null,
         assignedTo: t.assignee_name || null,
         updates: t.updates,
         daysOpen,
-        daysBad: daysOpen > 3 && t.status !== 'Closed',
-        status: t.status,
-        statusTone: statusTone(t.status),
-        actionLabel: !t.assignee_id && t.status !== 'Closed' ? 'Assign' : 'Open',
-        actionPrimary: !t.assignee_id && t.status !== 'Closed',
+        daysBad: daysOpen > 3 && status !== 'Closed',
+        status,
+        statusTone: statusTone(status),
+        actionLabel: !t.assignee_id && status !== 'Closed' ? 'Assign' : 'Open',
+        actionPrimary: !t.assignee_id && status !== 'Closed',
       }
     })
 
@@ -175,16 +180,23 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
 
 router.get('/export', authorize('All tickets', 'v'), async (req: AuthedRequest, res) => {
   try {
+    const params: unknown[] = []
+    const where: string[] = []
+    const visibility = appendTicketVisibilitySql(req.user!, params)
+    if (visibility) where.push(visibility)
+
     const result = await query(
       `SELECT t.public_id, d.public_id AS device, r.name AS road, t.status, t.raised_at
        FROM tickets t
        JOIN devices d ON d.id = t.device_id
        JOIN roads r ON r.id = d.road_id
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
        ORDER BY t.raised_at DESC`,
+      params,
     )
     const header = 'Ticket,Device,Road,Status,Raised\n'
     const lines = result.rows.map(
-      (r) => `${r.public_id},${r.device},"${r.road}",${r.status},${r.raised_at}`,
+      (r) => `${r.public_id},${r.device},"${r.road}",${displayStatus(r.status)},${r.raised_at}`,
     )
     res.setHeader('Content-Type', 'text/csv')
     res.setHeader('Content-Disposition', 'attachment; filename="tickets.csv"')
@@ -225,6 +237,7 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
     if (open.rowCount) {
       throw new ApiError(409, 'This device already has an open ticket', 'OPEN_TICKET_EXISTS', {
         ticketId: open.rows[0].public_id,
+        openTicketId: open.rows[0].public_id,
       })
     }
 
@@ -244,7 +257,7 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
     }
 
     const publicId = await nextPublicId('TK', 4)
-    const status = body.assigneeId ? 'Under repair' : 'New'
+    const status = body.assigneeId ? 'Under repair' : 'Open'
     const ticket = await query(
       `INSERT INTO tickets (
         public_id, device_id, status, priority, reporter_type, description,
@@ -314,7 +327,7 @@ router.get('/:ticketId', authorize('All tickets', 'v'), async (req: AuthedReques
     )
     if (!result.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
     const t = result.rows[0]
-    assertRoadAccess(req.user!, t.road_id)
+    assertTicketAccess(req.user!, t)
 
     const events = await query(
       `SELECT e.*, u.full_name AS actor_name, c.name AS cat_name, s.name AS sub_name
@@ -360,8 +373,8 @@ router.get('/:ticketId', authorize('All tickets', 'v'), async (req: AuthedReques
         deviceId: t.device_public_id,
         road: t.road_name,
         slot: t.slot_number,
-        status: t.status,
-        statusTone: statusTone(t.status),
+        status: displayStatus(t.status),
+        statusTone: statusTone(displayStatus(t.status)),
         facts: [
           { label: 'Raised on', value: t.raised_at },
           { label: 'Raised by', value: t.raised_by_name },
@@ -420,6 +433,9 @@ router.post('/:ticketId/assign', authorize('All tickets', 'a'), async (req: Auth
     if (!ticket.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
     const t = ticket.rows[0]
     if (t.status === 'Closed') throw new ApiError(409, 'Ticket is closed', 'CLOSED')
+    assertCanAssignTickets(req.user!)
+    /* Assign: road scope only — Control room must assign tickets they did not raise. */
+    assertRoadAccess(req.user!, t.road_id)
 
     await query(`UPDATE tickets SET assignee_id = $2, status = 'Under repair', updated_at = NOW() WHERE id = $1`, [
       t.id,
@@ -471,7 +487,7 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
     if (!ticket.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
     const t = ticket.rows[0]
     if (t.status === 'Closed') throw new ApiError(409, 'Ticket is closed', 'CLOSED')
-    assertRoadAccess(req.user!, t.road_id)
+    assertTicketAccess(req.user!, t)
     assertHolder(req, t.assignee_id)
 
     let newStatus = t.status
@@ -528,6 +544,7 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
     )
 
     if (body.handoverToUserId) {
+      assertCanAssignTickets(req.user!)
       await query(`UPDATE tickets SET assignee_id = $2 WHERE id = $1`, [
         t.id,
         body.handoverToUserId,
@@ -547,13 +564,16 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
   }
 })
 
-router.get('/:ticketId/close-preview', authorize('Update ticket', 'x'), async (req, res) => {
+router.get('/:ticketId/close-preview', authorize('Update ticket', 'x'), async (req: AuthedRequest, res) => {
   try {
     const ticket = await query(
-      `SELECT t.* FROM tickets t WHERE t.public_id = $1 OR t.id::text = $1`,
+      `SELECT t.*, d.road_id FROM tickets t
+       JOIN devices d ON d.id = t.device_id
+       WHERE t.public_id = $1 OR t.id::text = $1`,
       [req.params.ticketId],
     )
     if (!ticket.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
+    assertTicketAccess(req.user!, ticket.rows[0])
     const events = await query(
       `SELECT created_at, work_done, title, cost FROM ticket_events
        WHERE ticket_id = $1 AND cost IS NOT NULL
@@ -597,7 +617,7 @@ router.post('/:ticketId/close', authorize('Update ticket', 'x'), async (req: Aut
     if (!ticket.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
     const t = ticket.rows[0]
     if (t.status === 'Closed') throw new ApiError(409, 'Already closed', 'CLOSED')
-    assertRoadAccess(req.user!, t.road_id)
+    assertTicketAccess(req.user!, t)
     assertHolder(req, t.assignee_id)
 
     await withTransaction(async (client) => {

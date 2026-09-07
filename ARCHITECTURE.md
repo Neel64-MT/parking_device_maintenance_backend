@@ -80,7 +80,7 @@ No Nest, Prisma, or Next.js file-based routing. Express routers live in `src/rou
 - **Auth / Users / Roles** — Email or mobile + password login, forgot/reset password, permission matrix, road assignments
 - **Masters** — Roads, issue categories/subs, parts (seeded, no UI CRUD)
 - **Devices** — Inventory, QR scan, derived operational status from open tickets
-- **Tickets** — Lifecycle (raise → assign → update → close), events, costs, photos
+- **Tickets** — Lifecycle (`Open` → assign/`Under repair` → `Waiting for spare` optional → `Closed`), events, costs, photos
 - **Reports** — Dashboard aggregates, work report by period
 
 ## Password reset architecture
@@ -111,3 +111,72 @@ Admin
 | Helpers | `src/lib/auth.ts` (hash/reset tokens/`pv`), `src/lib/mail.ts` |
 | DB | `password_reset_tokens`, `users.password_changed_at`, `users.password_version` |
 | Design | `DESIGN.md` |
+
+## Ticket visibility
+
+```text
+Admin / Project manager
+  → all tickets (all_roads)
+
+Other roles
+  → SQL: assignee_id = me OR raised_by_user_id = me
+  → Detail/update/close: assertTicketAccess
+  → Assign: Control room / Admin / PM only (`assertCanAssignTickets` + road access)
+```
+
+Single helper: [`src/lib/ticket-access.ts`](src/lib/ticket-access.ts) (`appendTicketVisibilitySql`, `assertTicketAccess`).
+
+Consumed by:
+
+| Area | Route file |
+|------|------------|
+| Ticket list / export / detail / mutations | [`src/routes/tickets.ts`](src/routes/tickets.ts) |
+| Dashboard fleet overlay, down reasons, open list, open-over-3 | [`src/routes/dashboard.ts`](src/routes/dashboard.ts) |
+| Device list / export / scan open ticket + 6m counts; device history tickets/parts/fail ranks | [`src/routes/devices.ts`](src/routes/devices.ts) |
+| Work report + CSV export | [`src/routes/reports.ts`](src/routes/reports.ts) |
+
+Road/user/issue-master aggregate catalogs stay city-wide admin metrics (not personal ticket scope).
+
+**FRONTEND CHANGE REQUIRED:** when Dashboard / All Tickets / Device screens leave mocks, trust API scope — do not re-filter by role in the browser.
+
+## QR scan → raise ticket
+
+```text
+Client scans QR / enters device code
+  → GET /api/devices/scan?q={publicId|qr|slot}  (authorize Scan QR v)
+  → Response: deviceId, deviceName, locationSite, slot, currentStatus, statusDate,
+               ticketsLast6Months, openTicketId?, openTicketAge?, openTicketIssue?,
+               latitude, longitude (+ legacy id/facts)
+  → If openTicketId set → open existing ticket
+  → Else POST /api/tickets { deviceId, ... }
+       → if another open ticket: 409 OPEN_TICKET_EXISTS { openTicketId, ticketId }
+```
+
+Device `latitude` / `longitude` are TEXT columns (create/PATCH/seed). Open-ticket overlays on scan respect ticket visibility for non-Admin/PM.
+
+## Signup approval
+
+```text
+POST /api/auth/signup → status Pending
+Admin or Project manager (Users v/c/e)
+  → GET /api/users?status=Pending
+  → PATCH /api/users/:id { status: Active, roleId, ... }
+```
+
+Project manager Users permission: `vce...` (migration `006_pm_users_edit.sql`).
+
+## Ticket statuses
+
+```text
+POST /api/tickets (no assignee) → Open
+POST /api/tickets (with assignee) or POST .../assign → Under repair
+POST .../updates (Waiting for spare) → Waiting for spare
+POST .../updates (other visit) → Under repair
+POST .../close → Closed
+```
+
+Stored values: `Open` | `Under repair` | `Waiting for spare` | `Closed`. Do not write `New`.
+
+Migration `007_ticket_status_open.sql` rewrites leftover `New` → `Open`.
+
+“One open ticket per device” = any row with `status <> 'Closed'`. List tab `new` filters unassigned/`Open` tickets; it is not a status name.

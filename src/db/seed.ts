@@ -202,18 +202,102 @@ const ROADS = [
 ]
 
 const DEVICES = [
-  { public_id: 'PD-0117', road: 'CG Road', slot: 'CG-33', installed: '2026-03-12' },
-  { public_id: 'PD-0233', road: 'Sobo – Marigold', slot: 'SM-08', installed: '2026-02-28' },
-  { public_id: 'PD-0304', road: 'CG Road', slot: 'CG-61', installed: '2026-03-14' },
-  { public_id: 'PD-0428', road: 'Science City', slot: 'S2-114', installed: '2026-04-02' },
-  { public_id: 'PD-0500', road: 'Science City', slot: 'S2-186', installed: '2026-04-02' },
-  { public_id: 'PD-0571', road: 'Science City', slot: 'S1-206', installed: '2026-03-29' },
-  { public_id: 'PD-0692', road: 'Science City', slot: 'S3-047', installed: '2026-04-08' },
-  { public_id: 'PD-0740', road: 'Science City', slot: 'S3-095', installed: '2026-04-08' },
-  { public_id: 'PD-0805', road: 'Makarba', slot: 'MK-12', installed: '2026-04-19' },
-  { public_id: 'PD-0861', road: 'Makarba', slot: 'MK-68', installed: '2026-04-19' },
-  { public_id: 'PD-0946', road: 'Sindhu Bhavan Road', slot: 'SB-21', installed: '2026-05-06' },
-  { public_id: 'PD-0988', road: 'Sindhu Bhavan Road', slot: 'SB-44', installed: '2026-05-06' },
+  {
+    public_id: 'PD-0117',
+    road: 'CG Road',
+    slot: 'CG-33',
+    installed: '2026-03-12',
+    latitude: '23.033500',
+    longitude: '72.557200',
+  },
+  {
+    public_id: 'PD-0233',
+    road: 'Sobo – Marigold',
+    slot: 'SM-08',
+    installed: '2026-02-28',
+    latitude: '23.021800',
+    longitude: '72.505400',
+  },
+  {
+    public_id: 'PD-0304',
+    road: 'CG Road',
+    slot: 'CG-61',
+    installed: '2026-03-14',
+    latitude: '23.034100',
+    longitude: '72.558000',
+  },
+  {
+    public_id: 'PD-0428',
+    road: 'Science City',
+    slot: 'S2-114',
+    installed: '2026-04-02',
+    latitude: '23.079200',
+    longitude: '72.497500',
+  },
+  {
+    public_id: 'PD-0500',
+    road: 'Science City',
+    slot: 'S2-186',
+    installed: '2026-04-02',
+    latitude: '23.079800',
+    longitude: '72.498100',
+  },
+  {
+    public_id: 'PD-0571',
+    road: 'Science City',
+    slot: 'S1-206',
+    installed: '2026-03-29',
+    latitude: '23.078600',
+    longitude: '72.496900',
+  },
+  {
+    public_id: 'PD-0692',
+    road: 'Science City',
+    slot: 'S3-047',
+    installed: '2026-04-08',
+    latitude: '23.080400',
+    longitude: '72.498800',
+  },
+  {
+    public_id: 'PD-0740',
+    road: 'Science City',
+    slot: 'S3-095',
+    installed: '2026-04-08',
+    latitude: '23.080900',
+    longitude: '72.499200',
+  },
+  {
+    public_id: 'PD-0805',
+    road: 'Makarba',
+    slot: 'MK-12',
+    installed: '2026-04-19',
+    latitude: '23.005600',
+    longitude: '72.502100',
+  },
+  {
+    public_id: 'PD-0861',
+    road: 'Makarba',
+    slot: 'MK-68',
+    installed: '2026-04-19',
+    latitude: '23.006200',
+    longitude: '72.503000',
+  },
+  {
+    public_id: 'PD-0946',
+    road: 'Sindhu Bhavan Road',
+    slot: 'SB-21',
+    installed: '2026-05-06',
+    latitude: '23.038700',
+    longitude: '72.512400',
+  },
+  {
+    public_id: 'PD-0988',
+    road: 'Sindhu Bhavan Road',
+    slot: 'SB-44',
+    installed: '2026-05-06',
+    latitude: '23.039300',
+    longitude: '72.513100',
+  },
 ]
 
 async function seed() {
@@ -342,9 +426,9 @@ async function seed() {
   for (const d of DEVICES) {
     const qr = `QR-${d.public_id.replace('-', '')}`
     const r = await query<{ id: string }>(
-      `INSERT INTO devices (public_id, qr_code, road_id, slot_number, side_of_road, model, installed_on, install_status)
-       VALUES ($1,$2,$3,$4,'Left','Flap barrier — 4 wheeler',$5,'Working') RETURNING id`,
-      [d.public_id, qr, roadIds[d.road], d.slot, d.installed],
+      `INSERT INTO devices (public_id, qr_code, road_id, slot_number, side_of_road, model, installed_on, install_status, latitude, longitude)
+       VALUES ($1,$2,$3,$4,'Left','Flap barrier — 4 wheeler',$5,'Working',$6,$7) RETURNING id`,
+      [d.public_id, qr, roadIds[d.road], d.slot, d.installed, d.latitude, d.longitude],
     )
     deviceIds[d.public_id] = r.rows[0].id
   }
@@ -514,7 +598,7 @@ async function seed() {
     {
       id: 'TK-1101',
       device: 'PD-0740',
-      status: 'New',
+      status: 'Open',
       raised: '2026-09-01 10:00:00+05:30',
       cat: 'Mechanical',
       sub: 'Jammed by debris',

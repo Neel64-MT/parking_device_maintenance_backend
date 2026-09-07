@@ -5,14 +5,24 @@
 - Follow `SKILL.md`: Zod validation, consistent `{ success, data }` / `{ success, false, error, code }`, HTTP status codes, `ApiError`, request logging.
 - Keep business logic in **services**; routes/controllers stay thin.
 - Validate **body, params, and query** with Zod on every endpoint.
-- Enforce **authorization server-side** via `authorize(screen, flag)` plus road scope and ticket holder checks.
+- Enforce **authorization server-side** via `authorize(screen, flag)` plus road scope, ticket holder checks, and ticket visibility (assignee/raiser for non-Admin/non-PM).
 - Store secrets only in environment variables (`.env` / `.env.local`).
 - Never return passwords, password hashes, JWT secrets, raw reset tokens, or stack traces to clients.
 - Soft-inactivate users; never hard-delete (ticket history must remain readable).
 - Soft-deactivate issue sub-categories that have been used on tickets; hard-delete only when unused.
 - Derive device operational status from open tickets after go-live (do not trust client status for runtime).
-- One open ticket per device; closed ticket within 7 days reopens the same ticket.
-- Only the current ticket holder may update or close; handover transfers that right.
+- One open ticket per device (`status <> 'Closed'`); closed ticket within 7 days reopens the same ticket.
+- Ticket `status` is one of `Open`, `Under repair`, `Waiting for spare`, `Closed`. Never persist `New`; unassigned raise uses `Open`.
+- Duplicate raise must return `409` / `OPEN_TICKET_EXISTS` with `details.openTicketId` (and `ticketId`) for UI redirect — never create a second open ticket.
+- QR scan details use `GET /api/devices/scan?q=` (do not invent a second `/scan-details` route that fights `/:deviceId`).
+- Device `latitude` / `longitude` are optional TEXT; seed and create/PATCH may set them.
+- Only the current ticket holder may update or close. Assign / reassign is Control room, Admin, or Project manager only — technicians cannot handover.
+- Admin and Project manager retain city-wide ticket visibility; other roles only see tickets they raised or are assigned to (SQL + detail asserts).
+- Apply the same ticket visibility helper to dashboard metrics, device ticket overlays/history, and work report rows — do not duplicate Admin/PM branches per route.
+- Backend authorization is mandatory; frontend filtering is not a security boundary.
+- Assign may use road scope only (Control room routing); list/detail/dashboard/devices/reports stay visibility-scoped.
+- Signup approval/update requires `authorize('Users', 'e')` (Admin or Project manager with Users edit).
+- Reuse existing authorization mechanisms; avoid duplicate Admin/PM code paths.
 - Keep the sibling `frontend/` directory **read-only** — document needed UI wiring as FRONTEND CHANGE REQUIRED.
 - Update `MEMORY.md` / `PHASES.md` after each meaningful phase.
 - Forgot-password responses must not reveal whether an account exists.
@@ -49,9 +59,14 @@
 
 ### Special rules
 
-- Technician: tickets they hold (+ raise on assigned roads); no Work report cost visibility (matrix denies Work report).
+- Technician / Site attendant / Control room / AMC officer: ticket list/detail/export, dashboard ticket stats, device open-ticket overlays/history, and work report ticket rows limited to `assignee_id = me OR raised_by_user_id = me` (plus road scope when `assigned_roads`).
+- Admin / Project manager: city-wide ticket visibility (road scope still `all_roads`).
+- Technician: no Work report cost visibility when matrix denies Work report. Cannot assign or reassign (`All tickets` has no `a`); cannot send `handoverToUserId`.
 - Site attendant: raise + scan on assigned roads; cannot assign/close.
-- Control room: raise/assign; cannot close.
+- Assign / reassign: Control room, Admin, or Project manager only (`assertCanAssignTickets`). Technicians cannot use `/assign` or `handoverToUserId`.
+- Control room: raise/assign; cannot close; list/dashboard visibility is assignee/raiser only; assign uses road access so CR can route tickets they did not raise.
 - AMC officer: view only.
+- Project manager: Users `vce...` — can approve Pending signups and edit users; Roles matrix remains view-only.
 - At least one Admin must always remain active.
 - Cost fields on work report: omit for roles without Work report view.
+- Do not add a second permission system or duplicate role checks across dashboard/tickets/devices/reports.
