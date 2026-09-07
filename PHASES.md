@@ -169,3 +169,20 @@
 **Testing:** smoke — Control room assign still works; technician assign and handover return 403
 
 **Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED to hide technician handover UI
+
+## Phase 20 — Ticket list days after close + list presentation
+
+**Status:** Complete
+
+**Objective:** Expose whole days since close on the ticket list; align Open/Assigned tabs and Under repair tile presentation without changing stored statuses.
+
+**APIs:** `GET /api/tickets` / export
+- Each row: `daysAfterClose: number | null` (`null` when `closed_at` is empty)
+- Tab `new` = unassigned non-closed (not stored status `New`)
+- List/export/tiles: assigned + stored `Open` presented as `Under repair` (`listStatus`; DB unchanged)
+
+**Database:** none
+
+**Files:** `src/routes/tickets.ts`, docs
+
+**Done when:** docs match; FRONTEND CHANGE REQUIRED to bind closed-tab aging to `daysAfterClose` and trust list `status`

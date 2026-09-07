@@ -12,6 +12,9 @@
 - Soft-deactivate issue sub-categories that have been used on tickets; hard-delete only when unused.
 - Derive device operational status from open tickets after go-live (do not trust client status for runtime).
 - One open ticket per device (`status <> 'Closed'`); closed ticket within 7 days reopens the same ticket.
+- Ticket list rows expose `daysOpen` and `daysAfterClose` (`null` when not closed). Do not invent a second list endpoint for close-age.
+- Ticket list tab `new` = unassigned non-closed; do not treat tab key `new` as stored status `New`.
+- List/export may present assigned + stored `Open` as `Under repair` without changing the DB row; do not duplicate that mapping in the frontend.
 - Ticket `status` is one of `Open`, `Under repair`, `Waiting for spare`, `Closed`. Never persist `New`; unassigned raise uses `Open`.
 - Duplicate raise must return `409` / `OPEN_TICKET_EXISTS` with `details.openTicketId` (and `ticketId`) for UI redirect — never create a second open ticket.
 - QR scan details use `GET /api/devices/scan?q=` (do not invent a second `/scan-details` route that fights `/:deviceId`).

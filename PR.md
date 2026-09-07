@@ -25,7 +25,7 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 1. **Authentication** — Email or mobile + password, JWT session, logout, current user (`/me`), forgot password, reset password
 2. **Authorization** — Screen × flag matrix (`v c e a x d`), road scope, ticket holder rules
 3. **Dashboard** — Fleet status, down reasons, road-wise status, oldest open tickets
-4. **Tickets** — List (tabs/filters), raise, detail, assign, site-update, close; one non-`Closed` ticket per device (`409 OPEN_TICKET_EXISTS` with `openTicketId`); 7-day reopen = same ticket. **Statuses:** `Open`, `Under repair`, `Waiting for spare`, `Closed` (no `New`). **Visibility:** Admin and Project manager see all (within road scope). All other roles see only tickets where `assignee_id` or `raised_by_user_id` is the current user (enforced in SQL and on detail/mutations).
+4. **Tickets** — List (tabs/filters), raise, detail, assign, site-update, close; one non-`Closed` ticket per device (`409 OPEN_TICKET_EXISTS` with `openTicketId`); 7-day reopen = same ticket. List rows include `daysOpen` and `daysAfterClose` (whole days since `closed_at`, or `null` if still open). **Statuses:** `Open`, `Under repair`, `Waiting for spare`, `Closed` (no `New`). **Visibility:** Admin and Project manager see all (within road scope). All other roles see only tickets where `assignee_id` or `raised_by_user_id` is the current user (enforced in SQL and on detail/mutations).
 5. **Devices** — List, add, history, QR scan/lookup (`GET /api/devices/scan?q=`), QR label PNG, export; optional `latitude` / `longitude` (TEXT)
 6. **Issue master** — Categories / sub-categories with severity; deactivate if used (no hard delete when used)
 7. **Road master** — CRUD roads; sequential `RD-xx` codes
@@ -54,11 +54,12 @@ Canonical `tickets.status` values (exactly four; never `New`):
 | `Closed` | Ticket closed |
 
 - Unassigned raise writes `Open` (not `New`).
-- List tab key `new` is UI-only (unassigned / `Open`); it is not a stored status.
+- List tab key `new` is UI-only: **unassigned and not closed** (not a stored status). Tab `asg` = has assignee; `cls` = Closed.
+- List/export/tiles presentation: if a ticket has an assignee but stored status is still `Open`/`New`, list `status` is shown as `Under repair` (DB row unchanged). Detail API still returns stored status (normalized `New` → `Open`).
 - “One open ticket” means `status <> 'Closed'`, not status `Open` only.
 - Existing `New` rows migrated to `Open` (`007_ticket_status_open.sql`).
 
-**FRONTEND CHANGE REQUIRED:** All Tickets / detail badges must show `Open`, not `New`.
+**FRONTEND CHANGE REQUIRED:** All Tickets / detail badges must show `Open`, not `New`. Closed-tab aging can use list field `daysAfterClose` (do not recompute from dates in the browser unless needed). Trust list `status` for Assigned-tab pills vs Under repair tile alignment.
 
 ### Ticket visibility requirements
 
@@ -68,6 +69,12 @@ Canonical `tickets.status` values (exactly four; never `New`):
 - The same visibility scope applies to dashboard ticket metrics, device open-ticket overlays/history counts, and work report ticket rows/export.
 - Assign (`POST /api/tickets/:id/assign`) is **Control room, Admin, or Project manager only**. Technicians cannot assign, reassign, or handover. Assign is road-scoped so Control room can route tickets they did not raise.
 - Frontend role filtering is presentation only; never the security boundary.
+
+### Ticket list aging fields
+
+- `GET /api/tickets` each row: `daysOpen` (raised → closed or now) and `daysAfterClose` (now → `closed_at`, or `null` if not closed).
+- `daysAfterClose` is list-only (not ticket detail). Supports the 7-day reopen rule in the UI.
+- List tiles (`underRepair`, `waitingSpare`, `openOver3`) and CSV export use the same list presentation status rules as row `status`.
 
 ### Signup approval requirements
 

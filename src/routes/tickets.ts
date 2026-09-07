@@ -15,15 +15,26 @@ import { nextPublicId } from '../lib/ids.js'
 const router = Router()
 router.use(requireAuth)
 
+/** Open tab (`new`) = unassigned non-closed; Assigned (`asg`) = has assignee. */
 function tabForStatus(status: string, assigneeId: string | null) {
   if (status === 'Closed') return 'cls'
-  if (!assigneeId || status === 'Open' || status === 'New') return 'new'
+  if (!assigneeId) return 'new'
   return 'asg'
 }
 
 /** Legacy rows may still say New; product status is Open only. */
 function displayStatus(status: string) {
   return status === 'New' ? 'Open' : status
+}
+
+/**
+ * List/tiles only: assigned tickets still stored as Open/New count & display as Under repair
+ * so Assigned-tab pills match the Under repair tile (DB unchanged).
+ */
+function listStatus(status: string, assigneeId: string | null) {
+  const s = displayStatus(status)
+  if (assigneeId && s === 'Open') return 'Under repair'
+  return s
 }
 
 function statusTone(status: string) {
@@ -102,7 +113,7 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
           86400000,
       )
       const tab = tabForStatus(t.status, t.assignee_id)
-      const status = displayStatus(t.status)
+      const status = listStatus(t.status, t.assignee_id)
       return {
         id: t.public_id,
         uuid: t.id,
@@ -120,6 +131,9 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
         assignedTo: t.assignee_name || null,
         updates: t.updates,
         daysOpen,
+        daysAfterClose: t.closed_at
+          ? Math.floor((Date.now() - new Date(t.closed_at).getTime()) / 86400000)
+          : null,
         daysBad: daysOpen > 3 && status !== 'Closed',
         status,
         statusTone: statusTone(status),
@@ -142,10 +156,14 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
     const tiles = {
       openNotAttended: result.rows.filter((t) => tabForStatus(t.status, t.assignee_id) === 'new')
         .length,
-      underRepair: result.rows.filter((t) => t.status === 'Under repair').length,
-      waitingSpare: result.rows.filter((t) => t.status === 'Waiting for spare').length,
+      underRepair: result.rows.filter(
+        (t) => listStatus(t.status, t.assignee_id) === 'Under repair',
+      ).length,
+      waitingSpare: result.rows.filter(
+        (t) => listStatus(t.status, t.assignee_id) === 'Waiting for spare',
+      ).length,
       openOver3: result.rows.filter((t) => {
-        if (t.status === 'Closed') return false
+        if (tabForStatus(t.status, t.assignee_id) === 'cls') return false
         const days = Math.floor((Date.now() - new Date(t.raised_at).getTime()) / 86400000)
         return days > 3
       }).length,
@@ -164,7 +182,7 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
       tabCounts: {
         new: result.rows.filter((t) => tabForStatus(t.status, t.assignee_id) === 'new').length,
         asg: result.rows.filter((t) => tabForStatus(t.status, t.assignee_id) === 'asg').length,
-        cls: result.rows.filter((t) => t.status === 'Closed').length,
+        cls: result.rows.filter((t) => tabForStatus(t.status, t.assignee_id) === 'cls').length,
       },
       pagination: {
         page: filters.page,
@@ -186,7 +204,7 @@ router.get('/export', authorize('All tickets', 'v'), async (req: AuthedRequest, 
     if (visibility) where.push(visibility)
 
     const result = await query(
-      `SELECT t.public_id, d.public_id AS device, r.name AS road, t.status, t.raised_at
+      `SELECT t.public_id, d.public_id AS device, r.name AS road, t.status, t.assignee_id, t.raised_at
        FROM tickets t
        JOIN devices d ON d.id = t.device_id
        JOIN roads r ON r.id = d.road_id
@@ -196,7 +214,8 @@ router.get('/export', authorize('All tickets', 'v'), async (req: AuthedRequest, 
     )
     const header = 'Ticket,Device,Road,Status,Raised\n'
     const lines = result.rows.map(
-      (r) => `${r.public_id},${r.device},"${r.road}",${displayStatus(r.status)},${r.raised_at}`,
+      (r) =>
+        `${r.public_id},${r.device},"${r.road}",${listStatus(r.status, r.assignee_id)},${r.raised_at}`,
     )
     res.setHeader('Content-Type', 'text/csv')
     res.setHeader('Content-Disposition', 'attachment; filename="tickets.csv"')
