@@ -31,7 +31,15 @@ const router = Router()
 const GENERIC_FORGOT_MESSAGE =
   'If an account exists for this email, a password reset link has been sent.'
 
+const FORGOT_PASSWORD_ROLE_MESSAGE =
+  'Only Admin or Project Manager can reset a password using Forgot Password.'
+
 const PENDING_APPROVAL_MESSAGE = 'Please ask the admin to approve your request.'
+
+/** Forgot / email-reset is limited to ops-lead roles (same names as dashboard home). */
+function canUseForgotPassword(roleName: string) {
+  return roleName === 'Admin' || roleName === 'Project manager'
+}
 
 function toClientUser(u: AuthUser) {
   return {
@@ -164,14 +172,19 @@ router.post('/forgot-password', async (req, res) => {
     const { email: rawEmail } = forgotSchema.parse(req.body)
     const email = normalizeEmail(rawEmail)
 
-    const userResult = await query<{ id: string; email: string }>(
-      `SELECT id, email FROM users
-       WHERE LOWER(email) = LOWER($1) AND status = 'Active'`,
+    const userResult = await query<{ id: string; email: string; role_name: string }>(
+      `SELECT u.id, u.email, r.name AS role_name
+       FROM users u
+       JOIN roles r ON r.id = u.role_id
+       WHERE LOWER(u.email) = LOWER($1) AND u.status = 'Active'`,
       [email],
     )
 
     if (userResult.rowCount) {
       const user = userResult.rows[0]
+      if (!canUseForgotPassword(user.role_name)) {
+        throw new ApiError(403, FORGOT_PASSWORD_ROLE_MESSAGE, 'FORGOT_PASSWORD_ROLE_DENIED')
+      }
       const rawToken = await issuePasswordResetToken(user.id)
       try {
         await sendPasswordResetEmail(user.email, rawToken)
@@ -192,6 +205,17 @@ router.post('/reset-password', async (req, res) => {
     const row = await consumePasswordResetToken(token)
     if (!row) {
       throw new ApiError(400, 'Invalid or expired reset token', 'INVALID_RESET_TOKEN')
+    }
+
+    const roleResult = await query<{ role_name: string }>(
+      `SELECT r.name AS role_name
+       FROM users u
+       JOIN roles r ON r.id = u.role_id
+       WHERE u.id = $1`,
+      [row.user_id],
+    )
+    if (!roleResult.rowCount || !canUseForgotPassword(roleResult.rows[0].role_name)) {
+      throw new ApiError(403, FORGOT_PASSWORD_ROLE_MESSAGE, 'FORGOT_PASSWORD_ROLE_DENIED')
     }
 
     const passwordHash = await hashPassword(password)

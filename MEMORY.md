@@ -11,10 +11,11 @@
 - Phase 20 — Ticket list `daysAfterClose` + tab `new` = unassigned only; list presents assigned+`Open` as `Under repair`
 - Phase 21 — DB-level pagination for tickets + devices (`page`/`limit`, default 10, allowed 10/25/50/100)
 - Phase 22 — Parts master `amount` + visit cost = labour `cost` + sum(master part amounts); `ticket_event_parts` + JSONB snapshot
+- Forgot/reset password role gate — Admin / Project manager only; other Active roles `403 FORGOT_PASSWORD_ROLE_DENIED`; unknown email stays generic 200
 
 ## Currently Working On
 
-- (idle — parts master visit cost complete)
+- (idle — forgot-password role gate + FE 404 companion)
 
 ## Pending
 
