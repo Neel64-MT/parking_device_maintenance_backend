@@ -33,7 +33,9 @@
 - Reuse existing authorization mechanisms; avoid duplicate Admin/PM code paths.
 - Keep the sibling `frontend/` directory **read-only** — document needed UI wiring as FRONTEND CHANGE REQUIRED.
 - Update `MEMORY.md` / `PHASES.md` after each meaningful phase.
-- Forgot-password responses must not reveal whether an account exists.
+- Forgot-password: only **Admin** / **Project manager** receive a reset email. Other Active roles get `403` / `FORGOT_PASSWORD_ROLE_DENIED` with an explicit message. Unknown / Pending / Inactive emails still get the generic 200 (no account enumeration for missing users).
+- Reset-password must also reject non–Admin/PM users (`FORGOT_PASSWORD_ROLE_DENIED`) without marking the token used.
+- Forgot-password responses must not reveal whether an account exists (except the intentional role-denied path for known Active non–ops-lead users).
 - Reset tokens must expire, be one-time-use, and be stored hashed only.
 - Admin password changes require server-side `authorize('Users', 'e')`; reuse existing user PATCH.
 - Reuse existing auth hashing, Zod password rules, and JWT middleware; avoid duplicate auth stacks.

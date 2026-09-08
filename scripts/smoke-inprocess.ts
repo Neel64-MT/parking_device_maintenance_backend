@@ -183,7 +183,7 @@ async function main() {
   })
   assert(forgotKnown.status === 200 && forgotKnown.body.success, 'forgot known failed')
   assert(!JSON.stringify(forgotKnown.body).includes('token'), 'forgot must not return token')
-  console.log('OK forgot-password known email')
+  console.log('OK forgot-password known Admin/PM email')
 
   const forgotUnknown = await call('/api/auth/forgot-password', {
     method: 'POST',
@@ -196,6 +196,16 @@ async function main() {
   )
   console.log('OK forgot-password unknown email (no enumeration)')
 
+  const forgotTech = await call('/api/auth/forgot-password', {
+    method: 'POST',
+    body: JSON.stringify({ email: 'ramesh.vaghela@yopmail.com' }),
+  })
+  assert(
+    forgotTech.status === 403 && forgotTech.body.code === 'FORGOT_PASSWORD_ROLE_DENIED',
+    `forgot Technician must be 403 role denied: ${JSON.stringify(forgotTech.body)}`,
+  )
+  console.log('OK forgot-password Technician role denied')
+
   const forgotBad = await call('/api/auth/forgot-password', {
     method: 'POST',
     body: JSON.stringify({ email: 'not-an-email' }),
@@ -203,7 +213,30 @@ async function main() {
   assert(forgotBad.status === 400, 'forgot invalid email expected 400')
   console.log('OK forgot-password validation 400')
 
-  // Reset password
+  // Reset password — Technician token must be rejected without consuming
+  const techResetUser = await query<{ id: string }>(
+    `SELECT id FROM users WHERE email = 'ramesh.vaghela@yopmail.com'`,
+  )
+  const techResetToken = await issuePasswordResetToken(techResetUser.rows[0].id)
+  const techReset = await call('/api/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ token: techResetToken, password: 'ResetPass1' }),
+  })
+  assert(
+    techReset.status === 403 && techReset.body.code === 'FORGOT_PASSWORD_ROLE_DENIED',
+    `reset Technician must be 403: ${JSON.stringify(techReset.body)}`,
+  )
+  const techReuse = await call('/api/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ token: techResetToken, password: 'ResetPass1' }),
+  })
+  assert(
+    techReuse.status === 403 && techReuse.body.code === 'FORGOT_PASSWORD_ROLE_DENIED',
+    'Technician reset token must remain usable until role-denied without mark-used',
+  )
+  console.log('OK reset-password Technician role denied (token unused)')
+
+  // Reset password — Admin/PM
   const alkesh = await query<{ id: string }>(
     `SELECT id FROM users WHERE email = 'alkesh.patel@yopmail.com'`,
   )
