@@ -202,3 +202,20 @@
 **Testing:** smoke — default page/limit, allowed/invalid limits, page 2, tech total ≤ PM total
 
 **Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED for TicketList pager/defaults
+
+## Phase 22 — Parts master amount + visit cost from selected parts
+
+**Status:** Complete
+
+**Objective:** Price parts on the Parts master; ticket update/close accept part UUIDs and compute visit cost server-side (`labour cost` + sum of master amounts). Persist JSONB snapshot + `ticket_event_parts` junction; never trust client part prices.
+
+**APIs:**
+- `GET /api/parts` / `GET /api/lookups/parts` — `{ id, name, amount }`
+- `POST /api/parts`, `PATCH /api/parts/:id` — Issue master `c` / `e`
+- `POST /api/tickets/:id/updates` and `/close` — `parts: uuid[]` + labour-only `cost`; `eventCost = labour + partsCost`
+
+**Files:** `009_parts_amount.sql`, `src/lib/parts-cost.ts`, `src/routes/parts.ts`, `lookups.ts`, `tickets.ts`, `devices.ts` (object/string part history), seed, smoke, docs
+
+**Testing:** parts CRUD; update 0/1/many parts; labour 1000 + parts 500+250 → 1750; invalid part UUID rejected; labour-only preserved
+
+**Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED — PartChips send UUIDs; cost field is labour-only (do not pre-add part prices)

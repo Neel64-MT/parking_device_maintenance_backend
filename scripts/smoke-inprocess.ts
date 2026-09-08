@@ -143,6 +143,21 @@ async function main() {
   assert(devBad.status === 400, 'devices limit=200 must be 400')
   console.log('OK devices default pagination')
 
+  const partsLookup = await call('/api/lookups/parts', { headers: auth })
+  assert(partsLookup.status === 200 && Array.isArray(partsLookup.body.data), 'lookups parts failed')
+  assert(
+    partsLookup.body.data.length === 0 ||
+      typeof partsLookup.body.data[0].amount === 'number',
+    'lookups parts must include amount',
+  )
+  const partsApi = await call('/api/parts', { headers: auth })
+  assert(partsApi.status === 200 && Array.isArray(partsApi.body.data), 'GET /api/parts failed')
+  assert(
+    partsApi.body.data.length === 0 || typeof partsApi.body.data[0].amount === 'number',
+    'GET /api/parts must include amount',
+  )
+  console.log('OK parts amount on list/lookups')
+
   const bad = await call('/api/auth/login', {
     method: 'POST',
     body: JSON.stringify({ identifier: 'abc', password: 'x' }),

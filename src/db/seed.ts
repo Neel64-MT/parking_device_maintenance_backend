@@ -98,19 +98,19 @@ const ISSUE_MASTER = [
   },
 ] as const
 
-const PARTS = [
-  'Flap plate',
-  'Hinge assembly',
-  'Motor',
-  'Gearbox',
-  'Limit switch',
-  'Controller board',
-  'SMPS / power supply',
-  'Sensor',
-  'QR plate',
-  'Wiring harness',
-  'MCB',
-  'Spring / damper',
+const PARTS: Array<{ name: string; amount: number }> = [
+  { name: 'Flap plate', amount: 6400 },
+  { name: 'Hinge assembly', amount: 2800 },
+  { name: 'Motor', amount: 9200 },
+  { name: 'Gearbox', amount: 7500 },
+  { name: 'Limit switch', amount: 850 },
+  { name: 'Controller board', amount: 5300 },
+  { name: 'SMPS / power supply', amount: 2300 },
+  { name: 'Sensor', amount: 1200 },
+  { name: 'QR plate', amount: 400 },
+  { name: 'Wiring harness', amount: 950 },
+  { name: 'MCB', amount: 600 },
+  { name: 'Spring / damper', amount: 1100 },
 ]
 
 const ROADS = [
@@ -304,7 +304,7 @@ async function seed() {
   console.log('Seeding…')
 
   // Clear in dependency order
-  await query('TRUNCATE ticket_assignments, ticket_events, tickets, devices, user_roads, password_reset_tokens, users, role_permissions, roles, issue_subcategories, issue_categories, parts, roads, token_denylist, id_counters RESTART IDENTITY CASCADE')
+  await query('TRUNCATE ticket_event_parts, ticket_assignments, ticket_events, tickets, devices, user_roads, password_reset_tokens, users, role_permissions, roles, issue_subcategories, issue_categories, parts, roads, token_denylist, id_counters RESTART IDENTITY CASCADE')
 
   const roleIds: Record<string, string> = {}
   for (const [name, def] of Object.entries(DEFAULT_ROLE_PERMS)) {
@@ -382,7 +382,7 @@ async function seed() {
   }
 
   for (const part of PARTS) {
-    await query(`INSERT INTO parts (name) VALUES ($1)`, [part])
+    await query(`INSERT INTO parts (name, amount) VALUES ($1, $2)`, [part.name, part.amount])
   }
 
   const users = [

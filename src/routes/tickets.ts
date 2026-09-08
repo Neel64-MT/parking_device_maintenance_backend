@@ -12,6 +12,7 @@ import {
 import { appendTicketVisibilitySql, assertCanAssignTickets, assertTicketAccess, isTicketPrivilegedRole } from '../lib/ticket-access.js'
 import { nextPublicId } from '../lib/ids.js'
 import { limitSchema, pageSchema, paginationMeta, sqlOffset } from '../lib/pagination.js'
+import { insertEventParts, resolvePartsCost, visitEventCost } from '../lib/parts-cost.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -540,8 +541,9 @@ const updateSchema = z.object({
   workDone: z.string().optional(),
   notFixedReason: z.string().optional(),
   nextVisitAt: z.string().optional(),
+  /** Labour / non-part visit charges only — part prices come from Parts Master. */
   cost: z.coerce.number().nonnegative().default(0),
-  parts: z.array(z.string()).default([]),
+  parts: z.array(z.string().uuid()).default([]),
   photos: z.array(z.string()).default([]),
   handoverToUserId: z.string().uuid().nullable().optional(),
 })
@@ -560,75 +562,83 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
     assertTicketAccess(req.user!, t)
     assertCanAddUpdate(req, t)
 
+    const { partsCost, snapshots } = await resolvePartsCost(body.parts)
+    const eventCost = visitEventCost(body.cost, partsCost)
+
     let newStatus = t.status
     if (body.updateType === 'Waiting for spare') newStatus = 'Waiting for spare'
     else if (body.updateType.includes('resolved')) newStatus = 'Under repair'
     else if (!t.assignee_id) newStatus = 'Under repair'
     else newStatus = 'Under repair'
 
-    if (body.categoryId && body.subCategoryId) {
-      const changed =
-        body.subCategoryId !== (t.found_subcategory_id || t.reported_subcategory_id)
-      await query(
-        `UPDATE tickets SET found_category_id = $2, found_subcategory_id = $3, updated_at = NOW() WHERE id = $1`,
-        [t.id, body.categoryId, body.subCategoryId],
-      )
-      if (changed) {
-        await query(
-          `INSERT INTO ticket_events (ticket_id, event_type, title, body, status_label, actor_user_id, category_id, subcategory_id)
-           VALUES ($1,'reclassified','Issue reclassified','Category updated on site','Still open',$2,$3,$4)`,
-          [t.id, req.user!.id, body.categoryId, body.subCategoryId],
+    const eventId = await withTransaction(async (client) => {
+      if (body.categoryId && body.subCategoryId) {
+        const changed =
+          body.subCategoryId !== (t.found_subcategory_id || t.reported_subcategory_id)
+        await client.query(
+          `UPDATE tickets SET found_category_id = $2, found_subcategory_id = $3, updated_at = NOW() WHERE id = $1`,
+          [t.id, body.categoryId, body.subCategoryId],
         )
+        if (changed) {
+          await client.query(
+            `INSERT INTO ticket_events (ticket_id, event_type, title, body, status_label, actor_user_id, category_id, subcategory_id)
+             VALUES ($1,'reclassified','Issue reclassified','Category updated on site','Still open',$2,$3,$4)`,
+            [t.id, req.user!.id, body.categoryId, body.subCategoryId],
+          )
+        }
       }
-    }
 
-    const inserted = await query(
-      `INSERT INTO ticket_events (
-         ticket_id, event_type, title, body, status_label, actor_user_id,
-         category_id, subcategory_id, cost, next_visit_at, not_fixed_reason, work_done, photos, parts
-       ) VALUES ($1,$2,$3,$4,'Still open',$5,$6,$7,$8,$9,$10,$11,$12,$13)
-       RETURNING id`,
-      [
-        t.id,
-        body.updateType.includes('resolved')
-          ? 'visit_resolved'
-          : body.updateType === 'Waiting for spare'
-            ? 'waiting_spare'
-            : 'visit_open',
-        body.updateType,
-        body.workDone || body.updateType,
-        req.user!.id,
-        body.categoryId || null,
-        body.subCategoryId || null,
-        body.cost,
-        body.nextVisitAt || null,
-        body.notFixedReason || null,
-        body.workDone || null,
-        JSON.stringify(body.photos),
-        JSON.stringify(body.parts),
-      ],
-    )
-    const eventId = inserted.rows[0].id as string
-
-    await query(
-      `UPDATE tickets SET status = $2, total_cost = total_cost + $3, updated_at = NOW() WHERE id = $1`,
-      [t.id, newStatus, body.cost],
-    )
-
-    if (body.handoverToUserId) {
-      assertCanAssignTickets(req.user!)
-      await query(`UPDATE tickets SET assignee_id = $2 WHERE id = $1`, [
-        t.id,
-        body.handoverToUserId,
-      ])
-      await query(
-        `INSERT INTO ticket_assignments (ticket_id, from_user_id, to_user_id, reason)
-         VALUES ($1,$2,$3,'Handover on update')`,
-        [t.id, req.user!.id, body.handoverToUserId],
+      const inserted = await client.query(
+        `INSERT INTO ticket_events (
+           ticket_id, event_type, title, body, status_label, actor_user_id,
+           category_id, subcategory_id, cost, next_visit_at, not_fixed_reason, work_done, photos, parts
+         ) VALUES ($1,$2,$3,$4,'Still open',$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         RETURNING id`,
+        [
+          t.id,
+          body.updateType.includes('resolved')
+            ? 'visit_resolved'
+            : body.updateType === 'Waiting for spare'
+              ? 'waiting_spare'
+              : 'visit_open',
+          body.updateType,
+          body.workDone || body.updateType,
+          req.user!.id,
+          body.categoryId || null,
+          body.subCategoryId || null,
+          eventCost,
+          body.nextVisitAt || null,
+          body.notFixedReason || null,
+          body.workDone || null,
+          JSON.stringify(body.photos),
+          JSON.stringify(snapshots),
+        ],
       )
-    } else if (!t.assignee_id) {
-      await query(`UPDATE tickets SET assignee_id = $2 WHERE id = $1`, [t.id, req.user!.id])
-    }
+      const id = inserted.rows[0].id as string
+      await insertEventParts(client, id, snapshots)
+
+      await client.query(
+        `UPDATE tickets SET status = $2, total_cost = total_cost + $3, updated_at = NOW() WHERE id = $1`,
+        [t.id, newStatus, eventCost],
+      )
+
+      if (body.handoverToUserId) {
+        assertCanAssignTickets(req.user!)
+        await client.query(`UPDATE tickets SET assignee_id = $2 WHERE id = $1`, [
+          t.id,
+          body.handoverToUserId,
+        ])
+        await client.query(
+          `INSERT INTO ticket_assignments (ticket_id, from_user_id, to_user_id, reason)
+           VALUES ($1,$2,$3,'Handover on update')`,
+          [t.id, req.user!.id, body.handoverToUserId],
+        )
+      } else if (!t.assignee_id) {
+        await client.query(`UPDATE tickets SET assignee_id = $2 WHERE id = $1`, [t.id, req.user!.id])
+      }
+
+      return id
+    })
 
     return created(
       res,
@@ -636,6 +646,10 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
         id: t.public_id,
         eventId,
         status: newStatus,
+        cost: eventCost,
+        partsCost,
+        labourCost: body.cost,
+        parts: snapshots,
         resolvedReady: body.updateType.includes('resolved'),
       },
       'Update saved',
@@ -720,8 +734,9 @@ const closeSchema = z.object({
   categoryId: z.string().uuid(),
   subCategoryId: z.string().uuid(),
   workDone: z.string().min(1),
-  parts: z.array(z.string()).default([]),
+  parts: z.array(z.string().uuid()).default([]),
   photos: z.array(z.string()).default([]),
+  /** Labour / non-part charges only — part prices come from Parts Master. */
   cost: z.coerce.number().nonnegative().default(0),
   deviceTested: z.string().min(1),
 })
@@ -744,7 +759,32 @@ router.post('/:ticketId/close', authorize('Update ticket', 'x'), async (req: Aut
     assertTicketAccess(req.user!, t)
     assertHolder(req, t.assignee_id)
 
+    const { partsCost, snapshots } = await resolvePartsCost(body.parts)
+    const eventCost = visitEventCost(body.cost, partsCost)
+
     await withTransaction(async (client) => {
+      const inserted = await client.query(
+        `INSERT INTO ticket_events (
+           ticket_id, event_type, title, body, status_label, actor_user_id,
+           category_id, subcategory_id, cost, work_done, photos, parts, meta
+         ) VALUES ($1,'closed','Ticket closed',$2,'Closed',$3,$4,$5,$6,$7,$8,$9,$10)
+         RETURNING id`,
+        [
+          t.id,
+          body.workDone,
+          req.user!.id,
+          body.categoryId,
+          body.subCategoryId,
+          eventCost,
+          body.workDone,
+          JSON.stringify(body.photos),
+          JSON.stringify(snapshots),
+          JSON.stringify({ deviceTested: body.deviceTested }),
+        ],
+      )
+      const eventId = inserted.rows[0].id as string
+      await insertEventParts(client, eventId, snapshots)
+
       await client.query(
         `UPDATE tickets SET
            status = 'Closed',
@@ -754,29 +794,15 @@ router.post('/:ticketId/close', authorize('Update ticket', 'x'), async (req: Aut
            total_cost = total_cost + $4,
            updated_at = NOW()
          WHERE id = $1`,
-        [t.id, body.categoryId, body.subCategoryId, body.cost],
-      )
-      await client.query(
-        `INSERT INTO ticket_events (
-           ticket_id, event_type, title, body, status_label, actor_user_id,
-           category_id, subcategory_id, cost, work_done, photos, parts, meta
-         ) VALUES ($1,'closed','Ticket closed',$2,'Closed',$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [
-          t.id,
-          body.workDone,
-          req.user!.id,
-          body.categoryId,
-          body.subCategoryId,
-          body.cost,
-          body.workDone,
-          JSON.stringify(body.photos),
-          JSON.stringify(body.parts),
-          JSON.stringify({ deviceTested: body.deviceTested }),
-        ],
+        [t.id, body.categoryId, body.subCategoryId, eventCost],
       )
     })
 
-    return ok(res, { id: t.public_id, status: 'Closed' }, 'Ticket closed')
+    return ok(
+      res,
+      { id: t.public_id, status: 'Closed', cost: eventCost, partsCost, labourCost: body.cost, parts: snapshots },
+      'Ticket closed',
+    )
   } catch (error) {
     return handleApiError(res, error)
   }

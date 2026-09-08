@@ -469,16 +469,20 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
     for (const row of parts.rows) {
       const list = Array.isArray(row.parts) ? row.parts : []
       for (const part of list) {
+        const partName =
+          part && typeof part === 'object' && 'name' in part
+            ? String((part as { name: string }).name)
+            : String(part)
         partHistory.push({
           date: row.created_at,
-          part: String(part),
+          part: partName,
           why: row.why || '',
           ticketId: row.public_id,
         })
-        const cur = partCounts[String(part)] || { times: 0, last: null }
+        const cur = partCounts[partName] || { times: 0, last: null }
         cur.times += 1
         cur.last = cur.last || row.created_at
-        partCounts[String(part)] = cur
+        partCounts[partName] = cur
       }
     }
 
