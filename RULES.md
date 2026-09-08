@@ -15,6 +15,9 @@
 - Ticket list rows expose `daysOpen` and `daysAfterClose` (`null` when not closed). Do not invent a second list endpoint for close-age.
 - Ticket list tab `new` = unassigned non-closed; do not treat tab key `new` as stored status `New`.
 - List/export may present assigned + stored `Open` as `Under repair` without changing the DB row; do not duplicate that mapping in the frontend.
+- Paginate `GET /api/tickets` and `GET /api/devices` at SQL `LIMIT`/`OFFSET` after auth scope and filters — never fetch all rows then slice in memory.
+- Default list `limit` is **10**; allowed limits are only **10, 25, 50, 100**; reuse [`src/lib/pagination.ts`](src/lib/pagination.ts).
+- Pagination `total` / `totalPages` must reflect only authorized (+ filtered) rows.
 - Ticket `status` is one of `Open`, `Under repair`, `Waiting for spare`, `Closed`. Never persist `New`; unassigned raise uses `Open`.
 - Duplicate raise must return `409` / `OPEN_TICKET_EXISTS` with `details.openTicketId` (and `ticketId`) for UI redirect — never create a second open ticket.
 - QR scan details use `GET /api/devices/scan?q=` (do not invent a second `/scan-details` route that fights `/:deviceId`).

@@ -105,6 +105,44 @@ async function main() {
   assert(typeof scanData.openTicketAge === 'string' && scanData.openTicketAge, 'openTicketAge required when open')
   console.log('OK scan canonical payload')
 
+  // Pagination: defaults, allowed limits, invalid, page nav (PM = city-wide)
+  const tickDefault = await call('/api/tickets', { headers: auth })
+  assert(tickDefault.status === 200 && tickDefault.body.success, 'tickets default page failed')
+  assert(tickDefault.body.pagination?.page === 1, 'tickets default page must be 1')
+  assert(tickDefault.body.pagination?.limit === 10, 'tickets default limit must be 10')
+  assert(
+    Array.isArray(tickDefault.body.data) && tickDefault.body.data.length <= 10,
+    'tickets default page size exceeded',
+  )
+  console.log('OK tickets default pagination')
+
+  const tick25 = await call('/api/tickets?limit=25', { headers: auth })
+  assert(tick25.status === 200 && tick25.body.pagination?.limit === 25, 'tickets limit=25 failed')
+  const tickBadLimit = await call('/api/tickets?limit=15', { headers: auth })
+  assert(tickBadLimit.status === 400, 'tickets limit=15 must be 400')
+  const tickBadPage = await call('/api/tickets?page=0', { headers: auth })
+  assert(tickBadPage.status === 400, 'tickets page=0 must be 400')
+  console.log('OK tickets limit validation')
+
+  const tickPage2 = await call('/api/tickets?page=2&limit=10', { headers: auth })
+  assert(tickPage2.status === 200 && tickPage2.body.success, 'tickets page=2 failed')
+  assert(tickPage2.body.pagination?.page === 2, 'tickets page 2 metadata')
+  assert(
+    Array.isArray(tickPage2.body.data) && tickPage2.body.data.length <= 10,
+    'tickets page 2 size',
+  )
+  if (tickDefault.body.pagination.total > 10) {
+    assert(tickPage2.body.pagination.total === tickDefault.body.pagination.total, 'page total stable')
+  }
+  console.log('OK tickets page navigation')
+
+  const devDefault = await call('/api/devices', { headers: auth })
+  assert(devDefault.status === 200 && devDefault.body.pagination?.limit === 10, 'devices default limit 10')
+  assert(devDefault.body.pagination?.page === 1, 'devices default page 1')
+  const devBad = await call('/api/devices?limit=200', { headers: auth })
+  assert(devBad.status === 400, 'devices limit=200 must be 400')
+  console.log('OK devices default pagination')
+
   const bad = await call('/api/auth/login', {
     method: 'POST',
     body: JSON.stringify({ identifier: 'abc', password: 'x' }),
@@ -436,7 +474,7 @@ async function main() {
   console.log('OK tech forbidden from user approve/edit')
 
   // Ticket visibility: non-privileged user cannot open unrelated tickets
-  const adminTickets = await call('/api/tickets', { headers: pmAuthApprove })
+  const adminTickets = await call('/api/tickets?limit=100', { headers: pmAuthApprove })
   assert(adminTickets.status === 200 && Array.isArray(adminTickets.body.data), 'pm ticket list failed')
   const foreign = adminTickets.body.data.find(
     (t: { assignedTo: string | null; id: string }) =>
@@ -444,13 +482,26 @@ async function main() {
   )
   assert(foreign?.id, 'need a ticket not assigned to Ramesh for visibility test')
 
-  const techList = await call('/api/tickets', { headers: techAuth })
+  const techList = await call('/api/tickets?limit=100', { headers: techAuth })
   assert(techList.status === 200, 'tech ticket list failed')
   assert(
     !techList.body.data.some((t: { id: string }) => t.id === foreign.id),
     'tech list must not include unrelated ticket',
   )
   console.log('OK tech ticket list scoped')
+  assert(
+    techList.body.pagination?.total <= adminTickets.body.pagination?.total ||
+      techList.body.pagination?.total >= 0,
+    'tech pagination total must be defined',
+  )
+  const techAll = await call('/api/tickets?limit=100', { headers: techAuth })
+  const pmAll = await call('/api/tickets?limit=100', { headers: pmAuthApprove })
+  assert(techAll.status === 200 && pmAll.status === 200, 'scoped total compare failed')
+  assert(
+    techAll.body.pagination.total <= pmAll.body.pagination.total,
+    'tech total must be <= PM total',
+  )
+  console.log('OK tech pagination total scoped')
 
   const techDetail = await call(`/api/tickets/${foreign.id}`, { headers: techAuth })
   assert(techDetail.status === 403, `tech detail must be forbidden: ${techDetail.status}`)
@@ -474,7 +525,7 @@ async function main() {
   })
   assert(attendantLogin.status === 200 && attendantLogin.body.data?.token, 'site attendant login failed')
   const attendantAuth = { Authorization: `Bearer ${attendantLogin.body.data.token as string}` }
-  const attendantTickets = await call('/api/tickets?tab=new', { headers: attendantAuth })
+  const attendantTickets = await call('/api/tickets?tab=new&limit=100', { headers: attendantAuth })
   assert(attendantTickets.status === 200, 'site attendant ticket list failed')
   const attendantIds = (attendantTickets.body.data || []).map((t: { id: string }) => t.id)
   assert(attendantIds.includes('TK-1099'), 'raiser must see Open ticket on a non-assigned road (TK-1099)')
