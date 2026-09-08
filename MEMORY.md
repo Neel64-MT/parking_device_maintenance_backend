@@ -10,10 +10,11 @@
 - Phase 19 — Assign/reassign restricted to Control room, Admin, Project manager (no technician handover)
 - Phase 20 — Ticket list `daysAfterClose` + tab `new` = unassigned only; list presents assigned+`Open` as `Under repair`
 - Phase 21 — DB-level pagination for tickets + devices (`page`/`limit`, default 10, allowed 10/25/50/100)
+- Phase 22 — Parts master `amount` + visit cost = labour `cost` + sum(master part amounts); `ticket_event_parts` + JSONB snapshot
 
 ## Currently Working On
 
-- (idle — list pagination complete)
+- (idle — parts master visit cost complete)
 
 ## Pending
 
@@ -28,9 +29,12 @@
 - Trust list `status` for Assigned-tab vs Under repair tile (do not remap assigned Open in the browser)
 - Hide technician reassign / handover; only Control room, Admin, Project manager assign
 - Signup success copy: “Admin” → “Admin or Project manager” (optional; API already unlocks Approve for PM)
+- Parts / update-ticket UI: PartChips send part UUIDs (not names); `cost` is labour-only — do not add master part prices into `cost`; show amounts from Parts/lookups APIs
 
 ## Important Decisions
 
+- Visit cost: `eventCost = body.cost (labour) + SUM(parts.amount)`; master amount authoritative; dedupe part IDs per event
+- Parts CRUD reuses Issue master `c`/`e` (no new permission screen); list/lookups need Update ticket `v`
 - Ticket visibility privileged roles: only `Admin` and `Project manager`
 - Other roles: `assignee_id = me OR raised_by_user_id = me` in SQL + `assertTicketAccess`
 - Same helper scopes dashboard ticket metrics, device ticket overlays/history, and work report rows

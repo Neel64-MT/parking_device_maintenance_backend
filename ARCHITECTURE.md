@@ -78,9 +78,9 @@ No Nest, Prisma, or Next.js file-based routing. Express routers live in `src/rou
 ## Key Domains
 
 - **Auth / Users / Roles** — Email or mobile + password login, forgot/reset password, permission matrix, road assignments
-- **Masters** — Roads, issue categories/subs, parts (seeded, no UI CRUD)
+- **Masters** — Roads, issue categories/subs, parts (with `amount`; CRUD via `/api/parts` + Issue master flags)
 - **Devices** — Inventory, QR scan, derived operational status from open tickets
-- **Tickets** — Lifecycle (`Open` → assign/`Under repair` → `Waiting for spare` optional → `Closed`), events, costs, photos
+- **Tickets** — Lifecycle (`Open` → assign/`Under repair` → `Waiting for spare` optional → `Closed`), events, visit cost = labour + parts master, photos
 - **Reports** — Dashboard aggregates, work report by period
 
 ## Password reset architecture
@@ -225,3 +225,25 @@ Shared helpers: [`src/lib/pagination.ts`](src/lib/pagination.ts) (`pageSchema`, 
 Defaults: `page=1`, `limit=10`. Allowed limits: `10|25|50|100`.
 
 Routes: [`src/routes/tickets.ts`](src/routes/tickets.ts), [`src/routes/devices.ts`](src/routes/devices.ts). Export CSVs stay full-set (unpaginated).
+
+## Parts master & visit cost
+
+```text
+POST /api/tickets/:id/updates|close
+  body.cost = labour only
+  body.parts = uuid[]
+  → resolvePartsCost (dedupe, active master rows)
+  → eventCost = labour + SUM(amount)
+  → ticket_events.cost + parts JSONB snapshot
+  → ticket_event_parts rows
+  → tickets.total_cost += eventCost
+```
+
+| Piece | Location |
+|-------|----------|
+| Migration | [`src/db/migrations/009_parts_amount.sql`](src/db/migrations/009_parts_amount.sql) |
+| Helper | [`src/lib/parts-cost.ts`](src/lib/parts-cost.ts) |
+| CRUD / list | [`src/routes/parts.ts`](src/routes/parts.ts), lookups |
+| Update / close | [`src/routes/tickets.ts`](src/routes/tickets.ts) |
+
+**FRONTEND CHANGE REQUIRED:** send part UUIDs; keep `cost` labour-only.

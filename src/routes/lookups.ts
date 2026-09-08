@@ -50,7 +50,9 @@ router.get('/technicians', authorize('All tickets', 'v'), async (_req, res) => {
 
 router.get('/parts', authorize('Update ticket', 'v'), async (_req, res) => {
   try {
-    const result = await query(`SELECT id, name FROM parts WHERE active = TRUE ORDER BY name`)
+    const result = await query(
+      `SELECT id, name, amount::float8 AS amount FROM parts WHERE active = TRUE ORDER BY name`,
+    )
     return ok(res, result.rows)
   } catch (error) {
     return handleApiError(res, error)

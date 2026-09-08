@@ -28,12 +28,13 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 4. **Tickets** — List (tabs/filters), raise, detail, assign, site-update, close; one non-`Closed` ticket per device (`409 OPEN_TICKET_EXISTS` with `openTicketId`); 7-day reopen = same ticket. List rows include `daysOpen` and `daysAfterClose` (whole days since `closed_at`, or `null` if still open). **Pagination:** `page`/`limit` with default `page=1`, `limit=10`; allowed limits `10|25|50|100`; DB `LIMIT`/`OFFSET` after visibility + filters; response `pagination: { page, limit, total, totalPages }`. **Statuses:** `Open`, `Under repair`, `Waiting for spare`, `Closed` (no `New`). **Visibility:** Admin and Project manager see all (within road scope). All other roles see only tickets where `assignee_id` or `raised_by_user_id` is the current user (enforced in SQL and on detail/mutations).
 5. **Devices** — List, add, history, QR scan/lookup (`GET /api/devices/scan?q=`), QR label PNG, export; optional `latitude` / `longitude` (TEXT). **Pagination:** same `page`/`limit` rules as tickets (DB-level after road scope + status/repeats filters).
 6. **Issue master** — Categories / sub-categories with severity; deactivate if used (no hard delete when used)
-7. **Road master** — CRUD roads; sequential `RD-xx` codes
-8. **Users & roles** — Create/edit/inactivate users; Admin and Project manager may approve Pending signups, update details/role/password via `PATCH /api/users/:id`; role permission matrix; never hard-delete users
-9. **Work report** — Day/week/month/range technician load and outcomes
-10. **Lookups** — Roads, technicians, parts, issue categories, road slots
-11. **Uploads** — Multipart photos for tickets/devices
-12. **Exports** — CSV for tickets, devices, roads, work report
+7. **Parts master** — Active parts with `amount` (`NUMERIC(12,2)`); list/lookups return `{ id, name, amount }`; create/patch via `/api/parts` using Issue master `c`/`e`
+8. **Road master** — CRUD roads; sequential `RD-xx` codes
+9. **Users & roles** — Create/edit/inactivate users; Admin and Project manager may approve Pending signups, update details/role/password via `PATCH /api/users/:id`; role permission matrix; never hard-delete users
+10. **Work report** — Day/week/month/range technician load and outcomes
+11. **Lookups** — Roads, technicians, parts (with amount), issue categories, road slots
+12. **Uploads** — Multipart photos for tickets/devices
+13. **Exports** — CSV for tickets, devices, roads, work report
 
 ### QR scan & raise-ticket requirements
 
@@ -86,6 +87,14 @@ Canonical `tickets.status` values (exactly four; never `New`):
 - Users/Roads lists remain unpaginated (no table consumer yet).
 
 **FRONTEND CHANGE REQUIRED:** TicketList service default `limit` is still 50 and UI hardcodes 100 — align to allowed limits and use `pagination` for a pager when authorized.
+
+### Parts master & visit cost
+
+- `parts.amount` is authoritative; seed and CRUD set prices.
+- Ticket update/close accept `parts: uuid[]` and labour-only `cost`. Server computes `eventCost = labourCost + SUM(selected active part amounts)` (dedupe IDs), stores JSONB snapshot `[{ id, name, amount }]` plus `ticket_event_parts`, and adds `eventCost` to `tickets.total_cost`.
+- Client-supplied part prices are ignored; unknown/inactive part IDs → `400` / `INVALID_PARTS`.
+
+**FRONTEND CHANGE REQUIRED:** PartChips must send part UUIDs (not names). The update/close `cost` field must be labour / non-part charges only — do not pre-add part prices into `cost`.
 
 ### Signup approval requirements
 

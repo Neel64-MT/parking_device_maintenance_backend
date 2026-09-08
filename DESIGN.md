@@ -235,3 +235,32 @@ CTE with open-ticket LATERAL + derived status `CASE` (mirrors `deriveDeviceStatu
 ## Frontend
 
 **FRONTEND CHANGE REQUIRED:** align TicketList `limit` defaults with allowed values; render pager from `pagination` when authorized. Do not add client-side page slicing of full lists.
+
+---
+
+# Design — Parts master & visit cost (Phase 22)
+
+## Master
+
+| Column | Notes |
+|--------|-------|
+| `parts.amount` | `NUMERIC(12,2)` NOT NULL; list/lookups return as number |
+| `ticket_event_parts` | `(event_id, part_id)` PK; stores snapshot `amount` at event time |
+
+CRUD: `POST/PATCH /api/parts` (Issue master `c`/`e`). List: `GET /api/parts` and `GET /api/lookups/parts` (Update ticket `v`).
+
+## Visit cost
+
+```text
+labourCost = body.cost
+partsCost  = SUM(parts.amount for unique active part IDs)
+eventCost  = labourCost + partsCost
+tickets.total_cost += eventCost
+```
+
+Request: `{ "cost": 1000, "parts": ["uuid-1", "uuid-2"] }`  
+Event `parts` JSONB: `[{ "id", "name", "amount" }, ...]`. Device history reads `name` from object or legacy string.
+
+## Frontend
+
+**FRONTEND CHANGE REQUIRED:** PartChips / update & close forms must send part UUIDs and labour-only `cost` (do not fold master prices into `cost`).

@@ -91,17 +91,92 @@ async function main() {
   assert(assign.status === 200, `assign failed: ${JSON.stringify(assign.body).slice(0, 200)}`)
   console.log('OK assign')
 
+  // Parts master create/update (Issue c/e or Technician) + amounts on list/lookups
+  const partA = await call('/api/parts', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ name: `Smoke Part A ${suffix}`, amount: 500 }),
+  })
+  assert(partA.status === 201 && partA.body.data?.id, `part A create failed: ${JSON.stringify(partA.body).slice(0, 200)}`)
+  const partB = await call('/api/parts', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ name: `Smoke Part B ${suffix}`, amount: 250 }),
+  })
+  assert(partB.status === 201 && partB.body.data?.id, `part B create failed: ${JSON.stringify(partB.body).slice(0, 200)}`)
+  const partAId = partA.body.data.id as string
+  const partBId = partB.body.data.id as string
+
+  const partsList = await call('/api/parts', { headers: auth })
+  assert(partsList.status === 200 && Array.isArray(partsList.body.data), 'parts list failed')
+  assert(
+    partsList.body.data.some((p: { id: string; amount: number }) => p.id === partAId && p.amount === 500),
+    'parts list missing amount',
+  )
+  const patchPart = await call(`/api/parts/${partAId}`, {
+    method: 'PATCH',
+    headers: auth,
+    body: JSON.stringify({ amount: 500 }),
+  })
+  assert(patchPart.status === 200 && patchPart.body.data?.amount === 500, 'part patch failed')
+  const lookupsParts = await call('/api/lookups/parts', { headers: auth })
+  assert(
+    lookupsParts.status === 200 &&
+      lookupsParts.body.data.some((p: { id: string; amount: number }) => p.id === partBId && p.amount === 250),
+    'lookups parts missing amount',
+  )
+  console.log('OK parts master CRUD')
+
+  // Labour-only update (no parts)
+  const labourOnly = await call(`/api/tickets/${ticketId}/updates`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      updateType: 'Remote check',
+      workDone: 'Checked remotely',
+      cost: 100,
+      parts: [],
+    }),
+  })
+  assert(labourOnly.status === 201 || labourOnly.status === 200, `labour-only update failed: ${JSON.stringify(labourOnly.body).slice(0, 300)}`)
+  assert(labourOnly.body.data?.cost === 100, `labour-only cost expected 100 got ${labourOnly.body.data?.cost}`)
+  console.log('OK update labour-only')
+
+  // Visit cost = labour + master part amounts (ignore client part prices)
   const update = await call(`/api/tickets/${ticketId}/updates`, {
     method: 'POST',
     headers: auth,
     body: JSON.stringify({
       updateType: 'Site visit — not resolved',
-      workDone: 'Adjusted sensor',
-      cost: 0,
+      workDone: 'Adjusted sensor; replaced parts',
+      cost: 1000,
+      parts: [partAId, partBId, partAId],
     }),
   })
-  assert(update.status === 200, `update failed: ${JSON.stringify(update.body).slice(0, 300)}`)
-  console.log('OK update')
+  assert(update.status === 201 || update.status === 200, `update failed: ${JSON.stringify(update.body).slice(0, 300)}`)
+  assert(update.body.data?.labourCost === 1000, 'labourCost mismatch')
+  assert(update.body.data?.partsCost === 750, `partsCost expected 750 got ${update.body.data?.partsCost}`)
+  assert(update.body.data?.cost === 1750, `event cost expected 1750 got ${update.body.data?.cost}`)
+  assert(
+    Array.isArray(update.body.data?.parts) &&
+      update.body.data.parts.length === 2 &&
+      update.body.data.parts.every((p: { id: string; name: string; amount: number }) => p.id && p.name && typeof p.amount === 'number'),
+    'parts snapshot shape',
+  )
+  console.log('OK update with parts cost')
+
+  const badPart = await call(`/api/tickets/${ticketId}/updates`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      updateType: 'Site visit — not resolved',
+      workDone: 'Bad part id',
+      cost: 50,
+      parts: ['00000000-0000-4000-8000-000000000099'],
+    }),
+  })
+  assert(badPart.status === 400 && badPart.body.code === 'INVALID_PARTS', 'expected INVALID_PARTS')
+  console.log('OK invalid part rejected')
 
   const close = await call(`/api/tickets/${ticketId}/close`, {
     method: 'POST',
@@ -111,11 +186,15 @@ async function main() {
       subCategoryId,
       workDone: 'Replaced sensor',
       cost: 500,
+      parts: [partBId],
       deviceTested: 'Tested OK — flap cycles correctly',
     }),
   })
   assert(close.status === 200, `close failed: ${JSON.stringify(close.body).slice(0, 300)}`)
-  console.log('OK close')
+  assert(close.body.data?.labourCost === 500, 'close labourCost')
+  assert(close.body.data?.partsCost === 250, `close partsCost expected 250 got ${close.body.data?.partsCost}`)
+  assert(close.body.data?.cost === 750, `close event cost expected 750 got ${close.body.data?.cost}`)
+  console.log('OK close with parts cost')
 
   const road = await call('/api/roads', {
     method: 'POST',
