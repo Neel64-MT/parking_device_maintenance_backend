@@ -279,7 +279,7 @@ Event `parts` JSONB: `[{ "id", "name", "amount" }, ...]`. Device history reads `
 | QR Number | `devices.qr_code` | external `qr_number` (may update on sync) |
 | Parking Location | `devices.road_id` → `roads` | `parking_location` via `roads.external_location_id` / name |
 
-`devices.public_id` stays in the DB for internal uniqueness but is not the primary API identity when `slot_id` is present. Ticket `deviceId` fields return Slot Id.
+`devices.public_id` stays in the DB for internal uniqueness but is not the primary API identity when `slot_id` is present. Ticket list/detail expose `deviceId` (Slot Id preferred) plus numeric `slotId`. `GET /api/devices/:deviceId` accepts `public_id`, device UUID, or Slot Id as text and returns the same history shape (`header.id` = display id preferring Slot Id). Create/PATCH device responses use the same display rule (`id` / `publicId` / `slotId`); manual add/edit does not write `slot_id` (sync-owned).
 
 ## Sync run
 

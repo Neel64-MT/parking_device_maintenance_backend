@@ -49,6 +49,8 @@
 - Device Sync matches by stable `slot_id`; never overwrite `slot_id` after it is set. Update `slot_identifier` (mac) and `qr_code` when hardware changes.
 - Map Slot Identifier from external `mac_address` into `devices.slot_identifier`; leave null only when the QR item omits `mac_address`.
 - Prefer Slot Id over `public_id` in ticket/device API display fields when `slot_id` is present.
+- Resolve `GET /api/devices/:deviceId` (and QR/PATCH) by `public_id` **or** device UUID **or** `CAST(slot_id AS TEXT)` via `deviceLookupWhere`; display ids via `deviceDisplayId` (including create/PATCH response `id`).
+- Do not accept or overwrite `slot_id` on manual Add/Edit device — Slot Id is set only by Device Sync.
 - Keep Device Sync code concise; reuse Express + `pg` patterns; no new queue libraries unless required.
 
 ## What to avoid

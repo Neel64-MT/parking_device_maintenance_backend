@@ -20,6 +20,35 @@ import { limitSchema, pageSchema, paginationMeta, sqlOffset } from '../lib/pagin
 const router = Router()
 router.use(requireAuth)
 
+/** Create/PATCH response: prefer Slot Id for `id`, keep `publicId` for legacy. */
+function deviceWritePayload(row: Record<string, unknown>) {
+  return {
+    id: deviceDisplayId({
+      slot_id: row.slot_id,
+      public_id: String(row.public_id),
+    }),
+    uuid: row.id,
+    publicId: row.public_id,
+    qr: row.qr_code,
+    qrNumber: row.qr_code,
+    roadId: row.road_id,
+    slot: row.slot_number,
+    slotId: row.slot_id != null && row.slot_id !== '' ? Number(row.slot_id) : null,
+    slotLabel: (row.slot_number as string) || null,
+    slotIdentifier: (row.slot_identifier as string) || null,
+    sideOfRoad: row.side_of_road,
+    landmark: row.landmark,
+    latitude: row.latitude,
+    longitude: row.longitude,
+    model: row.model,
+    installedOn: row.installed_on,
+    commissionedOn: row.commissioned_on,
+    installStatus: row.install_status,
+    photoUrl: row.photo_url,
+    remarks: row.remarks,
+  }
+}
+
 const listSchema = z.object({
   q: z.string().optional(),
   road: z.string().optional(),
@@ -228,7 +257,7 @@ router.get('/export', authorize('Device list', 'v'), async (req: AuthedRequest, 
           assigneeId: r.open_assignee_id,
           severity: r.severity,
         })
-      return `${r.public_id},${r.qr_code},"${r.road_name}",${r.slot_number},${status},${r.tickets_6m}`
+      return `${deviceDisplayId(r)},${r.qr_code},"${r.road_name}",${r.slot_number},${status},${r.tickets_6m}`
     })
     res.setHeader('Content-Type', 'text/csv')
     res.setHeader('Content-Disposition', 'attachment; filename="devices.csv"')
@@ -398,7 +427,7 @@ router.post('/', authorize('Add device', 'c'), async (req: AuthedRequest, res) =
         body.remarks || null,
       ],
     )
-    return created(res, result.rows[0], 'Device created')
+    return created(res, deviceWritePayload(result.rows[0]), 'Device created')
   } catch (error) {
     return handleApiError(res, error)
   }
@@ -640,7 +669,7 @@ router.patch('/:deviceId', authorize('Device list', 'e'), async (req: AuthedRequ
         body.remarks ?? null,
       ],
     )
-    return ok(res, result.rows[0], 'Device updated')
+    return ok(res, deviceWritePayload(result.rows[0]), 'Device updated')
   } catch (error) {
     return handleApiError(res, error)
   }

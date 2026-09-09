@@ -274,4 +274,4 @@ APIs: `POST /api/device-sync`, `GET /api/device-sync/latest`, `GET /api/device-s
 
 Synced locations are written into the existing `roads` table (single source of truth). `GET /api/roads` and `GET /api/lookups/roads` are thin reads of that table — no separate sync-roads API.
 
-Field mapping (external → DB): `slot.id` → `slot_id` (**immutable** match key), `slot.slot_label` → `slot_number`, `mac_address` → `slot_identifier` (updatable), `qr_number` → `qr_code` (updatable), `parking_location` → `roads` / `road_id`. Ticket/device APIs expose Slot Id as `deviceId` when available.
+Field mapping (external → DB): `slot.id` → `slot_id` (**immutable** match key), `slot.slot_label` → `slot_number`, `mac_address` → `slot_identifier` (updatable), `qr_number` → `qr_code` (updatable), `parking_location` → `roads` / `road_id`. Ticket/device APIs expose Slot Id as `deviceId` when available (`deviceDisplayId`); `GET /api/devices/:deviceId` resolves by `public_id`, UUID, or Slot Id text (`deviceLookupWhere`). Device CSV “Device ID” prefers Slot Id the same way.

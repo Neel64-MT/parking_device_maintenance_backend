@@ -105,6 +105,99 @@ async function main() {
   assert(typeof scanData.openTicketAge === 'string' && scanData.openTicketAge, 'openTicketAge required when open')
   console.log('OK scan canonical payload')
 
+  // Dual identity: legacy PD-xxxx when no slot_id; Slot Id preferred when set
+  const legacyPd = await call('/api/devices/PD-0428', { headers: auth })
+  assert(legacyPd.status === 200 && legacyPd.body.success, 'legacy PD-0428 history failed')
+  assert(legacyPd.body.data?.header?.id === 'PD-0428', 'legacy header.id must be PD-0428 when no slot_id')
+  assert(legacyPd.body.data?.header?.publicId === 'PD-0428', 'legacy header.publicId')
+  assert(
+    legacyPd.body.data?.header?.slotId == null,
+    'PD-0428 must remain without slot_id for legacy smoke',
+  )
+  const legacyTicket = await call('/api/tickets/TK-1042', { headers: auth })
+  assert(legacyTicket.status === 200 && legacyTicket.body.success, 'TK-1042 detail failed')
+  assert(
+    legacyTicket.body.data?.header?.deviceId === 'PD-0428',
+    'TK-1042 deviceId must stay PD-0428 when device has no slot_id',
+  )
+  console.log('OK legacy PD-xxxx device identity')
+
+  const testSlotId = 9001001
+  await query(
+    `UPDATE devices SET slot_id = $1 WHERE public_id = 'PD-0117'`,
+    [testSlotId],
+  )
+  const slotHistory = await call(`/api/devices/${testSlotId}`, { headers: auth })
+  assert(slotHistory.status === 200 && slotHistory.body.success, `GET /api/devices/${testSlotId} failed`)
+  assert(
+    slotHistory.body.data?.header?.id === String(testSlotId),
+    'slot history header.id must be Slot Id',
+  )
+  assert(
+    slotHistory.body.data?.header?.publicId === 'PD-0117',
+    'slot history header.publicId must remain PD-0117',
+  )
+  assert(
+    slotHistory.body.data?.header?.slotId === testSlotId,
+    'slot history header.slotId mismatch',
+  )
+  const slotTicket = await call('/api/tickets/TK-1051', { headers: auth })
+  assert(slotTicket.status === 200 && slotTicket.body.success, 'TK-1051 detail failed')
+  assert(
+    slotTicket.body.data?.header?.deviceId === String(testSlotId),
+    'TK-1051 deviceId must equal slot_id when present',
+  )
+  assert(
+    slotTicket.body.data?.header?.slotId === testSlotId,
+    'TK-1051 slotId must be numeric Slot Id',
+  )
+  const slotList = await call(`/api/tickets?q=${testSlotId}&limit=25`, { headers: auth })
+  assert(slotList.status === 200 && slotList.body.success, 'tickets search by slot_id failed')
+  const slotListRow = (slotList.body.data as Array<{ id: string; deviceId: string; slotId: number | null }>).find(
+    (t) => t.id === 'TK-1051',
+  )
+  assert(slotListRow, 'TK-1051 must appear in search by slot_id')
+  assert(slotListRow!.deviceId === String(testSlotId), 'list deviceId must equal slot_id')
+  assert(slotListRow!.slotId === testSlotId, 'list slotId must equal Slot Id')
+  console.log('OK Slot Id device / ticket identity')
+
+  const patchBySlot = await call(`/api/devices/${testSlotId}`, {
+    method: 'PATCH',
+    headers: auth,
+    body: JSON.stringify({ remarks: 'slot-id-identity-smoke' }),
+  })
+  assert(patchBySlot.status === 200 && patchBySlot.body.success, 'PATCH by Slot Id failed')
+  assert(patchBySlot.body.data?.id === String(testSlotId), 'PATCH response id must prefer Slot Id')
+  assert(patchBySlot.body.data?.publicId === 'PD-0117', 'PATCH response publicId must stay PD-0117')
+  assert(patchBySlot.body.data?.slotId === testSlotId, 'PATCH response slotId mismatch')
+  const roadsForCreate = await call('/api/lookups/roads', { headers: auth })
+  const createRoadId = (roadsForCreate.body.data as Array<{ id: string }>)?.[0]?.id
+  assert(createRoadId, 'need a road for create-device smoke')
+  const createDevice = await call('/api/devices', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      roadId: createRoadId,
+      slotNumber: `SMOKE-${Date.now()}`,
+      installedOn: '2024-01-15',
+    }),
+  })
+  assert(
+    createDevice.status === 201 && createDevice.body.success,
+    `POST /api/devices failed: ${createDevice.status} ${JSON.stringify(createDevice.body).slice(0, 200)}`,
+  )
+  assert(
+    typeof createDevice.body.data?.publicId === 'string' &&
+      createDevice.body.data.publicId.startsWith('PD-'),
+    'create must return publicId PD-xxxx',
+  )
+  assert(
+    createDevice.body.data?.id === createDevice.body.data?.publicId,
+    'create without slot_id: id must equal publicId',
+  )
+  assert(createDevice.body.data?.slotId == null, 'manual create must not invent slotId')
+  console.log('OK add/edit device Slot Id response shape')
+
   // Pagination: defaults, allowed limits, invalid, page nav (PM = city-wide)
   const tickDefault = await call('/api/tickets', { headers: auth })
   assert(tickDefault.status === 200 && tickDefault.body.success, 'tickets default page failed')

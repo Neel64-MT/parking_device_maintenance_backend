@@ -50,6 +50,8 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 - Flow: fetch SmartPark `/locations` → insert new `roads` only → then page QR codes (`status=all`, `per_page=50`) using `data.summary.total` / `data.pagination.last_page` → create/update devices by `qr_code` = external `qr_number`.
 - Device columns: Slot Id (`slot_id`, **stable** — never overwritten after first sync), Slot Label (`slot_number`), Slot Identifier (`slot_identifier` ← external `mac_address`, may change on hardware swap), QR Number (`qr_code`, may change), Parking Location (`road_id` → roads). Device `public_id` remains internal/DB-only for uniqueness; APIs prefer Slot Id for display and links.
 - Tickets list/detail/dashboard/reports expose `deviceId` as **Slot Id** (fallback to `public_id` only for legacy seed rows without `slot_id`).
+- Device history `GET /api/devices/:deviceId` resolves by `public_id`, UUID, or Slot Id text; response `header.id` prefers Slot Id. Devices CSV “Device ID” column uses the same display rule. Create/PATCH device responses expose `id` (Slot Id preferred), `publicId`, and `slotId`.
+- Acceptance (smoke): list/detail `deviceId` equals `slot_id` when present; `GET /api/devices/{slotId}` returns 200; legacy `GET /api/devices/PD-xxxx` still works when `slot_id` is null; PATCH by Slot Id + create without `slot_id` return mapped ids.
 - Idempotent: re-running sync does not duplicate roads/devices; updates existing devices’ sync fields only.
 - Status: `GET /api/device-sync/:id` and `GET /api/device-sync/latest` (`started` | `completed` | `failed`).
 - Config: `DEVICE_SYNC_BASE_URL`, `DEVICE_SYNC_API_TOKEN` (sent as `Authorization: Bearer …` with `Accept: application/json` and `Cache-Control: no-cache`). Locations path: `/locations`.
