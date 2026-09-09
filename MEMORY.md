@@ -12,10 +12,11 @@
 - Phase 21 — DB-level pagination for tickets + devices (`page`/`limit`, default 10, allowed 10/25/50/100)
 - Phase 22 — Parts master `amount` + visit cost = labour `cost` + sum(master part amounts); `ticket_event_parts` + JSONB snapshot
 - Forgot/reset password role gate — Admin / Project manager only; other Active roles `403 FORGOT_PASSWORD_ROLE_DENIED`; unknown email stays generic 200
+- Phase 23 — Device Sync: async SmartPark locations→roads + QR pages→devices; `010_device_sync.sql`; `POST /api/device-sync`
 
 ## Currently Working On
 
-- (idle — forgot-password role gate + FE 404 companion)
+- (idle — Device Sync Phase 23 complete)
 
 ## Pending
 
@@ -23,6 +24,8 @@
 
 - Feature screens still on mocks / partial wiring
 - Wire Scan QR to `GET /api/devices/scan?q=`; on raise `409 OPEN_TICKET_EXISTS` redirect via `details.openTicketId`
+- Wire Sync Device to `POST /api/device-sync`; poll `GET /api/device-sync/latest` or `/:id` for status (Device list done)
+- Device list road filter: reads `roads` via `GET /api/lookups/roads` (done); Road master / TicketList still on mocks
 - When wiring Dashboard / All Tickets / Devices / Work report, trust API ticket scope — no client-side role filters
 - TicketList: change default `limit` from 50/100 to allowed values; use `pagination` for pager UI
 - All Tickets / detail status badge: show `Open`, never `New`
@@ -47,8 +50,18 @@
 - Ticket list `daysAfterClose` is days since `closed_at` (`null` if open); list-only
 - List pagination: `page`/`limit`, default limit **10**, allowed **10|25|50|100**, SQL LIMIT/OFFSET after scope/filters; shared `src/lib/pagination.ts`
 - Pagination response shape stays `{ page, limit, total, totalPages }` (no hasNextPage)
+- Device Sync unique keys: **Slot Id (`slot_id`)** is primary and immutable after first write; roads by `external_location_id` then `LOWER(name)`; QR/`mac_address` may change on re-sync for the same slot
+- Slot Identifier comes from SmartPark `mac_address` → `devices.slot_identifier` (updatable)
+- Ticket/device APIs prefer Slot Id over `public_id` for `deviceId` / list `id` display and links
+- Device Sync auth to SmartPark: `Authorization: Bearer` via `DEVICE_SYNC_API_TOKEN`; also `Accept: application/json`, `Cache-Control: no-cache`; locations path `/locations`
+- Device Sync pagination: `per_page=50`, pages from `data.pagination.last_page` (fallback `ceil(summary.total / per_page)`); background via `setImmediate` + `device_sync_runs`
 - Duplicate raise 409 includes both `ticketId` and `openTicketId`
 - Device lat/lng are TEXT strings; seed includes Ahmedabad-area dummies
 - PM Users permission: `vce...` (approve Pending via existing PATCH); Roles matrix remains view-only
 - No separate signup-request table
 - Control room is scoped like other non-privileged roles for viewing (per product requirement)
+
+## Known Issues
+
+- Device Sync Slot Identifier is sourced from external `mac_address` (nullable only when the QR item omits it).
+- Live Device Sync requires `DEVICE_SYNC_API_TOKEN`; without it `POST /api/device-sync` returns `503 DEVICE_SYNC_NOT_CONFIGURED`.

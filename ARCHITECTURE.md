@@ -43,10 +43,8 @@ backend/
 │   │   ├── error-handler.ts
 │   │   └── upload.ts
 │   ├── routes/
-│   ├── controllers/
-│   ├── services/
-│   ├── repositories/
-│   └── schemas/
+│   ├── lib/ (incl. device-sync.ts, device-sync-client.ts)
+│   └── types/api.ts
 ├── uploads/
 ├── .env.example
 ├── package.json
@@ -247,3 +245,33 @@ POST /api/tickets/:id/updates|close
 | Update / close | [`src/routes/tickets.ts`](src/routes/tickets.ts) |
 
 **FRONTEND CHANGE REQUIRED:** send part UUIDs; keep `cost` labour-only.
+
+## Device Sync (SmartPark)
+
+```text
+Client Sync Device
+  → POST /api/device-sync  (authorize Device list c)
+  → INSERT device_sync_runs status=started
+  → 202 { id, status }
+  → setImmediate background job
+       → GET {DEVICE_SYNC_BASE_URL}/locations (Authorization Bearer)
+       → insert new roads (match external_location_id / name)
+       → GET .../qr-codes?status=all&page=1&per_page=50
+       → total = data.summary.total; pages = data.pagination.last_page
+       → upsert devices by qr_code (= qr_number)
+       → status completed | failed
+```
+
+| Piece | Location |
+|-------|----------|
+| Migration | [`src/db/migrations/010_device_sync.sql`](src/db/migrations/010_device_sync.sql) |
+| Client | [`src/lib/device-sync-client.ts`](src/lib/device-sync-client.ts) |
+| Runner | [`src/lib/device-sync.ts`](src/lib/device-sync.ts) |
+| Routes | [`src/routes/device-sync.ts`](src/routes/device-sync.ts) |
+| Env | `DEVICE_SYNC_BASE_URL`, `DEVICE_SYNC_API_TOKEN` |
+
+APIs: `POST /api/device-sync`, `GET /api/device-sync/latest`, `GET /api/device-sync/:id`.
+
+Synced locations are written into the existing `roads` table (single source of truth). `GET /api/roads` and `GET /api/lookups/roads` are thin reads of that table — no separate sync-roads API.
+
+Field mapping (external → DB): `slot.id` → `slot_id` (**immutable** match key), `slot.slot_label` → `slot_number`, `mac_address` → `slot_identifier` (updatable), `qr_number` → `qr_code` (updatable), `parking_location` → `roads` / `road_id`. Ticket/device APIs expose Slot Id as `deviceId` when available.

@@ -8,10 +8,11 @@ const router = Router()
 
 router.use(requireAuth)
 
+/** Thin projection of `roads` for dropdowns — same table Device Sync writes. */
 router.get('/roads', authorize('Device list', 'v'), async (_req, res) => {
   try {
     const result = await query(
-      `SELECT id, code, name, status FROM roads ORDER BY code`,
+      `SELECT id, code, name, status FROM roads ORDER BY name`,
     )
     return ok(res, result.rows)
   } catch (error) {

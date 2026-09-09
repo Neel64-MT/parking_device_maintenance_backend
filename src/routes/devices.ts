@@ -12,6 +12,7 @@ import {
   type AuthedRequest,
 } from '../middleware/auth.js'
 import { nextPublicId, qrFromDeviceId } from '../lib/ids.js'
+import { deviceDisplayId, deviceLookupWhere } from '../lib/device-ref.js'
 import { deriveDeviceStatus, statusTone } from '../lib/device-status.js'
 import { appendTicketVisibilitySql } from '../lib/ticket-access.js'
 import { limitSchema, pageSchema, paginationMeta, sqlOffset } from '../lib/pagination.js'
@@ -40,7 +41,7 @@ function buildDeviceListBase(filters: z.infer<typeof listSchema>, user: AuthUser
   if (filters.q?.trim()) {
     params.push(`%${filters.q.trim().toLowerCase()}%`)
     where.push(
-      `(LOWER(d.public_id) LIKE $${params.length} OR LOWER(d.qr_code) LIKE $${params.length} OR LOWER(d.slot_number) LIKE $${params.length})`,
+      `(LOWER(d.public_id) LIKE $${params.length} OR LOWER(d.qr_code) LIKE $${params.length} OR LOWER(d.slot_number) LIKE $${params.length} OR CAST(d.slot_id AS TEXT) LIKE $${params.length})`,
     )
   }
   if (filters.road && filters.road !== 'All roads') {
@@ -121,7 +122,7 @@ async function deviceListQuery(
     const all = await query(
       `WITH device_rows AS (${cteBody})
        SELECT * FROM device_rows ${outerWhere}
-       ORDER BY public_id`,
+       ORDER BY (slot_id IS NULL), public_id`,
       params,
     )
     return { rows: all.rows, total: all.rowCount || all.rows.length, tiles: null }
@@ -147,7 +148,7 @@ async function deviceListQuery(
   const page = await query(
     `WITH device_rows AS (${cteBody})
      SELECT * FROM device_rows ${outerWhere}
-     ORDER BY public_id
+       ORDER BY (slot_id IS NULL), public_id
      LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
     pageParams,
   )
@@ -173,11 +174,17 @@ router.get('/', authorize('Device list', 'v'), async (req: AuthedRequest, res) =
         ? Math.floor((Date.now() - new Date(row.open_raised_at).getTime()) / 86400000)
         : null
       return {
-        id: row.public_id,
+        id: deviceDisplayId(row),
         uuid: row.id,
+        publicId: row.public_id,
         qr: row.qr_code,
+        qrNumber: row.qr_code,
         road: row.road_name,
+        parkingLocation: row.road_name,
         slot: `Slot ${row.slot_number}`,
+        slotId: row.slot_id != null && row.slot_id !== '' ? Number(row.slot_id) : null,
+        slotLabel: row.slot_number || null,
+        slotIdentifier: row.slot_identifier || null,
         installed: row.installed_on,
         status,
         statusTone: statusTone(status),
@@ -272,6 +279,7 @@ router.get('/scan', authorize('Scan QR', 'v'), async (req: AuthedRequest, res) =
        LEFT JOIN issue_subcategories fs ON fs.id = ot.found_subcategory_id
        LEFT JOIN issue_subcategories rs ON rs.id = ot.reported_subcategory_id
        WHERE UPPER(d.public_id) = $1 OR UPPER(d.qr_code) = $1 OR UPPER(d.slot_number) = $1
+          OR CAST(d.slot_id AS TEXT) = $1
        LIMIT 1`,
       params,
     )
@@ -303,10 +311,13 @@ router.get('/scan', authorize('Scan QR', 'v'), async (req: AuthedRequest, res) =
       : row.installed_on
     return ok(res, {
       // Canonical scan fields (Phase 17)
-      deviceId: row.public_id,
+      deviceId: deviceDisplayId(row),
       deviceName,
       locationSite: row.road_name,
       slot: row.slot_number,
+      slotId: row.slot_id != null && row.slot_id !== '' ? Number(row.slot_id) : null,
+      slotLabel: row.slot_number || null,
+      slotIdentifier: row.slot_identifier || null,
       currentStatus: status,
       statusDate,
       ticketsLast6Months: row.tickets_6m,
@@ -316,9 +327,12 @@ router.get('/scan', authorize('Scan QR', 'v'), async (req: AuthedRequest, res) =
       latitude: lat,
       longitude: lng,
       // Legacy shape (ScanQr / older clients)
-      id: row.public_id,
+      id: deviceDisplayId(row),
       location: `${row.road_name} · Slot ${row.slot_number}`,
-      status,
+      qr: row.qr_code,
+      qrNumber: row.qr_code,
+      parkingLocation: row.road_name,
+      publicId: row.public_id,      status,
       statusTone: statusTone(status),
       facts: [
         { label: 'Installed', value: row.installed_on },
@@ -393,7 +407,7 @@ router.post('/', authorize('Add device', 'c'), async (req: AuthedRequest, res) =
 router.get('/:deviceId/qr', authorize('Device history', 'v'), async (req, res) => {
   try {
     const result = await query(
-      `SELECT public_id, qr_code FROM devices WHERE public_id = $1 OR id::text = $1`,
+      `SELECT public_id, qr_code FROM devices WHERE ${deviceLookupWhere('devices', 1)}`,
       [req.params.deviceId],
     )
     if (!result.rowCount) throw new ApiError(404, 'Device not found', 'NOT_FOUND')
@@ -410,7 +424,7 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
     const device = await query(
       `SELECT d.*, r.name AS road_name FROM devices d
        JOIN roads r ON r.id = d.road_id
-       WHERE d.public_id = $1 OR d.id::text = $1`,
+       WHERE ${deviceLookupWhere('d', 1)}`,
       [req.params.deviceId],
     )
     if (!device.rowCount) throw new ApiError(404, 'Device not found', 'NOT_FOUND')
@@ -519,14 +533,21 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
 
     return ok(res, {
       header: {
-        id: d.public_id,
+        id: deviceDisplayId(d),
+        publicId: d.public_id,
         road: d.road_name,
         slot: d.slot_number,
+        slotId: d.slot_id != null && d.slot_id !== '' ? Number(d.slot_id) : null,
+        slotLabel: d.slot_number || null,
+        slotIdentifier: d.slot_identifier || null,
         qr: d.qr_code,
+        qrNumber: d.qr_code,
+        parkingLocation: d.road_name,
         status,
         statusTone: statusTone(status),
         facts: [
           { label: 'Road', value: d.road_name },
+          { label: 'Slot Id', value: d.slot_id != null ? String(d.slot_id) : '—' },
           { label: 'Slot number', value: d.slot_number },
           { label: 'Side of road', value: d.side_of_road || '—' },
           { label: 'Installed', value: d.installed_on },
@@ -581,7 +602,7 @@ router.patch('/:deviceId', authorize('Device list', 'e'), async (req: AuthedRequ
   try {
     const body = createSchema.partial().parse(req.body)
     const existing = await query(
-      `SELECT * FROM devices WHERE public_id = $1 OR id::text = $1`,
+      `SELECT * FROM devices WHERE ${deviceLookupWhere('devices', 1)}`,
       [req.params.deviceId],
     )
     if (!existing.rowCount) throw new ApiError(404, 'Device not found', 'NOT_FOUND')

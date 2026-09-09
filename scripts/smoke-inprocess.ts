@@ -685,6 +685,68 @@ async function main() {
   )
   console.log('OK control room work report scoped')
 
+  // Device Sync — authz, config, single-flight (no live external call)
+  const adminSyncLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9825012345', password: 'Password123' }),
+  })
+  assert(adminSyncLogin.status === 200 && adminSyncLogin.body.data?.token, 'admin re-login for device-sync')
+  const adminSyncAuth = { Authorization: `Bearer ${adminSyncLogin.body.data.token as string}` }
+
+  const syncUnauth = await call('/api/device-sync', { method: 'POST', body: '{}' })
+  assert(syncUnauth.status === 401, 'device-sync without auth must be 401')
+
+  const syncTech = await call('/api/device-sync', {
+    method: 'POST',
+    headers: techAuth,
+    body: '{}',
+  })
+  assert(syncTech.status === 403, 'tech must not start device-sync')
+
+  const prevSyncToken = process.env.DEVICE_SYNC_API_TOKEN
+  process.env.DEVICE_SYNC_API_TOKEN = ''
+
+  const syncNoToken = await call('/api/device-sync', {
+    method: 'POST',
+    headers: adminSyncAuth,
+    body: '{}',
+  })
+  assert(
+    syncNoToken.status === 503 && syncNoToken.body.code === 'DEVICE_SYNC_NOT_CONFIGURED',
+    'device-sync without DEVICE_SYNC_API_TOKEN must be 503',
+  )
+
+  await query(
+    `INSERT INTO device_sync_runs (status, triggered_by_user_id)
+     VALUES ('started', (SELECT id FROM users WHERE mobile = '9825012345' LIMIT 1))`,
+  )
+  process.env.DEVICE_SYNC_API_TOKEN = 'smoke-test-token-not-used'
+
+  const syncBusy = await call('/api/device-sync', {
+    method: 'POST',
+    headers: adminSyncAuth,
+    body: '{}',
+  })
+  assert(
+    syncBusy.status === 409 && syncBusy.body.code === 'SYNC_IN_PROGRESS',
+    'device-sync while started must be 409',
+  )
+
+  const syncLatest = await call('/api/device-sync/latest', { headers: adminSyncAuth })
+  assert(syncLatest.status === 200 && syncLatest.body.data?.status === 'started', 'GET latest sync run')
+  const runId = syncLatest.body.data.id as string
+  const syncById = await call(`/api/device-sync/${runId}`, { headers: adminSyncAuth })
+  assert(syncById.status === 200 && syncById.body.data?.id === runId, 'GET sync by id')
+
+  await query(
+    `UPDATE device_sync_runs
+     SET status = 'failed', finished_at = NOW(), error_message = 'smoke cleanup'
+     WHERE status = 'started'`,
+  )
+  if (prevSyncToken === undefined) delete process.env.DEVICE_SYNC_API_TOKEN
+  else process.env.DEVICE_SYNC_API_TOKEN = prevSyncToken
+  console.log('OK device-sync authz + single-flight + status')
+
   console.log('\nAll smoke checks passed')
   server.close()
   await closeDb()

@@ -26,7 +26,7 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 2. **Authorization** — Screen × flag matrix (`v c e a x d`), road scope, ticket holder rules
 3. **Dashboard** — Fleet status, down reasons, road-wise status, oldest open tickets
 4. **Tickets** — List (tabs/filters), raise, detail, assign, site-update, close; one non-`Closed` ticket per device (`409 OPEN_TICKET_EXISTS` with `openTicketId`); 7-day reopen = same ticket. List rows include `daysOpen` and `daysAfterClose` (whole days since `closed_at`, or `null` if still open). **Pagination:** `page`/`limit` with default `page=1`, `limit=10`; allowed limits `10|25|50|100`; DB `LIMIT`/`OFFSET` after visibility + filters; response `pagination: { page, limit, total, totalPages }`. **Statuses:** `Open`, `Under repair`, `Waiting for spare`, `Closed` (no `New`). **Visibility:** Admin and Project manager see all (within road scope). All other roles see only tickets where `assignee_id` or `raised_by_user_id` is the current user (enforced in SQL and on detail/mutations).
-5. **Devices** — List, add, history, QR scan/lookup (`GET /api/devices/scan?q=`), QR label PNG, export; optional `latitude` / `longitude` (TEXT). **Pagination:** same `page`/`limit` rules as tickets (DB-level after road scope + status/repeats filters).
+5. **Devices** — List, add, history, QR scan/lookup (`GET /api/devices/scan?q=`), QR label PNG, export; optional `latitude` / `longitude` (TEXT). **Pagination:** same `page`/`limit` rules as tickets (DB-level after road scope + status/repeats filters). **Device Sync** — `POST /api/device-sync` starts an async import from SmartPark (locations → roads, then QR pages → devices); poll `GET /api/device-sync/:id` or `/latest` for `started` / `completed` / `failed`.
 6. **Issue master** — Categories / sub-categories with severity; deactivate if used (no hard delete when used)
 7. **Parts master** — Active parts with `amount` (`NUMERIC(12,2)`); list/lookups return `{ id, name, amount }`; create/patch via `/api/parts` using Issue master `c`/`e`
 8. **Road master** — CRUD roads; sequential `RD-xx` codes
@@ -42,6 +42,20 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 - Scan response includes: `deviceId`, `deviceName`, `locationSite`, `slot`, `currentStatus`, `statusDate`, `ticketsLast6Months`, `openTicketId`, `openTicketAge`, `openTicketIssue`, `latitude`, `longitude` (plus legacy fields for older clients).
 - A device may have at most one non-`Closed` ticket. Raising another returns `409` / `OPEN_TICKET_EXISTS` with `details.openTicketId` (and `ticketId`) so the UI can open the existing ticket.
 - Device coordinates are optional TEXT on create/PATCH; seed includes Ahmedabad-area dummy values.
+
+### Device Sync requirements
+
+- Frontend **Sync Device** calls `POST /api/device-sync` (JWT + `authorize('Device list', 'c')`).
+- Handler returns **202** immediately with a sync run (`started`); work continues in the background (non-blocking).
+- Flow: fetch SmartPark `/locations` → insert new `roads` only → then page QR codes (`status=all`, `per_page=50`) using `data.summary.total` / `data.pagination.last_page` → create/update devices by `qr_code` = external `qr_number`.
+- Device columns: Slot Id (`slot_id`, **stable** — never overwritten after first sync), Slot Label (`slot_number`), Slot Identifier (`slot_identifier` ← external `mac_address`, may change on hardware swap), QR Number (`qr_code`, may change), Parking Location (`road_id` → roads). Device `public_id` remains internal/DB-only for uniqueness; APIs prefer Slot Id for display and links.
+- Tickets list/detail/dashboard/reports expose `deviceId` as **Slot Id** (fallback to `public_id` only for legacy seed rows without `slot_id`).
+- Idempotent: re-running sync does not duplicate roads/devices; updates existing devices’ sync fields only.
+- Status: `GET /api/device-sync/:id` and `GET /api/device-sync/latest` (`started` | `completed` | `failed`).
+- Config: `DEVICE_SYNC_BASE_URL`, `DEVICE_SYNC_API_TOKEN` (sent as `Authorization: Bearer …` with `Accept: application/json` and `Cache-Control: no-cache`). Locations path: `/locations`.
+- Synced locations upsert into `roads` (single source of truth). Existing `GET /api/roads` / `GET /api/lookups/roads` already return them — no sync-specific road API.
+
+**FRONTEND:** Device list road filter reads `GET /api/lookups/roads` (same `roads` table) and refetches after sync. **Still FRONTEND CHANGE REQUIRED:** Road master / TicketList mocks → `/api/roads` or lookups when authorized.
 
 ### Ticket status requirements
 
@@ -128,7 +142,7 @@ PostgreSQL via discrete env vars: `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSW
 |--------|-----|
 | Dashboard | `GET /api/dashboard` |
 | Tickets | `/api/tickets*` |
-| Devices | `/api/devices*`, especially `GET /api/devices/scan?q=` |
+| Devices | `/api/devices*`, especially `GET /api/devices/scan?q=`; Sync Device → `POST /api/device-sync` + status poll |
 | Roads | `/api/roads*` |
 | Issue master | `/api/issues*` |
 | Users / roles | `/api/users*`, `/api/roles*` |
