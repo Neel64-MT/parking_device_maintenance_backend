@@ -13,6 +13,7 @@ import partsRouter from './routes/parts.js'
 import usersRouter from './routes/users.js'
 import rolesRouter from './routes/roles.js'
 import devicesRouter from './routes/devices.js'
+import deviceSyncRouter from './routes/device-sync.js'
 import ticketsRouter from './routes/tickets.js'
 import dashboardRouter from './routes/dashboard.js'
 import reportsRouter from './routes/reports.js'
@@ -40,6 +41,7 @@ export function createApp() {
   app.use('/api/users', usersRouter)
   app.use('/api/roles', rolesRouter)
   app.use('/api/devices', devicesRouter)
+  app.use('/api/device-sync', deviceSyncRouter)
   app.use('/api/tickets', ticketsRouter)
   app.use('/api/dashboard', dashboardRouter)
   app.use('/api/reports', reportsRouter)

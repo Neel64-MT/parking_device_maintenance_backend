@@ -5,6 +5,7 @@ import { ok } from '../lib/respond.js'
 import { query } from '../db/pool.js'
 import { authorize, hasPermission, requireAuth, type AuthedRequest } from '../middleware/auth.js'
 import { appendTicketVisibilitySql } from '../lib/ticket-access.js'
+import { deviceDisplayId } from '../lib/device-ref.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -47,7 +48,7 @@ router.get('/work', authorize('Work report', 'v'), async (req: AuthedRequest, re
     const events = await query(
       `SELECT e.*, u.id AS user_id, u.full_name, r.name AS role_name,
               t.public_id AS ticket_public_id, t.status AS ticket_status,
-              d.public_id AS device_public_id, d.slot_number, rd.name AS road_name,
+              d.public_id AS device_public_id, d.slot_id, d.slot_number, rd.name AS road_name,
               COALESCE(fs.name, rs.name) AS issue_name
        FROM ticket_events e
        JOIN users u ON u.id = e.actor_user_id
@@ -103,7 +104,10 @@ router.get('/work', authorize('Work report', 'v'), async (req: AuthedRequest, re
       else u.open.add(e.ticket_public_id)
       u.tickets.push([
         e.ticket_public_id,
-        e.device_public_id,
+        deviceDisplayId({
+          slot_id: e.slot_id,
+          public_id: e.device_public_id,
+        }),
         `${e.road_name} · ${e.slot_number}`,
         e.issue_name || '—',
         e.work_done || e.title || e.body || '',

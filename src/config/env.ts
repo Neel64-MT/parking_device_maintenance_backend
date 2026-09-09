@@ -38,6 +38,11 @@ const envSchema = z
     MAIL_FROM: z.string().optional(),
     UPLOAD_DIR: z.string().default('uploads'),
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+    DEVICE_SYNC_BASE_URL: z
+      .string()
+      .default('https://v2smartpark.mtapps.in/api/v1/engineer/device-binding'),
+    /** SmartPark Authorization token (Bearer). Required to run device sync. */
+    DEVICE_SYNC_API_TOKEN: z.string().optional(),
   })
   .superRefine((data, ctx) => {
     const hasDiscrete =
@@ -67,6 +72,8 @@ const raw = {
   SMTP_USER: unquote(process.env.SMTP_USER),
   SMTP_PASS: unquote(process.env.SMTP_PASS),
   MAIL_FROM: unquote(process.env.MAIL_FROM),
+  DEVICE_SYNC_BASE_URL: unquote(process.env.DEVICE_SYNC_BASE_URL),
+  DEVICE_SYNC_API_TOKEN: unquote(process.env.DEVICE_SYNC_API_TOKEN),
 }
 
 const parsed = envSchema.parse(raw)

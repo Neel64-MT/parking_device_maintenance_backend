@@ -6,6 +6,7 @@ import { query } from '../db/pool.js'
 import { authorize, requireAuth, type AuthedRequest } from '../middleware/auth.js'
 import { deriveDeviceStatus } from '../lib/device-status.js'
 import { appendTicketVisibilitySql } from '../lib/ticket-access.js'
+import { deviceDisplayId } from '../lib/device-ref.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -118,8 +119,8 @@ router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => 
     }
 
     const openTickets = await query(
-      `SELECT t.public_id AS id, d.public_id AS "deviceId", r.name AS road,
-              d.slot_number AS slot, COALESCE(rs.name, t.description) AS issue,
+      `SELECT t.public_id AS id, d.public_id AS device_public_id, d.slot_id,
+              r.name AS road, d.slot_number AS slot, COALESCE(rs.name, t.description) AS issue,
               rc.name AS "issueDetail", t.reporter_type AS "reportedBy",
               t.raised_at, t.status, au.full_name
        FROM tickets t
@@ -177,7 +178,11 @@ router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => 
         )
         return {
           id: t.id,
-          deviceId: t.deviceId,
+          deviceId: deviceDisplayId({
+            slot_id: t.slot_id,
+            public_id: t.device_public_id,
+          }),
+          slotId: t.slot_id != null && t.slot_id !== '' ? Number(t.slot_id) : null,
           road: t.road,
           slot: `Slot ${t.slot}`,
           issue: t.issue,

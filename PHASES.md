@@ -219,3 +219,21 @@
 **Testing:** parts CRUD; update 0/1/many parts; labour 1000 + parts 500+250 → 1750; invalid part UUID rejected; labour-only preserved
 
 **Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED — PartChips send UUIDs; cost field is labour-only (do not pre-add part prices)
+
+## Phase 23 — Device Sync (SmartPark)
+
+**Status:** Complete
+
+**Objective:** Non-blocking Device Sync that imports locations into `roads`, then paginates QR codes into `devices` (create/update), idempotent and authorized.
+
+**APIs:**
+- `POST /api/device-sync` — `authorize('Device list','c')` → 202 + background job
+- `GET /api/device-sync/latest`, `GET /api/device-sync/:id` — run status
+
+**Database:** migrations `010_device_sync.sql`, `011_slot_id_unique.sql` (`slot_id` unique when set; `slot_identifier` from `mac_address`)
+
+**Files:** `src/lib/device-sync-client.ts`, `src/lib/device-sync.ts`, `src/routes/device-sync.ts`, `src/config/env.ts`, docs, smoke
+
+**Testing:** smoke — 401/403/503/409 + GET latest/id; live sync requires `DEVICE_SYNC_API_TOKEN`
+
+**Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED — Sync Device → `POST /api/device-sync`

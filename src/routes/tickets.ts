@@ -11,6 +11,7 @@ import {
 } from '../middleware/auth.js'
 import { appendTicketVisibilitySql, assertCanAssignTickets, assertTicketAccess, isTicketPrivilegedRole } from '../lib/ticket-access.js'
 import { nextPublicId } from '../lib/ids.js'
+import { deviceDisplayId, deviceLookupWhere } from '../lib/device-ref.js'
 import { limitSchema, pageSchema, paginationMeta, sqlOffset } from '../lib/pagination.js'
 import { insertEventParts, resolvePartsCost, visitEventCost } from '../lib/parts-cost.js'
 
@@ -94,7 +95,7 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
     if (filters.q?.trim()) {
       baseParams.push(`%${filters.q.trim().toLowerCase()}%`)
       baseWhere.push(
-        `(LOWER(t.public_id) LIKE $${baseParams.length} OR LOWER(d.public_id) LIKE $${baseParams.length} OR LOWER(d.slot_number) LIKE $${baseParams.length})`,
+        `(LOWER(t.public_id) LIKE $${baseParams.length} OR LOWER(d.public_id) LIKE $${baseParams.length} OR LOWER(d.slot_number) LIKE $${baseParams.length} OR CAST(d.slot_id AS TEXT) LIKE $${baseParams.length} OR LOWER(COALESCE(d.slot_identifier,'')) LIKE $${baseParams.length})`,
       )
     }
 
@@ -163,7 +164,7 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
     const offset = sqlOffset(filters.page, limit)
     pageParams.push(limit, offset)
     const result = await query(
-      `SELECT t.*, d.public_id AS device_public_id, d.slot_number, r.name AS road_name,
+      `SELECT t.*, d.public_id AS device_public_id, d.slot_id, d.slot_number, r.name AS road_name,
               ru.full_name AS raised_by_name, au.full_name AS assignee_name,
               rc.name AS reported_cat, rs.name AS reported_sub,
               fc.name AS found_cat, fs.name AS found_sub,
@@ -183,10 +184,15 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
       )
       const tab = tabForStatus(t.status, t.assignee_id)
       const status = listStatus(t.status, t.assignee_id)
+      const slotIdDisplay = deviceDisplayId({
+        slot_id: t.slot_id,
+        public_id: t.device_public_id,
+      })
       return {
         id: t.public_id,
         uuid: t.id,
-        deviceId: t.device_public_id,
+        deviceId: slotIdDisplay,
+        slotId: t.slot_id != null && t.slot_id !== '' ? Number(t.slot_id) : null,
         tab,
         road: t.road_name,
         slot: `Slot ${t.slot_number}`,
@@ -240,7 +246,8 @@ router.get('/export', authorize('All tickets', 'v'), async (req: AuthedRequest, 
     if (visibility) where.push(visibility)
 
     const result = await query(
-      `SELECT t.public_id, d.public_id AS device, r.name AS road, t.status, t.assignee_id, t.raised_at
+      `SELECT t.public_id, d.public_id AS device_public_id, d.slot_id, r.name AS road,
+              t.status, t.assignee_id, t.raised_at
        FROM tickets t
        JOIN devices d ON d.id = t.device_id
        JOIN roads r ON r.id = d.road_id
@@ -248,11 +255,14 @@ router.get('/export', authorize('All tickets', 'v'), async (req: AuthedRequest, 
        ORDER BY t.raised_at DESC`,
       params,
     )
-    const header = 'Ticket,Device,Road,Status,Raised\n'
-    const lines = result.rows.map(
-      (r) =>
-        `${r.public_id},${r.device},"${r.road}",${listStatus(r.status, r.assignee_id)},${r.raised_at}`,
-    )
+    const header = 'Ticket,Slot Id,Road,Status,Raised\n'
+    const lines = result.rows.map((r) => {
+      const device = deviceDisplayId({
+        slot_id: r.slot_id,
+        public_id: r.device_public_id,
+      })
+      return `${r.public_id},${device},"${r.road}",${listStatus(r.status, r.assignee_id)},${r.raised_at}`
+    })
     res.setHeader('Content-Type', 'text/csv')
     res.setHeader('Content-Disposition', 'attachment; filename="tickets.csv"')
     return res.send(header + lines.join('\n'))
@@ -277,7 +287,7 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
     const body = raiseSchema.parse(req.body)
     const device = await query(
       `SELECT d.*, r.name AS road_name FROM devices d JOIN roads r ON r.id = d.road_id
-       WHERE d.public_id = $1 OR d.id::text = $1`,
+       WHERE ${deviceLookupWhere('d', 1)}`,
       [body.deviceId],
     )
     if (!device.rowCount) throw new ApiError(404, 'Device not found', 'NOT_FOUND')
@@ -364,7 +374,7 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
 router.get('/:ticketId', authorize('All tickets', 'v'), async (req: AuthedRequest, res) => {
   try {
     const result = await query(
-      `SELECT t.*, d.public_id AS device_public_id, d.slot_number, d.road_id,
+      `SELECT t.*, d.public_id AS device_public_id, d.slot_id, d.slot_number, d.road_id,
               r.name AS road_name, ru.full_name AS raised_by_name, au.full_name AS assignee_name,
               rc.name AS reported_cat, rs.name AS reported_sub,
               fc.name AS found_cat, fs.name AS found_sub
@@ -425,7 +435,11 @@ router.get('/:ticketId', authorize('All tickets', 'v'), async (req: AuthedReques
     return ok(res, {
       header: {
         id: t.public_id,
-        deviceId: t.device_public_id,
+        deviceId: deviceDisplayId({
+          slot_id: t.slot_id,
+          public_id: t.device_public_id,
+        }),
+        slotId: t.slot_id != null && t.slot_id !== '' ? Number(t.slot_id) : null,
         road: t.road_name,
         slot: t.slot_number,
         status: displayStatus(t.status),

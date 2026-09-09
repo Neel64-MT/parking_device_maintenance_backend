@@ -264,3 +264,33 @@ Event `parts` JSONB: `[{ "id", "name", "amount" }, ...]`. Device history reads `
 ## Frontend
 
 **FRONTEND CHANGE REQUIRED:** PartChips / update & close forms must send part UUIDs and labour-only `cost` (do not fold master prices into `cost`).
+
+---
+
+# Design — Device Sync (Phase 23)
+
+## Device / road fields
+
+| Concept | Column | Source |
+|---------|--------|--------|
+| Slot Id | `devices.slot_id` | external `slot.id` — **immutable once set**; sync match key |
+| Slot Label | `devices.slot_number` | external `slot.slot_label` |
+| Slot Identifier | `devices.slot_identifier` | external `mac_address` (updates when hardware/MAC changes) |
+| QR Number | `devices.qr_code` | external `qr_number` (may update on sync) |
+| Parking Location | `devices.road_id` → `roads` | `parking_location` via `roads.external_location_id` / name |
+
+`devices.public_id` stays in the DB for internal uniqueness but is not the primary API identity when `slot_id` is present. Ticket `deviceId` fields return Slot Id.
+
+## Sync run
+
+Table `device_sync_runs`: `status` ∈ `started` | `completed` | `failed`, `stats` JSONB, `error_message`.
+
+## Background
+
+`POST /api/device-sync` schedules `setImmediate` work; single-flight while any run is `started` (`409 SYNC_IN_PROGRESS`).
+
+QR fetch: `GET /qr-codes?status=all&page=N&per_page=50`. Page count from `data.pagination.last_page` (e.g. 22 for total 1094). Locations: `data` is a top-level array.
+
+## Roads after sync
+
+Device Sync upserts parking locations into `roads` (single source of truth). No separate sync-roads endpoint — `GET /api/roads` and `GET /api/lookups/roads` simply read that table.

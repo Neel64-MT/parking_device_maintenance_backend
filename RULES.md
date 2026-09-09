@@ -40,6 +40,16 @@
 - Admin password changes require server-side `authorize('Users', 'e')`; reuse existing user PATCH.
 - Reuse existing auth hashing, Zod password rules, and JWT middleware; avoid duplicate auth stacks.
 - Do not modify unrelated working login/logout flows except where password-reset/session invalidation requires it.
+- Device Sync must not block the HTTP request for the full import; return 202 and run in the background.
+- Location sync must succeed before QR/device sync starts.
+- Device sync must be idempotent (no duplicate roads/devices); use unique keys / upserts.
+- Process QR data page-by-page (`per_page=50`); do not load the entire external dataset into memory.
+- Do not hardcode SmartPark URLs/tokens in routes — use `DEVICE_SYNC_BASE_URL` and `DEVICE_SYNC_API_TOKEN` env.
+- Preserve `authorize('Device list', …)` for sync endpoints; do not invent a separate auth system.
+- Device Sync matches by stable `slot_id`; never overwrite `slot_id` after it is set. Update `slot_identifier` (mac) and `qr_code` when hardware changes.
+- Map Slot Identifier from external `mac_address` into `devices.slot_identifier`; leave null only when the QR item omits `mac_address`.
+- Prefer Slot Id over `public_id` in ticket/device API display fields when `slot_id` is present.
+- Keep Device Sync code concise; reuse Express + `pg` patterns; no new queue libraries unless required.
 
 ## What to avoid
 
