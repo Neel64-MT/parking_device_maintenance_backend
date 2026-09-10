@@ -45,17 +45,26 @@
 - Reuse existing auth hashing, Zod password rules, and JWT middleware; avoid duplicate auth stacks.
 - Do not modify unrelated working login/logout flows except where password-reset/session invalidation requires it.
 - Device Sync must not block the HTTP request for the full import; return 202 and run in the background.
+- Reuse existing background infrastructure (`setImmediate` + `device_sync_runs`); do not add a new queue library.
 - Location sync must succeed before QR/device sync starts.
 - Device sync must be idempotent (no duplicate roads/devices); use unique keys / upserts.
 - Process QR data page-by-page (`per_page=50`); do not load the entire external dataset into memory.
 - Do not hardcode SmartPark URLs/tokens in routes — use `DEVICE_SYNC_BASE_URL` and `DEVICE_SYNC_API_TOKEN` env.
 - Preserve `authorize('Device list', …)` for sync endpoints; do not invent a separate auth system.
-- Device Sync matches by stable `slot_id`; never overwrite `slot_id` after it is set. Update `slot_identifier` (mac) and `qr_code` when hardware changes.
-- Map Slot Identifier from external `mac_address` into `devices.slot_identifier`; leave null only when the QR item omits `mac_address`.
+- Never add a synced device without valid Slot details (`slot.id` + `slot.slot_label`).
+- Never add a synced device without a non-empty MAC Address (`mac_address` → `slot_identifier`).
+- One invalid sync record must not stop the complete sync — skip and continue.
+- Device Sync matches by stable `slot_id`; never overwrite `slot_id` after it is set. Do not create duplicate devices for an existing Slot Id.
+- When Slot Id exists and incoming MAC differs, update the existing device’s `slot_identifier` (and QR/road/label when changed).
+- Count `devicesUpdated` only when a row’s synced fields actually change (`IS DISTINCT FROM`); unchanged external payload → no-op.
+- Duplicate QR across Slot Ids in one sync: last Slot Id keeps the QR; others get stable `UNLINKED-SLOT-{slotId}` to avoid update thrash.
+- Do not perform unnecessary database writes when MAC and synced fields are unchanged.
+- Preserve existing ticket functionality — incomplete sync records must not disable existing devices.
 - Prefer Slot Id over `public_id` in ticket/device API display fields when `slot_id` is present.
 - Resolve `GET /api/devices/:deviceId` (and QR/PATCH) by `public_id` **or** device UUID **or** `CAST(slot_id AS TEXT)` via `deviceLookupWhere`; display ids via `deviceDisplayId` (including create/PATCH response `id`).
-- Do not accept or overwrite `slot_id` on manual Add/Edit device — Slot Id is set only by Device Sync.
-- Keep Device Sync code concise; reuse Express + `pg` patterns; no new queue libraries unless required.
+- Do not accept or overwrite `slot_id` on manual Add/Edit device — Slot Id is **not editable**; only Device Sync sets it.
+- Manual create/PATCH may update `slot_identifier` (MAC) and `qr_code` (`qrNumber`) when Device Sync is unavailable; empty MAC clears `slot_identifier` on PATCH when the field is sent.
+- Keep Device Sync code concise; reuse Express + `pg` patterns; avoid unnecessary APIs, libraries, abstractions, and refactoring.
 
 ## What to avoid
 

@@ -154,6 +154,17 @@ Client scans QR / enters device code
 
 Reuse only — no `/devices/by-qr` or `/tickets/by-slot` endpoints. Device `latitude` / `longitude` are TEXT. Scan `openTicketId` is **not** ticket-visibility filtered (Raise vs Update must be reliable); 6-month ticket count remains visibility-scoped. Scan and raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician bypass); device create/PATCH and assign still use `assertRoadAccess`.
 
+### Manual device create / edit (fallback when Sync is down)
+
+```text
+POST /api/devices          authorize Add device c
+PATCH /api/devices/:id     authorize Device list e
+  body may include: roadId, slotNumber, slotIdentifier (MAC), qrNumber, …
+  never writes slot_id (Slot Id not editable; sync-owned)
+```
+
+`GET /api/devices/:deviceId` already returns `slotId` / `slotIdentifier` / `qrNumber` for the Edit form.
+
 One open ticket per device UUID (`status <> 'Closed'`) = one per Slot Id when `devices.slot_id` is set (unique). DB: `idx_tickets_one_open_per_device`. Raise pre-check + unique-violation → same `OPEN_TICKET_EXISTS` details.
 
 ## Signup approval
@@ -258,25 +269,26 @@ Client Sync Device
   → POST /api/device-sync  (authorize Device list c)
   → INSERT device_sync_runs status=started
   → 202 { id, status }
-  → setImmediate background job
+  → setImmediate background job (does not block HTTP)
        → GET {DEVICE_SYNC_BASE_URL}/locations (Authorization Bearer)
        → insert new roads (match external_location_id / name)
        → GET .../qr-codes?status=all&page=1&per_page=50
        → total = data.summary.total; pages = data.pagination.last_page
-       → upsert devices by qr_code (= qr_number)
+       → per item: require Slot details + MAC → skip if missing
+       → upsert by slot_id: create | update MAC/QR/road/label | no-op if unchanged
        → status completed | failed
 ```
 
 | Piece | Location |
 |-------|----------|
-| Migration | [`src/db/migrations/010_device_sync.sql`](src/db/migrations/010_device_sync.sql) |
+| Migration | [`src/db/migrations/010_device_sync.sql`](src/db/migrations/010_device_sync.sql), [`011_slot_id_unique.sql`](src/db/migrations/011_slot_id_unique.sql) |
 | Client | [`src/lib/device-sync-client.ts`](src/lib/device-sync-client.ts) |
-| Runner | [`src/lib/device-sync.ts`](src/lib/device-sync.ts) |
+| Runner | [`src/lib/device-sync.ts`](src/lib/device-sync.ts) (`scheduleDeviceSync` / `upsertDevice`) |
 | Routes | [`src/routes/device-sync.ts`](src/routes/device-sync.ts) |
 | Env | `DEVICE_SYNC_BASE_URL`, `DEVICE_SYNC_API_TOKEN` |
 
-APIs: `POST /api/device-sync`, `GET /api/device-sync/latest`, `GET /api/device-sync/:id`.
+APIs: `POST /api/device-sync`, `GET /api/device-sync/latest`, `GET /api/device-sync/:id`. Background processing reuses in-process `setImmediate` + `device_sync_runs` (no external queue).
 
 Synced locations are written into the existing `roads` table (single source of truth). `GET /api/roads` and `GET /api/lookups/roads` are thin reads of that table — no separate sync-roads API.
 
-Field mapping (external → DB): `slot.id` → `slot_id` (**immutable** match key), `slot.slot_label` → `slot_number`, `mac_address` → `slot_identifier` (updatable), `qr_number` → `qr_code` (updatable), `parking_location` → `roads` / `road_id`. Ticket/device APIs expose Slot Id as `deviceId` when available (`deviceDisplayId`); `GET /api/devices/:deviceId` resolves by `public_id`, UUID, or Slot Id text (`deviceLookupWhere`). Device CSV “Device ID” prefers Slot Id the same way.
+Field mapping (external → DB): `slot.id` → `slot_id` (**immutable** match key), `slot.slot_label` → `slot_number`, `mac_address` → `slot_identifier` (**required** for sync create/update; skip record if empty), `qr_number` → `qr_code` (updatable), `parking_location` → `roads` / `road_id`. Same Slot Id + changed MAC updates the existing row; duplicates prevented by unique `slot_id`. Ticket/device APIs expose Slot Id as `deviceId` when available (`deviceDisplayId`); `GET /api/devices/:deviceId` resolves by `public_id`, UUID, or Slot Id text (`deviceLookupWhere`). Device CSV “Device ID” prefers Slot Id the same way.

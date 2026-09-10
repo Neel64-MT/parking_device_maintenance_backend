@@ -44,13 +44,17 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 - A device (and thus its Slot Id when set) may have at most one non-`Closed` ticket. Raising another returns `409` / `OPEN_TICKET_EXISTS` with `details.openTicketId` (and `ticketId`). Enforced by app pre-check + DB unique index `012_one_open_ticket_per_device.sql`.
 - Scan `openTicketId` is not ticket-list visibility filtered (Raise vs Update must be reliable for any role with Scan QR; Site attendant / Technician need no road match).
 - Device coordinates are optional TEXT on create/PATCH; seed includes Ahmedabad-area dummy values.
+- Manual device create/PATCH may set `slotIdentifier` (MAC) and `qrNumber` when Device Sync is unavailable. **Slot Id is never editable** via create/PATCH (`slotId` in body is ignored; only Device Sync writes `slot_id`).
 
 ### Device Sync requirements
 
 - Frontend **Sync Device** calls `POST /api/device-sync` (JWT + `authorize('Device list', 'c')`).
-- Handler returns **202** immediately with a sync run (`started`); work continues in the background (non-blocking).
-- Flow: fetch SmartPark `/locations` → insert new `roads` only → then page QR codes (`status=all`, `per_page=50`) using `data.summary.total` / `data.pagination.last_page` → create/update devices by `qr_code` = external `qr_number`.
-- Device columns: Slot Id (`slot_id`, **stable** — never overwritten after first sync), Slot Label (`slot_number`), Slot Identifier (`slot_identifier` ← external `mac_address`, may change on hardware swap), QR Number (`qr_code`, may change), Parking Location (`road_id` → roads). Device `public_id` remains internal/DB-only for uniqueness; APIs prefer Slot Id for display and links.
+- Handler returns **202** immediately with a sync run (`started`); work continues in the background (non-blocking via `setImmediate`).
+- Flow: fetch SmartPark `/locations` → insert new `roads` only → then page QR codes (`status=all`, `per_page=50`) using `data.summary.total` / `data.pagination.last_page` → create/update devices by stable **Slot Id** (`slot_id` = external `slot.id`).
+- **Validation:** every QR record must have Slot details (`slot.id` + `slot.slot_label`) and a non-empty `mac_address`. Missing Slot or MAC → skip that record (no partial device); one skip does not stop the run.
+- **Existing Slot Id:** if a device already has that `slot_id` and the incoming MAC differs → update `slot_identifier` (and QR/road/label when changed). Same MAC + same synced fields → no DB write. Never create a duplicate device for the same Slot Id (`idx_devices_slot_id_unique`).
+- Incomplete sync records never delete or disable existing devices — ticket raise/update keep working on existing rows.
+- Device columns: Slot Id (`slot_id`, **stable** — never overwritten after first sync), Slot Label (`slot_number`), Slot Identifier (`slot_identifier` ← external `mac_address`, required on sync create/update), QR Number (`qr_code`, may change), Parking Location (`road_id` → roads). Device `public_id` remains internal/DB-only for uniqueness; APIs prefer Slot Id for display and links.
 - Tickets list/detail/dashboard/reports expose `deviceId` as **Slot Id** (fallback to `public_id` only for legacy seed rows without `slot_id`).
 - Device history `GET /api/devices/:deviceId` resolves by `public_id`, UUID, or Slot Id text; response `header.id` prefers Slot Id. Devices CSV “Device ID” column uses the same display rule. Create/PATCH device responses expose `id` (Slot Id preferred), `publicId`, and `slotId`.
 - Acceptance (smoke): list/detail `deviceId` equals `slot_id` when present; `GET /api/devices/{slotId}` returns 200; legacy `GET /api/devices/PD-xxxx` still works when `slot_id` is null; PATCH by Slot Id + create without `slot_id` return mapped ids.

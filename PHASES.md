@@ -182,6 +182,41 @@
 
 **Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED — wire status cards to `GET /api/devices?status=`
 
+## Phase 27 — Device Sync Slot/MAC validation
+
+**Status:** Complete
+
+**Objective:** Harden Device Sync so incomplete SmartPark QR rows are skipped, existing Slot Ids get MAC updates without duplicates, and sync stays non-blocking.
+
+**Analysis:** Reused `POST /api/device-sync`, `scheduleDeviceSync` (`setImmediate`), `upsertDevice`, and `idx_devices_slot_id_unique`. No new API/queue.
+
+**Changes:**
+- Require Slot details + non-empty `mac_address` before create/update; otherwise skip
+- Existing `slot_id`: same MAC + same QR/road/label → no-op; different MAC → update existing row
+- Preserve locations → QR page sequence; ticket flows untouched
+
+**Files:** `src/lib/device-sync.ts`, docs
+
+**Testing:** typecheck; existing device-sync authz/single-flight smoke. Manual (live token): missing Slot/MAC skipped; Slot 6582 MAC change updates one row; unchanged re-sync no unnecessary write; tickets still raise on existing devices.
+
+**Done when:** validation rules documented; sync remains 202 + background; no duplicate Slot Id devices
+
+## Phase 28 — Manual device edit (MAC / QR fallback)
+
+**Status:** Complete
+
+**Objective:** When Device Sync is unavailable, allow Edit Device to update MAC and QR via existing `PATCH /api/devices/:deviceId`. Slot Id remains not editable.
+
+**Changes:**
+- Create/PATCH accept optional `slotIdentifier` and `qrNumber`
+- Never write `slot_id` from manual API (Zod omits `slotId`; ignored if present)
+- QR claim releases conflicts from other devices (same pattern as sync)
+- Smoke: PATCH MAC/QR; `slot_id` stays null when body includes `slotId`
+
+**Files:** `src/routes/devices.ts`, smoke, docs
+
+**Done when:** smoke passes; FRONTEND CHANGE REQUIRED — wire DeviceAdd Save to PATCH/POST
+
 ## Phase 18 — Ticket Status Open (drop New)
 
 **Status:** Complete

@@ -321,6 +321,32 @@ async function main() {
   assert(createDevice.body.data?.slotId == null, 'manual create must not invent slotId')
   console.log('OK add/edit device Slot Id response shape')
 
+  const macQrPublicId = createDevice.body.data.publicId as string
+  const patchMacQr = await call(`/api/devices/${macQrPublicId}`, {
+    method: 'PATCH',
+    headers: auth,
+    body: JSON.stringify({
+      slotIdentifier: 'mtap-SMOKE-MAC-001',
+      qrNumber: `QR-SMOKE-${Date.now()}`,
+      slotId: 999999, // must be ignored — Slot Id not editable
+    }),
+  })
+  assert(patchMacQr.status === 200 && patchMacQr.body.success, 'PATCH MAC/QR failed')
+  assert(patchMacQr.body.data?.slotIdentifier === 'mtap-SMOKE-MAC-001', 'PATCH must update MAC')
+  assert(
+    typeof patchMacQr.body.data?.qrNumber === 'string' &&
+      patchMacQr.body.data.qrNumber.startsWith('QR-SMOKE-'),
+    'PATCH must update qrNumber',
+  )
+  assert(patchMacQr.body.data?.slotId == null, 'PATCH must not set slotId from body')
+  const afterMac = await query(
+    `SELECT slot_id, slot_identifier, qr_code FROM devices WHERE public_id = $1`,
+    [macQrPublicId],
+  )
+  assert(afterMac.rows[0]?.slot_id == null, 'DB slot_id must stay null after PATCH with slotId in body')
+  assert(afterMac.rows[0]?.slot_identifier === 'mtap-SMOKE-MAC-001', 'DB MAC mismatch')
+  console.log('OK device PATCH MAC/QR; Slot Id not editable')
+
   // Pagination: defaults, allowed limits, invalid, page nav (PM = city-wide)
   const tickDefault = await call('/api/tickets', { headers: auth })
   assert(tickDefault.status === 200 && tickDefault.body.success, 'tickets default page failed')
