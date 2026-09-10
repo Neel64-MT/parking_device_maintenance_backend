@@ -53,10 +53,10 @@ async function main() {
     }),
   })
   assert(
-    device.status === 201 && device.body.data?.public_id,
+    device.status === 201 && device.body.data?.publicId,
     `device create failed: ${device.status} ${JSON.stringify(device.body).slice(0, 300)}`,
   )
-  const devicePublicId = device.body.data.public_id as string
+  const devicePublicId = device.body.data.publicId as string
   console.log('OK device create', devicePublicId)
 
   const ticket = await call('/api/tickets', {
@@ -231,8 +231,8 @@ async function main() {
       installStatus: 'Working',
     }),
   })
-  assert(device2.status === 201, 'device2 create failed')
-  const device2Id = device2.body.data.public_id as string
+  assert(device2.status === 201 && device2.body.data?.publicId, 'device2 create failed')
+  const device2Id = device2.body.data.publicId as string
   const t1 = await call('/api/tickets', {
     method: 'POST',
     headers: auth,
@@ -245,6 +245,41 @@ async function main() {
     }),
   })
   assert(t1.status === 201, 'first ticket failed')
+  const [raceA, raceB] = await Promise.all([
+    call('/api/tickets', {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({
+        deviceId: device2Id,
+        categoryId,
+        subCategoryId,
+        description: 'Race A',
+        reporterType: 'Control room',
+      }),
+    }),
+    call('/api/tickets', {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({
+        deviceId: device2Id,
+        categoryId,
+        subCategoryId,
+        description: 'Race B',
+        reporterType: 'Control room',
+      }),
+    }),
+  ])
+  assert(
+    [raceA, raceB].every((r) => r.status === 409 && r.body.code === 'OPEN_TICKET_EXISTS'),
+    'concurrent raises against open device must both 409',
+  )
+  assert(
+    raceA.body.details?.openTicketId === t1.body.data.id &&
+      raceB.body.details?.openTicketId === t1.body.data.id,
+    'race 409 must return existing openTicketId',
+  )
+  console.log('OK concurrent raise blocked by one-open index')
+
   const dup = await call('/api/tickets', {
     method: 'POST',
     headers: auth,

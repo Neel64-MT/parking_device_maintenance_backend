@@ -84,6 +84,8 @@ Detail, updates, close-preview, close call `assertTicketAccess` after load (plus
 
 **Assign exception:** `POST /api/tickets/:id/assign` uses `assertCanAssignTickets` (Control room / Admin / Project manager only) plus `assertRoadAccess` (not `assertTicketAccess`) so Control room can assign tickets they did not raise. Technicians cannot assign, reassign, or handover (`handoverToUserId` is rejected unless the caller can assign). List, detail, dashboard, devices, and work report remain visibility-scoped.
 
+**Field-work road bypass:** Site attendant and Technician skip road checks on `GET /api/devices/scan` and `POST /api/tickets` via `assertRoadAccessUnlessFieldWork`. Role scope stays `assigned_roads`. Technicians still only update/close tickets they hold or raised (`assertTicketAccess` / holder rules). Device create/PATCH and assign remain `assertRoadAccess`.
+
 Helpers live in `src/lib/ticket-access.ts` — single reusable rule reused by:
 
 - `tickets.ts` — list, export, detail, mutations
@@ -117,9 +119,9 @@ No new signup-request table or approve endpoint.
 
 Canonical endpoint: `GET /api/devices/scan?q={identifier}` (`authorize('Scan QR', 'v')`).
 
-Matches `public_id`, `qr_code`, or `slot_number` (case-insensitive). Applies road scope and ticket visibility on the open-ticket lateral / 6-month count.
+Matches `public_id`, `qr_code`, `slot_number` (case-insensitive), or `slot_id` as text. Road scope via `assertRoadAccessUnlessFieldWork` (Site attendant / Technician bypass). Open-ticket lateral join is **not** ticket-visibility filtered (so Raise vs Update is reliable); 6-month count remains visibility-filtered.
 
-Canonical response fields (Phase 17): `deviceId`, `deviceName` (from `model`), `locationSite` (road name), `slot`, `currentStatus` (derived), `statusDate` (open ticket raised date when open, else installed date), `ticketsLast6Months`, `openTicketId`, `openTicketAge`, `openTicketIssue`, `latitude`, `longitude`.
+Canonical response fields (Phase 17+): `deviceId` (Slot Id preferred), `deviceName`, `locationSite`, `slot`, `slotId`, `slotLabel`, `slotIdentifier`, `currentStatus`, `statusDate`, `ticketsLast6Months`, `openTicketId`, `openTicketAge`, `openTicketIssue`, `latitude`, `longitude`, plus legacy `qr` / `qrNumber` / `parkingLocation`.
 
 Legacy fields (`id`, `location`, `status`, `statusTone`, `facts`, `deviceUuid`, `roadId`) remain for older ScanQr clients.
 
@@ -133,7 +135,11 @@ No `/api/devices/:id/scan-details` path — avoids conflict with `GET /:deviceId
 
 Before insert on `POST /api/tickets`, query non-`Closed` tickets for the device. If any exist → `ApiError(409, ..., 'OPEN_TICKET_EXISTS', { ticketId, openTicketId })`.
 
-Frontend should redirect to `openTicketId` instead of creating another ticket.
+DB backstop: partial unique index `idx_tickets_one_open_per_device` on `tickets(device_id) WHERE status <> 'Closed'` (migration `012`). Concurrent insert races map unique-violation to the same `OPEN_TICKET_EXISTS` payload.
+
+Flow: QR → scan → (`openTicketId` ? update existing via `POST /api/tickets/:id/updates` : `POST /api/tickets`). Frontend should redirect to `openTicketId` instead of creating another ticket.
+
+When `devices.slot_id` is set (unique), one open ticket per device UUID equals one open ticket per Slot Id.
 
 ---
 
@@ -279,7 +285,7 @@ Event `parts` JSONB: `[{ "id", "name", "amount" }, ...]`. Device history reads `
 | QR Number | `devices.qr_code` | external `qr_number` (may update on sync) |
 | Parking Location | `devices.road_id` → `roads` | `parking_location` via `roads.external_location_id` / name |
 
-`devices.public_id` stays in the DB for internal uniqueness but is not the primary API identity when `slot_id` is present. Ticket `deviceId` fields return Slot Id.
+`devices.public_id` stays in the DB for internal uniqueness but is not the primary API identity when `slot_id` is present. Ticket list/detail expose `deviceId` (Slot Id preferred) plus numeric `slotId`. `GET /api/devices/:deviceId` accepts `public_id`, device UUID, or Slot Id as text and returns the same history shape (`header.id` = display id preferring Slot Id). Create/PATCH device responses use the same display rule (`id` / `publicId` / `slotId`); manual add/edit does not write `slot_id` (sync-owned).
 
 ## Sync run
 

@@ -11,7 +11,9 @@
 - Soft-inactivate users; never hard-delete (ticket history must remain readable).
 - Soft-deactivate issue sub-categories that have been used on tickets; hard-delete only when unused.
 - Derive device operational status from open tickets after go-live (do not trust client status for runtime).
-- One open ticket per device (`status <> 'Closed'`); closed ticket within 7 days reopens the same ticket.
+- One open ticket per device / Slot Id (`status <> 'Closed'`). Backend enforces in app code and via partial unique index `idx_tickets_one_open_per_device` on `tickets(device_id) WHERE status <> 'Closed'`. Concurrent duplicate raises must map to `409` / `OPEN_TICKET_EXISTS`. Closed ticket within 7 days reopens the same ticket (reject new raise).
+- QR → device → raise/update: `GET /api/devices/scan?q=` then either `POST /api/tickets` or `POST /api/tickets/:id/updates`. Do not invent parallel by-qr / by-slot ticket APIs.
+- Scan `openTicketId` is authoritative for Raise vs Update (not filtered by ticket list visibility); still require `Scan QR` `v`. Site attendant and Technician skip road checks on scan/raise (`assertRoadAccessUnlessFieldWork`); other roles still need road access. Keep `ticketsLast6Months` visibility-filtered.
 - Ticket list rows expose `daysOpen` and `daysAfterClose` (`null` when not closed). Do not invent a second list endpoint for close-age.
 - Ticket list tab `new` = unassigned non-closed; do not treat tab key `new` as stored status `New`.
 - List/export may present assigned + stored `Open` as `Under repair` without changing the DB row; do not duplicate that mapping in the frontend.
@@ -22,13 +24,14 @@
 - Parts create/patch use Issue master `c`/`e`; do not invent a new permission screen name.
 - Ticket `status` is one of `Open`, `Under repair`, `Waiting for spare`, `Closed`. Never persist `New`; unassigned raise uses `Open`.
 - Duplicate raise must return `409` / `OPEN_TICKET_EXISTS` with `details.openTicketId` (and `ticketId`) for UI redirect — never create a second open ticket.
-- QR scan details use `GET /api/devices/scan?q=` (do not invent a second `/scan-details` route that fights `/:deviceId`).
+- QR scan details use `GET /api/devices/scan?q=` (do not invent a second `/scan-details` route that fights `/:deviceId`). Trim `q` before lookup. When the device has no open ticket, respond with message `No tickets available` (still 200 + device payload, `openTicketId: null`) so Update can show that copy; raise remains available.
+- Ticket update (`POST /api/tickets/:id/updates`) when the ticket id does not exist returns `404` / `NO_TICKETS_AVAILABLE` with error `No tickets available`.
 - Device `latitude` / `longitude` are optional TEXT; seed and create/PATCH may set them.
 - Only the current ticket holder may update or close. Assign / reassign is Control room, Admin, or Project manager only — technicians cannot handover.
 - Admin and Project manager retain city-wide ticket visibility; other roles only see tickets they raised or are assigned to (SQL + detail asserts).
 - Apply the same ticket visibility helper to dashboard metrics, device ticket overlays/history, and work report rows — do not duplicate Admin/PM branches per route.
 - Backend authorization is mandatory; frontend filtering is not a security boundary.
-- Assign may use road scope only (Control room routing); list/detail/dashboard/devices/reports stay visibility-scoped.
+- Assign may use road scope only (Control room routing); ticket list/detail/dashboard/reports stay visibility-scoped. Device **list / export / history** are city-wide for any role with Device list/history view (no `assigned_roads` filter). Create/PATCH still use `assertRoadAccess`. Scan and ticket raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician bypass).
 - Signup approval/update requires `authorize('Users', 'e')` (Admin or Project manager with Users edit).
 - Reuse existing authorization mechanisms; avoid duplicate Admin/PM code paths.
 - Keep the sibling `frontend/` directory **read-only** — document needed UI wiring as FRONTEND CHANGE REQUIRED.
@@ -49,6 +52,8 @@
 - Device Sync matches by stable `slot_id`; never overwrite `slot_id` after it is set. Update `slot_identifier` (mac) and `qr_code` when hardware changes.
 - Map Slot Identifier from external `mac_address` into `devices.slot_identifier`; leave null only when the QR item omits `mac_address`.
 - Prefer Slot Id over `public_id` in ticket/device API display fields when `slot_id` is present.
+- Resolve `GET /api/devices/:deviceId` (and QR/PATCH) by `public_id` **or** device UUID **or** `CAST(slot_id AS TEXT)` via `deviceLookupWhere`; display ids via `deviceDisplayId` (including create/PATCH response `id`).
+- Do not accept or overwrite `slot_id` on manual Add/Edit device — Slot Id is set only by Device Sync.
 - Keep Device Sync code concise; reuse Express + `pg` patterns; no new queue libraries unless required.
 
 ## What to avoid
@@ -79,10 +84,11 @@
 
 ### Special rules
 
-- Technician / Site attendant / Control room / AMC officer: ticket list/detail/export, dashboard ticket stats, device open-ticket overlays/history, and work report ticket rows limited to `assignee_id = me OR raised_by_user_id = me` (plus road scope when `assigned_roads`).
+- Technician / Site attendant / Control room / AMC officer: ticket list/detail/export, dashboard ticket stats, device open-ticket overlays/history ticket rows, and work report ticket rows limited to `assignee_id = me OR raised_by_user_id = me`. Device list/history itself is city-wide (not road-filtered).
 - Admin / Project manager: city-wide ticket visibility (road scope still `all_roads`).
 - Technician: no Work report cost visibility when matrix denies Work report. Cannot assign or reassign (`All tickets` has no `a`); cannot send `handoverToUserId`.
-- Site attendant: raise + scan on assigned roads; cannot assign/close.
+- Site attendant: scan + raise on **any** road (field-work bypass); list stays raiser-scoped; cannot assign/close.
+- Technician: scan any road; update/close only tickets they hold or raised (any road); cannot assign or reassign; list stays assignee/raiser-scoped.
 - Assign / reassign: Control room, Admin, or Project manager only (`assertCanAssignTickets`). Technicians cannot use `/assign` or `handoverToUserId`.
 - Control room: raise/assign; cannot close; list/dashboard visibility is assignee/raiser only; assign uses road access so CR can route tickets they did not raise.
 - AMC officer: view only.
