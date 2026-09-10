@@ -224,7 +224,9 @@ Unchanged envelope sibling:
 { "success": true, "data": [], "pagination": { "page": 1, "limit": 10, "total": 42, "totalPages": 5 } }
 ```
 
-Tickets also return `tiles` / `tabCounts` (aggregated over visibility + base filters, not only the current page). Devices return status tiles over the filtered device set.
+Tickets also return `tiles` / `tabCounts` (aggregated over visibility + base filters, not only the current page). Devices return status tiles over the filtered device set **excluding** the `status` query (so Working / Under repair / Not working cards stay populated while the list is status-filtered). List rows and `pagination.total` still apply `status`.
+
+Status-card → list contract (frontend): `GET /api/devices?status=Working|Under%20repair|Not%20working&page=1&limit=10` — same Device List API; not tickets.
 
 ## Tickets SQL
 

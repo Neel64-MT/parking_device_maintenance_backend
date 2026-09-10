@@ -359,6 +359,50 @@ async function main() {
   assert(devBad.status === 400, 'devices limit=200 must be 400')
   console.log('OK devices default pagination')
 
+  const devBadStatus = await call('/api/devices?status=broken', { headers: auth })
+  assert(devBadStatus.status === 400, 'devices status=broken must be 400')
+  const unfilteredTiles = await call('/api/devices?limit=10', { headers: auth })
+  assert(unfilteredTiles.status === 200 && Array.isArray(unfilteredTiles.body.tiles), 'devices tiles required')
+  const tileMap = Object.fromEntries(
+    (unfilteredTiles.body.tiles as Array<{ label: string; value: string }>).map((t) => [
+      t.label,
+      Number(t.value),
+    ]),
+  )
+  const workingList = await call('/api/devices?status=Working&limit=10', { headers: auth })
+  assert(workingList.status === 200 && workingList.body.success, 'devices status=Working failed')
+  assert(
+    Array.isArray(workingList.body.data) &&
+      workingList.body.data.every((d: { status: string }) => d.status === 'Working'),
+    'Working filter must return only Working rows',
+  )
+  assert(workingList.body.pagination?.limit === 10, 'Working filter pagination')
+  const workingTiles = Object.fromEntries(
+    (workingList.body.tiles as Array<{ label: string; value: string }>).map((t) => [
+      t.label,
+      Number(t.value),
+    ]),
+  )
+  assert(
+    workingTiles['Total devices'] === tileMap['Total devices'] &&
+      workingTiles.Working === tileMap.Working &&
+      workingTiles['Under repair'] === tileMap['Under repair'] &&
+      workingTiles['Not working'] === tileMap['Not working'],
+    'status filter must not collapse status-card tile counts',
+  )
+  for (const status of ['Under repair', 'Not working'] as const) {
+    const filtered = await call(`/api/devices?status=${encodeURIComponent(status)}&limit=10`, {
+      headers: auth,
+    })
+    assert(filtered.status === 200 && filtered.body.success, `devices status=${status} failed`)
+    assert(
+      Array.isArray(filtered.body.data) &&
+        filtered.body.data.every((d: { status: string }) => d.status === status),
+      `${status} filter must return only matching rows`,
+    )
+  }
+  console.log('OK devices status-card filter')
+
   const partsLookup = await call('/api/lookups/parts', { headers: auth })
   assert(partsLookup.status === 200 && Array.isArray(partsLookup.body.data), 'lookups parts failed')
   assert(

@@ -53,7 +53,7 @@ function deviceWritePayload(row: Record<string, unknown>) {
 const listSchema = z.object({
   q: z.string().optional(),
   road: z.string().optional(),
-  status: z.string().optional(),
+  status: z.enum(['All', 'Working', 'Under repair', 'Not working']).optional(),
   repeats: z.string().optional(),
   page: pageSchema,
   limit: limitSchema,
@@ -110,18 +110,23 @@ function buildDeviceListBase(filters: z.infer<typeof listSchema>, user: AuthUser
 
   const baseWhere = where.length ? `WHERE ${where.join(' AND ')}` : ''
 
-  const having: string[] = []
-  // status/repeats applied on outer CTE columns
-  if (filters.status && filters.status !== 'All') {
-    params.push(filters.status)
-    having.push(`derived_status = $${params.length}`)
-  }
+  // Tiles ignore status so status cards stay meaningful while the list is filtered.
+  const tileHaving: string[] = []
+  const pageHaving: string[] = []
   if (filters.repeats === '3 or more in 6 months') {
-    having.push(`tickets_6m >= 3`)
+    tileHaving.push(`tickets_6m >= 3`)
+    pageHaving.push(`tickets_6m >= 3`)
   } else if (filters.repeats === '5 or more in 6 months') {
-    having.push(`tickets_6m >= 5`)
+    tileHaving.push(`tickets_6m >= 5`)
+    pageHaving.push(`tickets_6m >= 5`)
   }
-  const outerWhere = having.length ? `WHERE ${having.join(' AND ')}` : ''
+
+  const tileParams = [...params]
+  const pageParams = [...params]
+  if (filters.status && filters.status !== 'All') {
+    pageParams.push(filters.status)
+    pageHaving.push(`derived_status = $${pageParams.length}`)
+  }
 
   const cteBody = `
     SELECT d.*, r.name AS road_name,
@@ -136,7 +141,13 @@ function buildDeviceListBase(filters: z.infer<typeof listSchema>, user: AuthUser
     ${fromSql}
     ${baseWhere}`
 
-  return { params, cteBody, outerWhere }
+  return {
+    cteBody,
+    tileParams,
+    pageParams,
+    tileWhere: tileHaving.length ? `WHERE ${tileHaving.join(' AND ')}` : '',
+    pageWhere: pageHaving.length ? `WHERE ${pageHaving.join(' AND ')}` : '',
+  }
 }
 
 async function deviceListQuery(
@@ -145,15 +156,19 @@ async function deviceListQuery(
   roadIds?: string[],
   opts?: { paginate: boolean },
 ) {
-  const { params, cteBody, outerWhere } = buildDeviceListBase(filters, user, roadIds)
+  const { cteBody, tileParams, pageParams, tileWhere, pageWhere } = buildDeviceListBase(
+    filters,
+    user,
+    roadIds,
+  )
   const paginate = opts?.paginate !== false
 
   if (!paginate) {
     const all = await query(
       `WITH device_rows AS (${cteBody})
-       SELECT * FROM device_rows ${outerWhere}
+       SELECT * FROM device_rows ${pageWhere}
        ORDER BY (slot_id IS NULL), public_id`,
-      params,
+      pageParams,
     )
     return { rows: all.rows, total: all.rowCount || all.rows.length, tiles: null }
   }
@@ -165,22 +180,28 @@ async function deviceListQuery(
        COUNT(*) FILTER (WHERE derived_status = 'Working')::int AS working,
        COUNT(*) FILTER (WHERE derived_status = 'Under repair')::int AS repair,
        COUNT(*) FILTER (WHERE derived_status = 'Not working')::int AS down
-     FROM device_rows ${outerWhere}`,
-    params,
+     FROM device_rows ${tileWhere}`,
+    tileParams,
   )
   const tiles = tilesResult.rows[0]
-  const total = tiles?.total ?? 0
 
-  const pageParams = [...params]
+  const countResult = await query(
+    `WITH device_rows AS (${cteBody})
+     SELECT COUNT(*)::int AS total FROM device_rows ${pageWhere}`,
+    pageParams,
+  )
+  const total = countResult.rows[0]?.total ?? 0
+
+  const limitParams = [...pageParams]
   const limit = filters.limit
   const offset = sqlOffset(filters.page, limit)
-  pageParams.push(limit, offset)
+  limitParams.push(limit, offset)
   const page = await query(
     `WITH device_rows AS (${cteBody})
-     SELECT * FROM device_rows ${outerWhere}
+     SELECT * FROM device_rows ${pageWhere}
        ORDER BY (slot_id IS NULL), public_id
-     LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
-    pageParams,
+     LIMIT $${limitParams.length - 1} OFFSET $${limitParams.length}`,
+    limitParams,
   )
 
   return { rows: page.rows, total, tiles }

@@ -169,6 +169,19 @@
 
 **Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED — Scan QR should not assume road-mismatch for Site attendant / Technician
 
+## Phase 26 — Device status-card → filtered Device List
+
+**Status:** Complete
+
+**Objective:** Status cards (Working / Under repair / Not working) filter the Device List via existing `GET /api/devices?status=` — not tickets; no new API.
+
+**Changes:**
+- `status` query enum: `All` | `Working` | `Under repair` | `Not working`
+- Tile aggregates ignore `status` (cards stay stable); page rows + `pagination.total` remain status-filtered
+- Smoke: Working/Under repair/Not working filters; invalid status 400; tiles unchanged under `status=Working`
+
+**Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED — wire status cards to `GET /api/devices?status=`
+
 ## Phase 18 — Ticket Status Open (drop New)
 
 **Status:** Complete
