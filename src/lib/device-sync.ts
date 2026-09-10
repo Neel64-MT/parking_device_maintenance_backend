@@ -135,62 +135,65 @@ async function releaseQrFromOthers(qr: string, keepDeviceId: string) {
   )
 }
 
+type IntendedDevice = {
+  slotId: number
+  qr: string
+  slotLabel: string
+  slotIdentifier: string
+  roadId: string
+}
+
 /**
  * Upsert by stable Slot Id (external slot.id).
- * Once slot_id is written it is never changed. Hardware swap updates mac (slot_identifier) + qr.
+ * Requires Slot details + MAC. Once slot_id is set it is never changed.
+ * Only writes / counts Updated when road, label, QR, or MAC actually differ from DB.
  */
-async function upsertDevice(
-  item: ExternalQrItem,
-  roadCache: Map<string, string | null>,
-  stats: SyncRunStats,
-) {
-  const qr = item.qr_number
-  const slotLabel = item.slot?.slot_label?.trim()
-  if (!slotLabel) {
-    stats.devicesSkipped += 1
-    return
-  }
-  const roadId = await resolveRoadId(item, roadCache)
-  if (!roadId) {
-    stats.devicesSkipped += 1
-    console.error(`[device-sync] skip QR ${qr}: parking location not found`)
-    return
-  }
+async function upsertDevice(intended: IntendedDevice, stats: SyncRunStats) {
+  const { slotId, qr, slotLabel, slotIdentifier, roadId } = intended
 
-  const slotId =
-    item.slot?.id != null && Number.isFinite(Number(item.slot.id))
-      ? Number(item.slot.id)
-      : null
-  if (slotId == null) {
-    stats.devicesSkipped += 1
-    console.error(`[device-sync] skip QR ${qr}: missing slot.id`)
-    return
-  }
-
-  const slotIdentifier =
-    typeof item.mac_address === 'string' && item.mac_address.trim()
-      ? item.mac_address.trim()
-      : null
-
-  const bySlotId = await query<{ id: string }>(
-    `SELECT id FROM devices WHERE slot_id = $1`,
+  const bySlotId = await query<{
+    id: string
+    slot_identifier: string | null
+    qr_code: string
+    road_id: string
+    slot_number: string
+  }>(
+    `SELECT id, slot_identifier, qr_code, road_id, slot_number
+     FROM devices WHERE slot_id = $1`,
     [slotId],
   )
 
   if (bySlotId.rowCount) {
+    const existing = bySlotId.rows[0]
+    const fieldsSame =
+      (existing.slot_identifier || '') === slotIdentifier &&
+      existing.qr_code === qr &&
+      existing.road_id === roadId &&
+      existing.slot_number === slotLabel
+    if (fieldsSame) return
+
     try {
-      await releaseQrFromOthers(qr, bySlotId.rows[0].id)
-      await query(
+      if (existing.qr_code !== qr) {
+        await releaseQrFromOthers(qr, existing.id)
+      }
+      const updated = await query(
         `UPDATE devices SET
           road_id = $2,
           slot_number = $3,
           qr_code = $4,
-          slot_identifier = COALESCE($5, slot_identifier),
+          slot_identifier = $5,
           updated_at = NOW()
-         WHERE id = $1`,
-        [bySlotId.rows[0].id, roadId, slotLabel, qr, slotIdentifier],
+         WHERE id = $1
+           AND (
+             road_id IS DISTINCT FROM $2
+             OR slot_number IS DISTINCT FROM $3
+             OR qr_code IS DISTINCT FROM $4
+             OR COALESCE(slot_identifier, '') IS DISTINCT FROM $5
+           )
+         RETURNING id`,
+        [existing.id, roadId, slotLabel, qr, slotIdentifier],
       )
-      stats.devicesUpdated += 1
+      if (updated.rowCount) stats.devicesUpdated += 1
     } catch (err) {
       stats.devicesSkipped += 1
       console.error(`[device-sync] update by slot_id ${slotId} failed:`, err)
@@ -205,17 +208,18 @@ async function upsertDevice(
   )
   if (byQr.rowCount && byQr.rows[0].slot_id == null) {
     try {
-      await query(
+      const updated = await query(
         `UPDATE devices SET
           road_id = $2,
           slot_number = $3,
           slot_id = $4,
-          slot_identifier = COALESCE($5, slot_identifier),
+          slot_identifier = $5,
           updated_at = NOW()
-         WHERE id = $1 AND slot_id IS NULL`,
+         WHERE id = $1 AND slot_id IS NULL
+         RETURNING id`,
         [byQr.rows[0].id, roadId, slotLabel, slotId, slotIdentifier],
       )
-      stats.devicesUpdated += 1
+      if (updated.rowCount) stats.devicesUpdated += 1
     } catch (err) {
       stats.devicesSkipped += 1
       console.error(`[device-sync] assign slot_id for QR ${qr} failed:`, err)
@@ -232,16 +236,17 @@ async function upsertDevice(
   if (byLabel.rowCount) {
     try {
       await releaseQrFromOthers(qr, byLabel.rows[0].id)
-      await query(
+      const updated = await query(
         `UPDATE devices SET
           qr_code = $2,
           slot_id = $3,
-          slot_identifier = COALESCE($4, slot_identifier),
+          slot_identifier = $4,
           updated_at = NOW()
-         WHERE id = $1 AND slot_id IS NULL`,
+         WHERE id = $1 AND slot_id IS NULL
+         RETURNING id`,
         [byLabel.rows[0].id, qr, slotId, slotIdentifier],
       )
-      stats.devicesUpdated += 1
+      if (updated.rowCount) stats.devicesUpdated += 1
     } catch (err) {
       stats.devicesSkipped += 1
       console.error(`[device-sync] assign slot_id for label ${slotLabel} failed:`, err)
@@ -266,6 +271,67 @@ async function upsertDevice(
   }
 }
 
+/** Build intended rows from one QR page; skip incomplete items. */
+async function collectIntendedFromItems(
+  items: ExternalQrItem[],
+  roadCache: Map<string, string | null>,
+  bySlotId: Map<number, IntendedDevice>,
+  stats: SyncRunStats,
+) {
+  for (const item of items) {
+    const qr = item.qr_number
+    const slotLabel = item.slot?.slot_label?.trim()
+    if (!slotLabel) {
+      stats.devicesSkipped += 1
+      continue
+    }
+    const roadId = await resolveRoadId(item, roadCache)
+    if (!roadId) {
+      stats.devicesSkipped += 1
+      console.error(`[device-sync] skip QR ${qr}: parking location not found`)
+      continue
+    }
+
+    const slotId =
+      item.slot?.id != null && Number.isFinite(Number(item.slot.id))
+        ? Number(item.slot.id)
+        : null
+    if (slotId == null) {
+      stats.devicesSkipped += 1
+      console.error(`[device-sync] skip QR ${qr}: missing slot.id`)
+      continue
+    }
+
+    const slotIdentifier =
+      typeof item.mac_address === 'string' && item.mac_address.trim()
+        ? item.mac_address.trim()
+        : null
+    if (!slotIdentifier) {
+      stats.devicesSkipped += 1
+      continue
+    }
+
+    // Last page item for a Slot Id wins (stable within a run).
+    bySlotId.set(slotId, { slotId, qr, slotLabel, slotIdentifier, roadId })
+  }
+}
+
+/**
+ * Duplicate QR numbers across Slot Ids cause update thrash (UNLINKED ping-pong).
+ * Last Slot Id keeps the real QR; others get a stable placeholder so later syncs no-op.
+ */
+function resolveQrConflicts(bySlotId: Map<number, IntendedDevice>) {
+  const qrWinner = new Map<string, number>()
+  for (const [slotId, row] of bySlotId) {
+    qrWinner.set(row.qr, slotId)
+  }
+  for (const [slotId, row] of bySlotId) {
+    if (qrWinner.get(row.qr) !== slotId) {
+      bySlotId.set(slotId, { ...row, qr: `UNLINKED-SLOT-${slotId}` })
+    }
+  }
+}
+
 async function syncQrDevices(stats: SyncRunStats) {
   const first = await deviceSyncFetch('/qr-codes', {
     status: 'all',
@@ -276,10 +342,9 @@ async function syncQrDevices(stats: SyncRunStats) {
   stats.qrTotal = page1.total
   const totalPages = page1.lastPage
   const roadCache = new Map<string, string | null>()
+  const bySlotId = new Map<number, IntendedDevice>()
 
-  for (const item of page1.items) {
-    await upsertDevice(item, roadCache, stats)
-  }
+  await collectIntendedFromItems(page1.items, roadCache, bySlotId, stats)
   stats.pagesProcessed = 1
 
   for (let page = 2; page <= totalPages; page += 1) {
@@ -289,10 +354,13 @@ async function syncQrDevices(stats: SyncRunStats) {
       per_page: PER_PAGE,
     })
     const { items } = parseQrPage(payload)
-    for (const item of items) {
-      await upsertDevice(item, roadCache, stats)
-    }
+    await collectIntendedFromItems(items, roadCache, bySlotId, stats)
     stats.pagesProcessed += 1
+  }
+
+  resolveQrConflicts(bySlotId)
+  for (const intended of bySlotId.values()) {
+    await upsertDevice(intended, stats)
   }
 }
 
