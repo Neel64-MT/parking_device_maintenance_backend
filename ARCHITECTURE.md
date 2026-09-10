@@ -141,16 +141,20 @@ Road/user/issue-master aggregate catalogs stay city-wide admin metrics (not pers
 
 ```text
 Client scans QR / enters device code
-  → GET /api/devices/scan?q={publicId|qr|slot}  (authorize Scan QR v)
-  → Response: deviceId, deviceName, locationSite, slot, currentStatus, statusDate,
-               ticketsLast6Months, openTicketId?, openTicketAge?, openTicketIssue?,
+  → GET /api/devices/scan?q={publicId|qr|slot|slotId}  (authorize Scan QR v)
+  → Response: deviceId (Slot Id preferred), deviceName, locationSite, slot, slotId,
+               slotLabel, slotIdentifier, qrNumber, parkingLocation,
+               currentStatus, statusDate, ticketsLast6Months,
+               openTicketId?, openTicketAge?, openTicketIssue?,
                latitude, longitude (+ legacy id/facts)
-  → If openTicketId set → open existing ticket
-  → Else POST /api/tickets { deviceId, ... }
+  → If openTicketId set → open existing ticket → POST /api/tickets/:id/updates
+  → Else POST /api/tickets { deviceId, ... }  (Raise ticket c)
        → if another open ticket: 409 OPEN_TICKET_EXISTS { openTicketId, ticketId }
 ```
 
-Device `latitude` / `longitude` are TEXT columns (create/PATCH/seed). Open-ticket overlays on scan respect ticket visibility for non-Admin/PM.
+Reuse only — no `/devices/by-qr` or `/tickets/by-slot` endpoints. Device `latitude` / `longitude` are TEXT. Scan `openTicketId` is **not** ticket-visibility filtered (Raise vs Update must be reliable); 6-month ticket count remains visibility-scoped. Scan and raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician bypass); device create/PATCH and assign still use `assertRoadAccess`.
+
+One open ticket per device UUID (`status <> 'Closed'`) = one per Slot Id when `devices.slot_id` is set (unique). DB: `idx_tickets_one_open_per_device`. Raise pre-check + unique-violation → same `OPEN_TICKET_EXISTS` details.
 
 ## Signup approval
 
@@ -177,7 +181,7 @@ Stored values: `Open` | `Under repair` | `Waiting for spare` | `Closed`. Do not 
 
 Migration `007_ticket_status_open.sql` rewrites leftover `New` → `Open`.
 
-“One open ticket per device” = any row with `status <> 'Closed'`.
+“One open ticket per device” = any row with `status <> 'Closed'`. Enforced by raise pre-check and partial unique index `012_one_open_ticket_per_device.sql`.
 
 ## Ticket list presentation (`GET /api/tickets`)
 
@@ -211,7 +215,7 @@ List-only. Ticket detail still uses a “Days open” header fact, not `daysAfte
 ```text
 Request page/limit (+ filters)
   → Auth + authorize(screen, v)
-  → Scope (ticket visibility / device road scope)
+  → Scope (ticket visibility; device list/history are city-wide — no road filter)
   → SQL search/filters (incl. ticket tab/status; device derived status/repeats)
   → COUNT(*) for total (+ tile aggregates)
   → SELECT ... ORDER BY ... LIMIT/OFFSET

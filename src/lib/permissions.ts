@@ -78,7 +78,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     },
   },
   Technician: {
-    note: 'Sees only devices and tickets on assigned roads, and tickets they hold. Cannot assign or reassign.',
+    note: 'Scan/raise any road; update/close only tickets they hold or raised. Cannot assign or reassign. List stays assignee/raiser-scoped.',
     scope: 'assigned_roads',
     p: {
       Dashboard: '......',
@@ -97,7 +97,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     },
   },
   'Site attendant': {
-    note: 'Can report a problem and nothing else.',
+    note: 'Can scan and raise tickets on any road; list stays raiser-scoped. Cannot update, assign, or close.',
     scope: 'assigned_roads',
     p: {
       Dashboard: '......',

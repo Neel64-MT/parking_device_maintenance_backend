@@ -13,17 +13,19 @@
 - Phase 22 — Parts master `amount` + visit cost = labour `cost` + sum(master part amounts); `ticket_event_parts` + JSONB snapshot
 - Forgot/reset password role gate — Admin / Project manager only; other Active roles `403 FORGOT_PASSWORD_ROLE_DENIED`; unknown email stays generic 200
 - Phase 23 — Device Sync: async SmartPark locations→roads + QR pages→devices; `010_device_sync.sql`; `POST /api/device-sync`
+- Phase 24 — QR raise harden: one-open partial unique index; scan `openTicketId` unfiltered by ticket visibility; raise unique-violation → `OPEN_TICKET_EXISTS`
+- Phase 25 — Field-work road bypass: Site attendant / Technician scan + raise any road; tech update still holder/raiser-only
 
 ## Currently Working On
 
-- (idle — Device Sync Phase 23 complete)
+- (idle — Phase 25 complete)
 
 ## Pending
 
 ### FRONTEND CHANGE REQUIRED (do not implement until authorized)
 
 - Feature screens still on mocks / partial wiring
-- Wire Scan QR to `GET /api/devices/scan?q=`; on raise `409 OPEN_TICKET_EXISTS` redirect via `details.openTicketId`
+- Wire Scan QR to `GET /api/devices/scan?q=`; if `openTicketId` → ticket detail / update; else raise; on raise `409 OPEN_TICKET_EXISTS` redirect via `details.openTicketId`
 - Wire Sync Device to `POST /api/device-sync`; poll `GET /api/device-sync/latest` or `/:id` for status (Device list done)
 - Device list road filter: reads `roads` via `GET /api/lookups/roads` (done); Road master / TicketList still on mocks
 - When wiring Dashboard / All Tickets / Devices / Work report, trust API ticket scope — no client-side role filters
@@ -32,6 +34,7 @@
 - Closed tickets list: use `daysAfterClose` (null when still open)
 - Trust list `status` for Assigned-tab vs Under repair tile (do not remap assigned Open in the browser)
 - Hide technician reassign / handover; only Control room, Admin, Project manager assign
+- Scan QR: do not treat road-mismatch as expected for Site attendant / Technician (API allows any road for scan/raise)
 - Signup success copy: “Admin” → “Admin or Project manager” (optional; API already unlocks Approve for PM)
 - Parts / update-ticket UI: PartChips send part UUIDs (not names); `cost` is labour-only — do not add master part prices into `cost`; show amounts from Parts/lookups APIs
 
@@ -43,9 +46,11 @@
 - Other roles: `assignee_id = me OR raised_by_user_id = me` in SQL + `assertTicketAccess`
 - Same helper scopes dashboard ticket metrics, device ticket overlays/history, and work report rows
 - Assign / reassign: Control room, Admin, or Project manager only; technicians cannot `/assign` or `handoverToUserId`
-- Assign stays road-only (`assertRoadAccess`) for Control room routing; list/detail/dashboard/devices/reports stay visibility-scoped
-- Scan details stay on `GET /api/devices/scan?q=` (no `/scan-details` alias)
-- One open ticket per device means `status <> 'Closed'`; unassigned stored status is `Open` (not `New`)
+- Assign stays road-only (`assertRoadAccess`) for Control room routing; list/detail/dashboard/reports stay visibility-scoped
+- Device list / export / history are city-wide (no `assigned_roads` filter); open-ticket overlays stay ticket-visibility scoped; create/PATCH keep `assertRoadAccess`; scan + raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician)
+- Site attendant: city-wide scan/raise; Technician: city-wide scan; update/close remain holder/raiser-only (any road)
+- Scan details stay on `GET /api/devices/scan?q=` (no `/scan-details` alias); scan `openTicketId` is not ticket-visibility filtered
+- One open ticket per device means `status <> 'Closed'`; unassigned stored status is `Open` (not `New`); DB partial unique index `idx_tickets_one_open_per_device` (migration `012`); Slot Id uniqueness follows via unique `devices.slot_id`
 - List tab `new` = unassigned non-closed; list may show assigned+`Open` as `Under repair` without DB update
 - Ticket list `daysAfterClose` is days since `closed_at` (`null` if open); list-only
 - List pagination: `page`/`limit`, default limit **10**, allowed **10|25|50|100**, SQL LIMIT/OFFSET after scope/filters; shared `src/lib/pagination.ts`

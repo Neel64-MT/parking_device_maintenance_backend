@@ -48,6 +48,69 @@ async function main() {
   assert(emailLogin.status === 200 && emailLogin.body.success && emailLogin.body.data?.token, 'email login failed')
 
   const auth = { Authorization: `Bearer ${token}` }
+
+  // Ensure smoke fixtures exist (DB may drift after Device Sync / prior writes)
+  // Prefer Science City so seeded technician (Ramesh) can scan PD-0428
+  const science = await query<{ id: string }>(`SELECT id FROM roads WHERE name = 'Science City' LIMIT 1`)
+  const anyRoad = await query<{ id: string }>(`SELECT id FROM roads ORDER BY name LIMIT 1`)
+  const fixtureRoadId = science.rows[0]?.id || anyRoad.rows[0]?.id
+  assert(fixtureRoadId, 'need at least one road for smoke fixtures')
+  await query(
+    `INSERT INTO devices (public_id, qr_code, road_id, slot_number, model, installed_on, install_status, latitude, longitude)
+     SELECT 'PD-0428', 'QR-PD0428', $1, 'S2-114', 'Flap barrier — 4 wheeler', '2026-04-02', 'Working', '23.079200', '72.497500'
+     WHERE NOT EXISTS (SELECT 1 FROM devices WHERE public_id = 'PD-0428')`,
+    [fixtureRoadId],
+  )
+  await query(
+    `UPDATE devices SET
+       road_id = $1,
+       latitude = COALESCE(latitude, '23.079200'),
+       longitude = COALESCE(longitude, '72.497500'),
+       slot_id = NULL
+     WHERE public_id = 'PD-0428'`,
+    [fixtureRoadId],
+  )
+  const cats = await query<{ cid: string; sid: string }>(
+    `SELECT c.id AS cid, s.id AS sid
+     FROM issue_categories c
+     JOIN issue_subcategories s ON s.category_id = c.id
+     WHERE s.active = TRUE
+     ORDER BY c.name, s.name LIMIT 1`,
+  )
+  assert(cats.rows[0], 'need issue category/sub for TK-1042 fixture')
+  const me = await query<{ id: string }>(
+    `SELECT id FROM users WHERE mobile = '9825012345' LIMIT 1`,
+  )
+  await query(
+    `UPDATE tickets SET status = 'Closed', closed_at = COALESCE(closed_at, NOW()), updated_at = NOW()
+     WHERE device_id = (SELECT id FROM devices WHERE public_id = 'PD-0428')
+       AND status <> 'Closed'
+       AND public_id <> 'TK-1042'`,
+  )
+  const tkExists = await query(`SELECT 1 FROM tickets WHERE public_id = 'TK-1042'`)
+  if (!tkExists.rowCount) {
+    await query(
+      `INSERT INTO tickets (
+         public_id, device_id, status, reporter_type, description,
+         reported_category_id, reported_subcategory_id, raised_by_user_id, raised_at
+       ) VALUES (
+         'TK-1042', (SELECT id FROM devices WHERE public_id = 'PD-0428'),
+         'Waiting for spare', 'Site attendant', 'Smoke fixture open ticket',
+         $1, $2, $3, NOW() - INTERVAL '3 days'
+       )`,
+      [cats.rows[0].cid, cats.rows[0].sid, me.rows[0].id],
+    )
+  } else {
+    await query(
+      `UPDATE tickets SET
+         device_id = (SELECT id FROM devices WHERE public_id = 'PD-0428'),
+         status = 'Waiting for spare',
+         closed_at = NULL,
+         updated_at = NOW()
+       WHERE public_id = 'TK-1042'`,
+    )
+  }
+
   const paths = [
     '/api/auth/me',
     '/api/dashboard',
@@ -72,13 +135,6 @@ async function main() {
     console.log('OK', path)
   }
 
-  // Ensure seeded coords exist for scan shape check (idempotent if seed already ran)
-  await query(
-    `UPDATE devices SET
-       latitude = COALESCE(latitude, '23.079200'),
-       longitude = COALESCE(longitude, '72.497500')
-     WHERE public_id = 'PD-0428'`,
-  )
   const scan = await call('/api/devices/scan?q=PD-0428', { headers: auth })
   assert(scan.status === 200 && scan.body.success, 'scan recheck failed')
   const scanData = scan.body.data as Record<string, unknown>
@@ -105,7 +161,71 @@ async function main() {
   assert(typeof scanData.openTicketAge === 'string' && scanData.openTicketAge, 'openTicketAge required when open')
   console.log('OK scan canonical payload')
 
+  const qrRow = await query<{ qr_code: string }>(
+    `SELECT qr_code FROM devices WHERE public_id = 'PD-0428'`,
+  )
+  assert(qrRow.rows[0]?.qr_code, 'PD-0428 qr_code missing')
+  const qrScan = await call(`/api/devices/scan?q=${encodeURIComponent(qrRow.rows[0].qr_code)}`, {
+    headers: auth,
+  })
+  assert(qrScan.status === 200 && qrScan.body.success, 'scan by QR number failed')
+  assert(qrScan.body.data?.openTicketId === 'TK-1042', 'QR scan must return open TK-1042')
+  assert(qrScan.body.data?.qrNumber === qrRow.rows[0].qr_code, 'QR scan qrNumber mismatch')
+  console.log('OK scan by QR number openTicketId')
+
+  const paddedQr = await call(
+    `/api/devices/scan?q=${encodeURIComponent(`  ${qrRow.rows[0].qr_code}  `)}`,
+    { headers: auth },
+  )
+  assert(paddedQr.status === 200 && paddedQr.body.success, 'padded QR scan must trim and succeed')
+  assert(paddedQr.body.data?.openTicketId === 'TK-1042', 'padded QR scan openTicketId')
+  console.log('OK scan trims QR input')
+
+  // Device with no open ticket → message for update path
+  const quietDev = await query<{ public_id: string }>(
+    `SELECT d.public_id FROM devices d
+     WHERE NOT EXISTS (
+       SELECT 1 FROM tickets t WHERE t.device_id = d.id AND t.status <> 'Closed'
+     )
+     LIMIT 1`,
+  )
+  if (quietDev.rows[0]) {
+    const noOt = await call(`/api/devices/scan?q=${encodeURIComponent(quietDev.rows[0].public_id)}`, {
+      headers: auth,
+    })
+    if (noOt.status === 200) {
+      assert(noOt.body.data?.openTicketId == null, 'expected no open ticket')
+      assert(
+        noOt.body.message === 'No tickets available',
+        `expected No tickets available message, got ${noOt.body.message}`,
+      )
+      console.log('OK scan no-open-ticket message')
+    }
+  }
+
+  const missingUpdate = await call('/api/tickets/TK-DOES-NOT-EXIST/updates', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      updateType: 'Site visit — not resolved',
+      workDone: 'n/a',
+      cost: 0,
+      parts: [],
+      photos: [],
+    }),
+  })
+  assert(
+    missingUpdate.status === 404 && missingUpdate.body.code === 'NO_TICKETS_AVAILABLE',
+    `update missing ticket must be NO_TICKETS_AVAILABLE: ${missingUpdate.status} ${missingUpdate.body.code}`,
+  )
+  assert(
+    missingUpdate.body.error === 'No tickets available',
+    'update missing ticket error text',
+  )
+  console.log('OK update no tickets available')
+
   // Dual identity: legacy PD-xxxx when no slot_id; Slot Id preferred when set
+  await query(`UPDATE devices SET slot_id = NULL WHERE public_id = 'PD-0428'`)
   const legacyPd = await call('/api/devices/PD-0428', { headers: auth })
   assert(legacyPd.status === 200 && legacyPd.body.success, 'legacy PD-0428 history failed')
   assert(legacyPd.body.data?.header?.id === 'PD-0428', 'legacy header.id must be PD-0428 when no slot_id')
@@ -123,40 +243,41 @@ async function main() {
   console.log('OK legacy PD-xxxx device identity')
 
   const testSlotId = 9001001
-  await query(
-    `UPDATE devices SET slot_id = $1 WHERE public_id = 'PD-0117'`,
-    [testSlotId],
-  )
+  await query(`UPDATE devices SET slot_id = NULL WHERE slot_id = $1`, [testSlotId])
+  await query(`UPDATE devices SET slot_id = $1 WHERE public_id = 'PD-0428'`, [testSlotId])
   const slotHistory = await call(`/api/devices/${testSlotId}`, { headers: auth })
-  assert(slotHistory.status === 200 && slotHistory.body.success, `GET /api/devices/${testSlotId} failed`)
+  assert(
+    slotHistory.status === 200 && slotHistory.body.success,
+    `GET /api/devices/${testSlotId} failed: ${slotHistory.status} ${JSON.stringify(slotHistory.body).slice(0, 200)}`,
+  )
   assert(
     slotHistory.body.data?.header?.id === String(testSlotId),
     'slot history header.id must be Slot Id',
   )
   assert(
-    slotHistory.body.data?.header?.publicId === 'PD-0117',
-    'slot history header.publicId must remain PD-0117',
+    slotHistory.body.data?.header?.publicId === 'PD-0428',
+    'slot history header.publicId must remain PD-0428',
   )
   assert(
     slotHistory.body.data?.header?.slotId === testSlotId,
     'slot history header.slotId mismatch',
   )
-  const slotTicket = await call('/api/tickets/TK-1051', { headers: auth })
-  assert(slotTicket.status === 200 && slotTicket.body.success, 'TK-1051 detail failed')
+  const slotTicket = await call('/api/tickets/TK-1042', { headers: auth })
+  assert(slotTicket.status === 200 && slotTicket.body.success, 'TK-1042 detail failed after slot_id')
   assert(
     slotTicket.body.data?.header?.deviceId === String(testSlotId),
-    'TK-1051 deviceId must equal slot_id when present',
+    'TK-1042 deviceId must equal slot_id when present',
   )
   assert(
     slotTicket.body.data?.header?.slotId === testSlotId,
-    'TK-1051 slotId must be numeric Slot Id',
+    'TK-1042 slotId must be numeric Slot Id',
   )
   const slotList = await call(`/api/tickets?q=${testSlotId}&limit=25`, { headers: auth })
   assert(slotList.status === 200 && slotList.body.success, 'tickets search by slot_id failed')
   const slotListRow = (slotList.body.data as Array<{ id: string; deviceId: string; slotId: number | null }>).find(
-    (t) => t.id === 'TK-1051',
+    (t) => t.id === 'TK-1042',
   )
-  assert(slotListRow, 'TK-1051 must appear in search by slot_id')
+  assert(slotListRow, 'TK-1042 must appear in search by slot_id')
   assert(slotListRow!.deviceId === String(testSlotId), 'list deviceId must equal slot_id')
   assert(slotListRow!.slotId === testSlotId, 'list slotId must equal Slot Id')
   console.log('OK Slot Id device / ticket identity')
@@ -168,8 +289,10 @@ async function main() {
   })
   assert(patchBySlot.status === 200 && patchBySlot.body.success, 'PATCH by Slot Id failed')
   assert(patchBySlot.body.data?.id === String(testSlotId), 'PATCH response id must prefer Slot Id')
-  assert(patchBySlot.body.data?.publicId === 'PD-0117', 'PATCH response publicId must stay PD-0117')
+  assert(patchBySlot.body.data?.publicId === 'PD-0428', 'PATCH response publicId must stay PD-0428')
   assert(patchBySlot.body.data?.slotId === testSlotId, 'PATCH response slotId mismatch')
+  // Clear smoke slot_id so later seed-style PD asserts stay valid
+  await query(`UPDATE devices SET slot_id = NULL WHERE public_id = 'PD-0428'`)
   const roadsForCreate = await call('/api/lookups/roads', { headers: auth })
   const createRoadId = (roadsForCreate.body.data as Array<{ id: string }>)?.[0]?.id
   assert(createRoadId, 'need a road for create-device smoke')
@@ -618,10 +741,10 @@ async function main() {
   const adminTickets = await call('/api/tickets?limit=100', { headers: pmAuthApprove })
   assert(adminTickets.status === 200 && Array.isArray(adminTickets.body.data), 'pm ticket list failed')
   const foreign = adminTickets.body.data.find(
-    (t: { assignedTo: string | null; id: string }) =>
-      t.assignedTo && t.assignedTo !== 'Ramesh Vaghela',
+    (t: { assignedTo: string | null; id: string; status: string }) =>
+      t.assignedTo && t.assignedTo !== 'Ramesh Vaghela' && t.status !== 'Closed',
   )
-  assert(foreign?.id, 'need a ticket not assigned to Ramesh for visibility test')
+  assert(foreign?.id, 'need a non-closed ticket not assigned to Ramesh for visibility test')
 
   const techList = await call('/api/tickets?limit=100', { headers: techAuth })
   assert(techList.status === 200, 'tech ticket list failed')
@@ -675,6 +798,48 @@ async function main() {
   assert(attendantDetail.status === 200, 'raiser must open own ticket detail on non-assigned road')
   console.log('OK site attendant sees tickets they raised across roads')
 
+  // Site attendant may scan + raise on any road (field-work bypass)
+  const cgRoad = await query<{ id: string }>(`SELECT id FROM roads WHERE name = 'CG Road' LIMIT 1`)
+  assert(cgRoad.rows[0]?.id, 'need CG Road for attendant off-road raise')
+  await query(
+    `INSERT INTO devices (public_id, qr_code, road_id, slot_number, model, installed_on, install_status)
+     SELECT 'PD-SMOKE-CG', 'QR-PDSMOKECG', $1, 'CG-SMOKE', 'Flap barrier — 4 wheeler', '2026-04-01', 'Working'
+     WHERE NOT EXISTS (SELECT 1 FROM devices WHERE public_id = 'PD-SMOKE-CG')`,
+    [cgRoad.rows[0].id],
+  )
+  await query(
+    `UPDATE tickets SET status = 'Closed', closed_at = NOW() - INTERVAL '8 days', updated_at = NOW()
+     WHERE device_id = (SELECT id FROM devices WHERE public_id = 'PD-SMOKE-CG')
+       AND status <> 'Closed'`,
+  )
+  await query(
+    `UPDATE tickets SET closed_at = NOW() - INTERVAL '8 days'
+     WHERE device_id = (SELECT id FROM devices WHERE public_id = 'PD-SMOKE-CG')
+       AND status = 'Closed'
+       AND closed_at >= NOW() - INTERVAL '7 days'`,
+  )
+  const attendantScanCg = await call('/api/devices/scan?q=PD-SMOKE-CG', { headers: attendantAuth })
+  assert(
+    attendantScanCg.status === 200 && attendantScanCg.body.success,
+    `attendant scan off-road must succeed: ${attendantScanCg.status} ${JSON.stringify(attendantScanCg.body)}`,
+  )
+  assert(!attendantScanCg.body.data?.openTicketId, 'PD-SMOKE-CG must have no open ticket for raise')
+  const attendantRaiseCg = await call('/api/tickets', {
+    method: 'POST',
+    headers: attendantAuth,
+    body: JSON.stringify({
+      deviceId: 'PD-SMOKE-CG',
+      categoryId: cats.rows[0].cid,
+      subCategoryId: cats.rows[0].sid,
+      description: 'Smoke attendant raise off assigned road',
+    }),
+  })
+  assert(
+    attendantRaiseCg.status === 201 && attendantRaiseCg.body.data?.id,
+    `attendant raise off-road must succeed: ${attendantRaiseCg.status} ${JSON.stringify(attendantRaiseCg.body)}`,
+  )
+  console.log('OK site attendant scan+raise on non-assigned road')
+
   // Control room can assign a ticket they did not raise (road access only)
   const crLogin = await call('/api/auth/login', {
     method: 'POST',
@@ -686,9 +851,9 @@ async function main() {
   const techUsers = await call('/api/lookups/technicians', { headers: crAuth })
   assert(techUsers.status === 200 && Array.isArray(techUsers.body.data), 'technicians lookup failed')
   const techAssignee = techUsers.body.data.find(
-    (u: { name: string; id: string }) => u.name === 'Ramesh Vaghela' || u.id,
+    (u: { name: string; id: string }) => u.name === 'Ramesh Vaghela',
   )
-  assert(techAssignee?.id, 'need a technician id to assign')
+  assert(techAssignee?.id, 'need Ramesh Vaghela id to assign')
 
   const assignOpen = await call('/api/tickets/TK-1078/assign', {
     method: 'POST',
@@ -700,6 +865,50 @@ async function main() {
     `control room assign must succeed: ${assignOpen.status} ${JSON.stringify(assignOpen.body)}`,
   )
   console.log('OK control room assign without ownership')
+
+  // Technician scan any road; update tickets they hold on any road (field-work bypass)
+  const makarba = await query<{ id: string }>(`SELECT id FROM roads WHERE name = 'Makarba' LIMIT 1`)
+  assert(makarba.rows[0]?.id, 'need Makarba for tech off-road scan')
+  await query(
+    `INSERT INTO devices (public_id, qr_code, road_id, slot_number, model, installed_on, install_status)
+     SELECT 'PD-SMOKE-MK', 'QR-PDSMOKEMK', $1, 'MK-SMOKE', 'Flap barrier — 4 wheeler', '2026-04-01', 'Working'
+     WHERE NOT EXISTS (SELECT 1 FROM devices WHERE public_id = 'PD-SMOKE-MK')`,
+    [makarba.rows[0].id],
+  )
+  const techScanOffRoad = await call('/api/devices/scan?q=PD-SMOKE-MK', { headers: techAuth })
+  assert(
+    techScanOffRoad.status === 200 && techScanOffRoad.body.success,
+    `tech scan off-road must succeed: ${techScanOffRoad.status} ${JSON.stringify(techScanOffRoad.body)}`,
+  )
+  console.log('OK tech scan on non-assigned road')
+
+  const techUpdateHeld = await call('/api/tickets/TK-1078/updates', {
+    method: 'POST',
+    headers: techAuth,
+    body: JSON.stringify({
+      updateType: 'Site visit — not resolved',
+      workDone: 'Smoke tech update on held ticket off home road',
+    }),
+  })
+  assert(
+    techUpdateHeld.status === 201 && techUpdateHeld.body.success,
+    `tech update held off-road ticket must succeed: ${techUpdateHeld.status} ${JSON.stringify(techUpdateHeld.body)}`,
+  )
+  console.log('OK tech update ticket held on non-assigned road')
+
+  const techUpdateForeign = await call(`/api/tickets/${foreign.id}/updates`, {
+    method: 'POST',
+    headers: techAuth,
+    body: JSON.stringify({
+      updateType: 'Site visit — not resolved',
+      workDone: 'must fail',
+    }),
+  })
+  assert(
+    techUpdateForeign.status === 403,
+    `tech must not update unrelated ticket: ${techUpdateForeign.status} ${JSON.stringify(techUpdateForeign.body)}`,
+  )
+  console.log('OK tech cannot update unrelated ticket')
 
   const techAssign = await call('/api/tickets/TK-1078/assign', {
     method: 'POST',
@@ -730,7 +939,7 @@ async function main() {
   assert(!dashIds.includes(foreign.id), 'control room dashboard must not list unrelated open ticket')
   console.log('OK control room dashboard openTickets scoped')
 
-  // Device list/history: open ticket overlays and history must respect visibility
+  // Device list/history: city-wide devices; open-ticket overlays still visibility-scoped
   const foreignOpen = adminTickets.body.data.find(
     (t: { assignedTo: string | null; id: string; status: string; deviceId: string }) =>
       t.assignedTo &&
@@ -740,31 +949,40 @@ async function main() {
   )
   assert(foreignOpen?.deviceId, 'need an open unrelated ticket with device for device-scope test')
 
-  const techDevices = await call('/api/devices', { headers: techAuth })
+  const techDevices = await call('/api/devices?limit=100', { headers: techAuth })
   assert(techDevices.status === 200 && Array.isArray(techDevices.body.data), 'tech devices failed')
+  assert(
+    (techDevices.body.pagination?.total ?? 0) > 0,
+    'tech device list must return city-wide devices',
+  )
   assert(
     !(techDevices.body.data || []).some(
       (d: { ticketId: string | null }) => d.ticketId === foreignOpen.id,
     ),
     'tech device list must not expose unrelated open ticket',
   )
-  console.log('OK tech device list open-ticket scoped')
+  console.log('OK tech device list city-wide + open-ticket scoped')
+
+  // Scan openTicketId is authoritative for Raise vs Update (not ticket-list visibility)
+  const techScanOpen = await call('/api/devices/scan?q=PD-0428', { headers: techAuth })
+  assert(techScanOpen.status === 200 && techScanOpen.body.success, 'tech scan PD-0428 failed')
+  assert(
+    techScanOpen.body.data?.openTicketId === 'TK-1042',
+    'tech scan must surface openTicketId even when ticket is not list-visible',
+  )
+  console.log('OK tech scan openTicketId unfiltered')
 
   const techDeviceDetail = await call(`/api/devices/${foreignOpen.deviceId}`, { headers: techAuth })
-  if (techDeviceDetail.status === 200) {
-    const histIds = (techDeviceDetail.body.data.tickets || []).map((t: { id: string }) => t.id)
-    assert(
-      !histIds.includes(foreignOpen.id),
-      'tech device history must not include unrelated ticket',
-    )
-    console.log('OK tech device history ticket scoped')
-  } else {
-    assert(
-      techDeviceDetail.status === 403,
-      `tech device detail unexpected: ${techDeviceDetail.status}`,
-    )
-    console.log('OK tech device detail blocked by road scope')
-  }
+  assert(
+    techDeviceDetail.status === 200 && techDeviceDetail.body.success,
+    `tech device detail must be city-wide (200): ${techDeviceDetail.status}`,
+  )
+  const histIds = (techDeviceDetail.body.data.tickets || []).map((t: { id: string }) => t.id)
+  assert(
+    !histIds.includes(foreignOpen.id),
+    'tech device history must not include unrelated ticket',
+  )
+  console.log('OK tech device history city-wide + ticket visibility scoped')
 
   // Work report (Control room): ticket rows must respect visibility
   const crWork = await call('/api/reports/work?view=month', { headers: crAuth })

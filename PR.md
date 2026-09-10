@@ -13,8 +13,8 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 | Admin | Full control including users and masters |
 | Project manager | City-wide ops; can approve Pending signups and manage users (Users `vce...`); cannot delete masters |
 | Control room | Raise and route tickets; does not close or edit masters |
-| Technician | Attend/update/close tickets on assigned roads only |
-| Site attendant | Scan QR and raise tickets on assigned roads |
+| Technician | Scan any road; update/close tickets they hold or raised (any road); list assignee/raiser-scoped |
+| Site attendant | Scan QR and raise tickets on any road; list raiser-scoped |
 | AMC officer | View-only everywhere |
 | Custom roles | Created via Roles & permissions UI |
 
@@ -26,7 +26,7 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 2. **Authorization** — Screen × flag matrix (`v c e a x d`), road scope, ticket holder rules
 3. **Dashboard** — Fleet status, down reasons, road-wise status, oldest open tickets
 4. **Tickets** — List (tabs/filters), raise, detail, assign, site-update, close; one non-`Closed` ticket per device (`409 OPEN_TICKET_EXISTS` with `openTicketId`); 7-day reopen = same ticket. List rows include `daysOpen` and `daysAfterClose` (whole days since `closed_at`, or `null` if still open). **Pagination:** `page`/`limit` with default `page=1`, `limit=10`; allowed limits `10|25|50|100`; DB `LIMIT`/`OFFSET` after visibility + filters; response `pagination: { page, limit, total, totalPages }`. **Statuses:** `Open`, `Under repair`, `Waiting for spare`, `Closed` (no `New`). **Visibility:** Admin and Project manager see all (within road scope). All other roles see only tickets where `assignee_id` or `raised_by_user_id` is the current user (enforced in SQL and on detail/mutations).
-5. **Devices** — List, add, history, QR scan/lookup (`GET /api/devices/scan?q=`), QR label PNG, export; optional `latitude` / `longitude` (TEXT). **Pagination:** same `page`/`limit` rules as tickets (DB-level after road scope + status/repeats filters). **Device Sync** — `POST /api/device-sync` starts an async import from SmartPark (locations → roads, then QR pages → devices); poll `GET /api/device-sync/:id` or `/latest` for `started` / `completed` / `failed`.
+5. **Devices** — List, add, history, QR scan/lookup (`GET /api/devices/scan?q=`), QR label PNG, export; optional `latitude` / `longitude` (TEXT). **List / export / history are city-wide** for every role with Device list/history view (not filtered by `assigned_roads`). Open-ticket overlays on list/history remain ticket-visibility scoped. Create/PATCH keep `assertRoadAccess`. Scan and ticket raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician bypass). **Pagination:** same `page`/`limit` rules as tickets (DB-level after status/repeats filters). **Device Sync** — `POST /api/device-sync` starts an async import from SmartPark (locations → roads, then QR pages → devices); poll `GET /api/device-sync/:id` or `/latest` for `started` / `completed` / `failed`.
 6. **Issue master** — Categories / sub-categories with severity; deactivate if used (no hard delete when used)
 7. **Parts master** — Active parts with `amount` (`NUMERIC(12,2)`); list/lookups return `{ id, name, amount }`; create/patch via `/api/parts` using Issue master `c`/`e`
 8. **Road master** — CRUD roads; sequential `RD-xx` codes
@@ -39,8 +39,10 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 ### QR scan & raise-ticket requirements
 
 - After scanning a QR / device code, clients call `GET /api/devices/scan?q={identifier}` (canonical scan-details API; no separate `/scan-details` path).
-- Scan response includes: `deviceId`, `deviceName`, `locationSite`, `slot`, `currentStatus`, `statusDate`, `ticketsLast6Months`, `openTicketId`, `openTicketAge`, `openTicketIssue`, `latitude`, `longitude` (plus legacy fields for older clients).
-- A device may have at most one non-`Closed` ticket. Raising another returns `409` / `OPEN_TICKET_EXISTS` with `details.openTicketId` (and `ticketId`) so the UI can open the existing ticket.
+- Scan response includes: `deviceId` (Slot Id preferred), `deviceName`, `locationSite`, `slot`, `slotId`, `slotLabel`, `slotIdentifier`, `currentStatus`, `statusDate`, `ticketsLast6Months`, `openTicketId`, `openTicketAge`, `openTicketIssue`, `latitude`, `longitude` (plus legacy fields for older clients).
+- Branch: `openTicketId` set → open that ticket and use `POST /api/tickets/:id/updates`; else `POST /api/tickets` with scan `deviceId` / `deviceUuid` / `publicId` (not QR alone).
+- A device (and thus its Slot Id when set) may have at most one non-`Closed` ticket. Raising another returns `409` / `OPEN_TICKET_EXISTS` with `details.openTicketId` (and `ticketId`). Enforced by app pre-check + DB unique index `012_one_open_ticket_per_device.sql`.
+- Scan `openTicketId` is not ticket-list visibility filtered (Raise vs Update must be reliable for any role with Scan QR; Site attendant / Technician need no road match).
 - Device coordinates are optional TEXT on create/PATCH; seed includes Ahmedabad-area dummy values.
 
 ### Device Sync requirements

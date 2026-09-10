@@ -138,6 +138,37 @@
 
 **Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED for Scan QR wiring only
 
+## Phase 24 — QR raise reuse harden (one-open DB + scan openTicketId)
+
+**Status:** Complete
+
+**Objective:** Keep reusing scan + raise + updates; harden concurrency and Raise vs Update signal.
+
+**Changes:**
+- Migration `012_one_open_ticket_per_device.sql` — partial unique index one non-`Closed` ticket per `device_id` (closes older duplicates first)
+- Raise maps unique-violation → `409 OPEN_TICKET_EXISTS` with `openTicketId`
+- Scan open-ticket join no longer applies ticket visibility filter (6m count still filtered)
+
+**Testing:** smoke — QR scan `openTicketId`; tech scan surfaces open ticket; smoke-writes concurrent duplicate raise
+
+**Done when:** smoke + smoke:writes pass; docs match; FRONTEND CHANGE REQUIRED — Scan QR → raise or update existing
+
+## Phase 25 — Field-work road bypass (attendant raise / tech holder update)
+
+**Status:** Complete
+
+**Objective:** Site attendants may raise on any device/road; technicians may scan any road and update tickets they hold on any road. Do not flip role `scope` to `all_roads`.
+
+**Changes:**
+- `assertRoadAccessUnlessFieldWork` in `src/middleware/auth.ts` — skips road check for Site attendant / Technician
+- Used on `GET /api/devices/scan` and `POST /api/tickets` only
+- Device create/PATCH and ticket assign stay on `assertRoadAccess`
+- Holder/raiser rules on update/close unchanged; list visibility unchanged
+
+**Testing:** smoke — attendant scan+raise on non-assigned CG Road device (`PD-SMOKE-CG`); tech scan Makarba (`PD-SMOKE-MK`); tech update held TK-1078 after CR assign to Ramesh; tech update unrelated still 403
+
+**Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED — Scan QR should not assume road-mismatch for Site attendant / Technician
+
 ## Phase 18 — Ticket Status Open (drop New)
 
 **Status:** Complete

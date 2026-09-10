@@ -1,10 +1,11 @@
 import { Router } from 'express'
 import { z } from 'zod'
-import { ApiError, handleApiError } from '../lib/api-error.js'
+import { ApiError, handleApiError, isUniqueViolation } from '../lib/api-error.js'
 import { created, ok } from '../lib/respond.js'
 import { query, withTransaction } from '../db/pool.js'
 import {
   assertRoadAccess,
+  assertRoadAccessUnlessFieldWork,
   authorize,
   requireAuth,
   type AuthedRequest,
@@ -285,13 +286,14 @@ const raiseSchema = z.object({
 router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res) => {
   try {
     const body = raiseSchema.parse(req.body)
+    const deviceId = body.deviceId.trim()
     const device = await query(
       `SELECT d.*, r.name AS road_name FROM devices d JOIN roads r ON r.id = d.road_id
        WHERE ${deviceLookupWhere('d', 1)}`,
-      [body.deviceId],
+      [deviceId],
     )
     if (!device.rowCount) throw new ApiError(404, 'Device not found', 'NOT_FOUND')
-    assertRoadAccess(req.user!, device.rows[0].road_id)
+    assertRoadAccessUnlessFieldWork(req.user!, device.rows[0].road_id)
 
     const open = await query(
       `SELECT public_id, id, status FROM tickets
@@ -323,25 +325,44 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
 
     const publicId = await nextPublicId('TK', 4)
     const status = body.assigneeId ? 'Under repair' : 'Open'
-    const ticket = await query(
-      `INSERT INTO tickets (
-        public_id, device_id, status, priority, reporter_type, description,
-        reported_category_id, reported_subcategory_id,
-        raised_by_user_id, assignee_id
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-      [
-        publicId,
-        device.rows[0].id,
-        status,
-        body.priority || null,
-        body.reporterType,
-        body.description || null,
-        body.categoryId,
-        body.subCategoryId,
-        req.user!.id,
-        body.assigneeId || null,
-      ],
-    )
+    let ticket
+    try {
+      ticket = await query(
+        `INSERT INTO tickets (
+          public_id, device_id, status, priority, reporter_type, description,
+          reported_category_id, reported_subcategory_id,
+          raised_by_user_id, assignee_id
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+        [
+          publicId,
+          device.rows[0].id,
+          status,
+          body.priority || null,
+          body.reporterType,
+          body.description || null,
+          body.categoryId,
+          body.subCategoryId,
+          req.user!.id,
+          body.assigneeId || null,
+        ],
+      )
+    } catch (err) {
+      if (isUniqueViolation(err)) {
+        const raced = await query(
+          `SELECT public_id FROM tickets
+           WHERE device_id = $1 AND status <> 'Closed'
+           ORDER BY raised_at DESC LIMIT 1`,
+          [device.rows[0].id],
+        )
+        if (raced.rowCount) {
+          throw new ApiError(409, 'This device already has an open ticket', 'OPEN_TICKET_EXISTS', {
+            ticketId: raced.rows[0].public_id,
+            openTicketId: raced.rows[0].public_id,
+          })
+        }
+      }
+      throw err
+    }
 
     await query(
       `INSERT INTO ticket_events (ticket_id, event_type, title, body, status_label, actor_user_id, category_id, subcategory_id, photos)
@@ -565,12 +586,15 @@ const updateSchema = z.object({
 router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: AuthedRequest, res) => {
   try {
     const body = updateSchema.parse(req.body)
+    const ticketId = String(req.params.ticketId || '').trim()
     const ticket = await query(
       `SELECT t.*, d.road_id FROM tickets t JOIN devices d ON d.id = t.device_id
        WHERE t.public_id = $1 OR t.id::text = $1`,
-      [req.params.ticketId],
+      [ticketId],
     )
-    if (!ticket.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
+    if (!ticket.rowCount) {
+      throw new ApiError(404, 'No tickets available', 'NO_TICKETS_AVAILABLE')
+    }
     const t = ticket.rows[0]
     if (t.status === 'Closed') throw new ApiError(409, 'Ticket is closed', 'CLOSED')
     assertTicketAccess(req.user!, t)
@@ -684,12 +708,15 @@ router.patch(
   async (req: AuthedRequest, res) => {
     try {
       const body = attachUpdatePhotosSchema.parse(req.body)
+      const ticketId = String(req.params.ticketId || '').trim()
       const ticket = await query(
         `SELECT t.*, d.road_id FROM tickets t JOIN devices d ON d.id = t.device_id
          WHERE t.public_id = $1 OR t.id::text = $1`,
-        [req.params.ticketId],
+        [ticketId],
       )
-      if (!ticket.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
+      if (!ticket.rowCount) {
+        throw new ApiError(404, 'No tickets available', 'NO_TICKETS_AVAILABLE')
+      }
       const t = ticket.rows[0]
       if (t.status === 'Closed') throw new ApiError(409, 'Ticket is closed', 'CLOSED')
       assertTicketAccess(req.user!, t)
