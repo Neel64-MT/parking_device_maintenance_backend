@@ -217,11 +217,12 @@ Request page/limit (+ filters)
   → Auth + authorize(screen, v)
   → Scope (ticket visibility; device list/history are city-wide — no road filter)
   → SQL search/filters (incl. ticket tab/status; device derived status/repeats)
-  → COUNT(*) for total (+ tile aggregates)
+  → COUNT(*) for total (+ tile aggregates; device tiles ignore `status` so cards stay stable)
   → SELECT ... ORDER BY ... LIMIT/OFFSET
   → { data, pagination: { page, limit, total, totalPages }, tiles... }
 ```
 
+Device status cards on the Device List screen call the same list API with `status=Working|Under repair|Not working` (exact strings). Do not navigate to tickets for those cards.
 Shared helpers: [`src/lib/pagination.ts`](src/lib/pagination.ts) (`pageSchema`, `limitSchema`, `paginationMeta`, `sqlOffset`).
 
 Defaults: `page=1`, `limit=10`. Allowed limits: `10|25|50|100`.

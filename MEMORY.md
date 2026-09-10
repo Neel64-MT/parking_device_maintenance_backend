@@ -15,10 +15,11 @@
 - Phase 23 — Device Sync: async SmartPark locations→roads + QR pages→devices; `010_device_sync.sql`; `POST /api/device-sync`
 - Phase 24 — QR raise harden: one-open partial unique index; scan `openTicketId` unfiltered by ticket visibility; raise unique-violation → `OPEN_TICKET_EXISTS`
 - Phase 25 — Field-work road bypass: Site attendant / Technician scan + raise any road; tech update still holder/raiser-only
+- Phase 26 — Device status-card filter: reuse `GET /api/devices?status=`; enum validation; tiles stable without status in tile WHERE
 
 ## Currently Working On
 
-- (idle — Phase 25 complete)
+- (idle — Phase 26 complete)
 
 ## Pending
 
@@ -28,6 +29,7 @@
 - Wire Scan QR to `GET /api/devices/scan?q=`; if `openTicketId` → ticket detail / update; else raise; on raise `409 OPEN_TICKET_EXISTS` redirect via `details.openTicketId`
 - Wire Sync Device to `POST /api/device-sync`; poll `GET /api/device-sync/latest` or `/:id` for status (Device list done)
 - Device list road filter: reads `roads` via `GET /api/lookups/roads` (done); Road master / TicketList still on mocks
+- Device status cards: call `GET /api/devices?status=Working|Under%20repair|Not%20working` (exact labels); stay on Device List — do not open Tickets
 - When wiring Dashboard / All Tickets / Devices / Work report, trust API ticket scope — no client-side role filters
 - TicketList: change default `limit` from 50/100 to allowed values; use `pagination` for pager UI
 - All Tickets / detail status badge: show `Open`, never `New`
