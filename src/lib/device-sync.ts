@@ -139,14 +139,14 @@ type IntendedDevice = {
   slotId: number
   qr: string
   slotLabel: string
-  slotIdentifier: string
+  slotIdentifier: string | null
   roadId: string
 }
 
 /**
- * Upsert by stable Slot Id (external slot.id).
- * Requires Slot details + MAC. Once slot_id is set it is never changed.
- * Only writes / counts Updated when road, label, QR, or MAC actually differ from DB.
+ * Upsert by stable Slot Id (external slot.id) — only Slot Id is required.
+ * MAC/QR may be missing or change; null MAC does not wipe an existing MAC.
+ * Once slot_id is set it is never changed.
  */
 async function upsertDevice(intended: IntendedDevice, stats: SyncRunStats) {
   const { slotId, qr, slotLabel, slotIdentifier, roadId } = intended
@@ -165,8 +165,11 @@ async function upsertDevice(intended: IntendedDevice, stats: SyncRunStats) {
 
   if (bySlotId.rowCount) {
     const existing = bySlotId.rows[0]
+    const macSame =
+      slotIdentifier == null ||
+      (existing.slot_identifier || '') === slotIdentifier
     const fieldsSame =
-      (existing.slot_identifier || '') === slotIdentifier &&
+      macSame &&
       existing.qr_code === qr &&
       existing.road_id === roadId &&
       existing.slot_number === slotLabel
@@ -181,14 +184,14 @@ async function upsertDevice(intended: IntendedDevice, stats: SyncRunStats) {
           road_id = $2,
           slot_number = $3,
           qr_code = $4,
-          slot_identifier = $5,
+          slot_identifier = COALESCE($5, slot_identifier),
           updated_at = NOW()
          WHERE id = $1
            AND (
              road_id IS DISTINCT FROM $2
              OR slot_number IS DISTINCT FROM $3
              OR qr_code IS DISTINCT FROM $4
-             OR COALESCE(slot_identifier, '') IS DISTINCT FROM $5
+             OR ($5::text IS NOT NULL AND COALESCE(slot_identifier, '') IS DISTINCT FROM $5)
            )
          RETURNING id`,
         [existing.id, roadId, slotLabel, qr, slotIdentifier],
@@ -213,7 +216,7 @@ async function upsertDevice(intended: IntendedDevice, stats: SyncRunStats) {
           road_id = $2,
           slot_number = $3,
           slot_id = $4,
-          slot_identifier = $5,
+          slot_identifier = COALESCE($5, slot_identifier),
           updated_at = NOW()
          WHERE id = $1 AND slot_id IS NULL
          RETURNING id`,
@@ -240,7 +243,7 @@ async function upsertDevice(intended: IntendedDevice, stats: SyncRunStats) {
         `UPDATE devices SET
           qr_code = $2,
           slot_id = $3,
-          slot_identifier = $4,
+          slot_identifier = COALESCE($4, slot_identifier),
           updated_at = NOW()
          WHERE id = $1 AND slot_id IS NULL
          RETURNING id`,
@@ -271,7 +274,7 @@ async function upsertDevice(intended: IntendedDevice, stats: SyncRunStats) {
   }
 }
 
-/** Build intended rows from one QR page; skip incomplete items. */
+/** Build intended rows from one QR page. Only Slot Id is required; MAC/QR optional. */
 async function collectIntendedFromItems(
   items: ExternalQrItem[],
   roadCache: Map<string, string | null>,
@@ -279,37 +282,34 @@ async function collectIntendedFromItems(
   stats: SyncRunStats,
 ) {
   for (const item of items) {
-    const qr = item.qr_number
-    const slotLabel = item.slot?.slot_label?.trim()
-    if (!slotLabel) {
-      stats.devicesSkipped += 1
-      continue
-    }
-    const roadId = await resolveRoadId(item, roadCache)
-    if (!roadId) {
-      stats.devicesSkipped += 1
-      console.error(`[device-sync] skip QR ${qr}: parking location not found`)
-      continue
-    }
-
     const slotId =
       item.slot?.id != null && Number.isFinite(Number(item.slot.id))
         ? Number(item.slot.id)
         : null
     if (slotId == null) {
       stats.devicesSkipped += 1
-      console.error(`[device-sync] skip QR ${qr}: missing slot.id`)
+      console.error(
+        `[device-sync] skip QR ${item.qr_number || '?'}: missing slot.id`,
+      )
       continue
     }
 
+    const roadId = await resolveRoadId(item, roadCache)
+    if (!roadId) {
+      stats.devicesSkipped += 1
+      console.error(
+        `[device-sync] skip slot_id ${slotId}: parking location not found`,
+      )
+      continue
+    }
+
+    const rawQr = typeof item.qr_number === 'string' ? item.qr_number.trim() : ''
+    const qr = rawQr || `UNLINKED-SLOT-${slotId}`
+    const slotLabel = item.slot?.slot_label?.trim() || String(slotId)
     const slotIdentifier =
       typeof item.mac_address === 'string' && item.mac_address.trim()
         ? item.mac_address.trim()
         : null
-    if (!slotIdentifier) {
-      stats.devicesSkipped += 1
-      continue
-    }
 
     // Last page item for a Slot Id wins (stable within a run).
     bySlotId.set(slotId, { slotId, qr, slotLabel, slotIdentifier, roadId })

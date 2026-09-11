@@ -217,6 +217,24 @@
 
 **Done when:** smoke passes; FRONTEND CHANGE REQUIRED — wire DeviceAdd Save to PATCH/POST
 
+## Phase 29 — Device Sync Slot Id only required
+
+**Status:** Complete
+
+**Objective:** Slot Id is the only required identity for Device Sync records. MAC and QR may be absent or change; updates apply to the existing row for that Slot Id.
+
+**Changes:**
+- `collectIntendedFromItems`: require only `slot.id`; drop MAC-required skip
+- Missing label → `String(slotId)`; missing QR → `UNLINKED-SLOT-{slotId}`
+- Upsert: `COALESCE` MAC so null incoming does not wipe; update when MAC/QR change
+- Docs/RULES: remove “MAC required on sync”
+
+**Files:** `src/lib/device-sync.ts`, docs
+
+**Testing:** existing device-sync smoke; manual — Slot Id without MAC still syncs; later MAC/QR change updates same row
+
+**Done when:** docs match; `POST /api/device-sync` contract unchanged
+
 ## Phase 18 — Ticket Status Open (drop New)
 
 **Status:** Complete

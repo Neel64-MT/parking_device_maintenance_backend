@@ -18,10 +18,11 @@
 - Phase 26 — Device status-card filter: reuse `GET /api/devices?status=`; enum validation; tiles stable without status in tile WHERE
 - Phase 27 — Device Sync Slot/MAC validation: skip incomplete records; update MAC on existing Slot Id; no-op when unchanged; keep async `setImmediate`
 - Phase 28 — Manual device edit: PATCH/create accept MAC (`slotIdentifier`) + QR (`qrNumber`); Slot Id never writable
+- Phase 29 — Device Sync Slot Id only required; MAC/QR optional; update existing row when MAC/QR change for Slot Id
 
 ## Currently Working On
 
-- (idle — Phase 28 complete)
+- (idle — Phase 29 complete)
 
 ## Pending
 
@@ -61,7 +62,7 @@
 - List pagination: `page`/`limit`, default limit **10**, allowed **10|25|50|100**, SQL LIMIT/OFFSET after scope/filters; shared `src/lib/pagination.ts`
 - Pagination response shape stays `{ page, limit, total, totalPages }` (no hasNextPage)
 - Device Sync unique keys: **Slot Id (`slot_id`)** is primary and immutable after first write; roads by `external_location_id` then `LOWER(name)`; QR/`mac_address` may change on re-sync for the same slot
-- Slot Identifier comes from SmartPark `mac_address` → `devices.slot_identifier` (**required** for sync create/update; skip record if missing); manual create/PATCH may also set/update MAC + QR; Slot Id never writable manually
+- Slot Identifier comes from SmartPark `mac_address` → `devices.slot_identifier` (optional on sync; null does not wipe existing); manual create/PATCH may also set/update MAC + QR; Slot Id never writable manually
 - Ticket/device APIs prefer Slot Id over `public_id` for `deviceId` / list `id` display and links
 - Device `:deviceId` lookup is dual-key (`deviceLookupWhere`: `public_id` | UUID | `slot_id` text); smoke covers Slot Id path (in-process `UPDATE` on a seeded device) plus PD-xxxx when `slot_id` is null; create/PATCH responses map `id` via `deviceDisplayId`
 - Device Sync auth to SmartPark: `Authorization: Bearer` via `DEVICE_SYNC_API_TOKEN`; also `Accept: application/json`, `Cache-Control: no-cache`; locations path `/locations`
@@ -74,6 +75,6 @@
 
 ## Known Issues
 
-- Device Sync skips QR items that omit Slot details or `mac_address` (counted in `devicesSkipped`); existing devices are left untouched.
+- Device Sync skips QR items that omit Slot Id (`slot.id`); missing MAC/QR still syncs. Existing devices are left untouched when other records fail.
 - Device Sync `devicesUpdated` only counts rows whose road/label/QR/MAC actually changed vs DB; duplicate QRs resolved once per run (last Slot Id wins) so a second sync on the same feed should show Updated: 0.
 - Live Device Sync requires `DEVICE_SYNC_API_TOKEN`; without it `POST /api/device-sync` returns `503 DEVICE_SYNC_NOT_CONFIGURED`.

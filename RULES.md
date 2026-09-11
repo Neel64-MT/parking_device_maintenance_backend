@@ -51,8 +51,8 @@
 - Process QR data page-by-page (`per_page=50`); do not load the entire external dataset into memory.
 - Do not hardcode SmartPark URLs/tokens in routes — use `DEVICE_SYNC_BASE_URL` and `DEVICE_SYNC_API_TOKEN` env.
 - Preserve `authorize('Device list', …)` for sync endpoints; do not invent a separate auth system.
-- Never add a synced device without valid Slot details (`slot.id` + `slot.slot_label`).
-- Never add a synced device without a non-empty MAC Address (`mac_address` → `slot_identifier`).
+- Never add a synced device without a Slot Id (`slot.id`). Slot Id is the only required sync identity.
+- MAC (`mac_address`) and QR (`qr_number`) are optional on sync; when they change for an existing Slot Id, update the device row. Do not clear an existing MAC when the incoming MAC is empty.
 - One invalid sync record must not stop the complete sync — skip and continue.
 - Device Sync matches by stable `slot_id`; never overwrite `slot_id` after it is set. Do not create duplicate devices for an existing Slot Id.
 - When Slot Id exists and incoming MAC differs, update the existing device’s `slot_identifier` (and QR/road/label when changed).
