@@ -275,16 +275,16 @@ Event `parts` JSONB: `[{ "id", "name", "amount" }, ...]`. Device history reads `
 
 ---
 
-# Design — Device Sync (Phase 23 / 27)
+# Design — Device Sync (Phase 23 / 29)
 
 ## Device / road fields
 
 | Concept | Column | Source |
 |---------|--------|--------|
-| Slot Id | `devices.slot_id` | external `slot.id` — **immutable once set**; sync match key |
-| Slot Label | `devices.slot_number` | external `slot.slot_label` (required) |
-| Slot Identifier | `devices.slot_identifier` | external `mac_address` (**required** on sync; updates when MAC changes) |
-| QR Number | `devices.qr_code` | external `qr_number` (may update on sync) |
+| Slot Id | `devices.slot_id` | external `slot.id` — **immutable once set**; **only required** sync match key |
+| Slot Label | `devices.slot_number` | external `slot.slot_label` (fallback `String(slotId)`) |
+| Slot Identifier | `devices.slot_identifier` | external `mac_address` (optional; updates when MAC changes; null does not wipe) |
+| QR Number | `devices.qr_code` | external `qr_number` (may update; placeholder if omitted) |
 | Parking Location | `devices.road_id` → `roads` | `parking_location` via `roads.external_location_id` / name |
 
 `devices.public_id` stays in the DB for internal uniqueness but is not the primary API identity when `slot_id` is present. Ticket list/detail expose `deviceId` (Slot Id preferred) plus numeric `slotId`. `GET /api/devices/:deviceId` accepts `public_id`, device UUID, or Slot Id as text and returns the same history shape (`header.id` = display id preferring Slot Id). Create/PATCH device responses use the same display rule (`id` / `publicId` / `slotId`); manual add/edit does not write `slot_id` (Slot Id not editable — sync-owned). Manual create/PATCH may set `slotIdentifier` (MAC) and `qrNumber` as a fallback when Device Sync is down.
@@ -300,14 +300,15 @@ Event `parts` JSONB: `[{ "id", "name", "amount" }, ...]`. Device history reads `
 | Parking Location | `roadId` (UUID from lookups) |
 | Side / landmark / lat / lng / model / dates / status / photo / remarks | same camelCase keys as create schema |
 
-## Per-record processing (Phase 27)
+## Per-record processing (Phase 29)
 
-1. Missing Slot details or empty MAC → skip (`devicesSkipped`); do not create a partial device.
-2. Collect all QR pages first; last payload per Slot Id wins. Duplicate QR across slots → last Slot Id keeps the real QR; others get stable `UNLINKED-SLOT-{slotId}` (stops update thrash).
-3. Find by `slot_id` → none → INSERT (with MAC).
-4. Existing Slot Id → same MAC + same QR/road/label → **no-op** (no write, not counted as Updated).
-5. Existing Slot Id → different MAC/QR/road/label vs DB → UPDATE only when values `IS DISTINCT FROM` stored; `devicesUpdated` counts rows that actually changed.
-6. Existing devices stay usable for tickets even when a later sync item for another slot is incomplete.
+1. Missing Slot Id → skip (`devicesSkipped`). MAC/QR optional.
+2. Missing label → `String(slotId)`; missing QR → `UNLINKED-SLOT-{slotId}`.
+3. Collect all QR pages first; last payload per Slot Id wins. Duplicate QR across slots → last Slot Id keeps the real QR; others get stable `UNLINKED-SLOT-{slotId}`.
+4. Find by `slot_id` → none → INSERT (MAC may be null).
+5. Existing Slot Id → same effective MAC/QR/road/label → **no-op**. Null incoming MAC does not clear existing MAC.
+6. Existing Slot Id → different MAC/QR/road/label → UPDATE; `devicesUpdated` counts rows that actually changed.
+7. Existing devices stay usable for tickets even when a later sync item for another slot is incomplete.
 
 ## Sync run
 

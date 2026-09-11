@@ -274,8 +274,8 @@ Client Sync Device
        → insert new roads (match external_location_id / name)
        → GET .../qr-codes?status=all&page=1&per_page=50
        → total = data.summary.total; pages = data.pagination.last_page
-       → per item: require Slot details + MAC → skip if missing
-       → upsert by slot_id: create | update MAC/QR/road/label | no-op if unchanged
+       → per item: require Slot Id only → skip if missing; MAC/QR optional
+       → upsert by slot_id: create | update MAC/QR/road/label when changed | no-op if unchanged
        → status completed | failed
 ```
 
@@ -291,4 +291,4 @@ APIs: `POST /api/device-sync`, `GET /api/device-sync/latest`, `GET /api/device-s
 
 Synced locations are written into the existing `roads` table (single source of truth). `GET /api/roads` and `GET /api/lookups/roads` are thin reads of that table — no separate sync-roads API.
 
-Field mapping (external → DB): `slot.id` → `slot_id` (**immutable** match key), `slot.slot_label` → `slot_number`, `mac_address` → `slot_identifier` (**required** for sync create/update; skip record if empty), `qr_number` → `qr_code` (updatable), `parking_location` → `roads` / `road_id`. Same Slot Id + changed MAC updates the existing row; duplicates prevented by unique `slot_id`. Ticket/device APIs expose Slot Id as `deviceId` when available (`deviceDisplayId`); `GET /api/devices/:deviceId` resolves by `public_id`, UUID, or Slot Id text (`deviceLookupWhere`). Device CSV “Device ID” prefers Slot Id the same way.
+Field mapping (external → DB): `slot.id` → `slot_id` (**immutable** match key; **only required** sync field), `slot.slot_label` → `slot_number` (fallback `String(slotId)`), `mac_address` → `slot_identifier` (optional; null does not wipe existing), `qr_number` → `qr_code` (optional; placeholder `UNLINKED-SLOT-{slotId}` if empty), `parking_location` → `roads` / `road_id`. Same Slot Id + changed MAC/QR updates the existing row; duplicates prevented by unique `slot_id`. Ticket/device APIs expose Slot Id as `deviceId` when available (`deviceDisplayId`); `GET /api/devices/:deviceId` resolves by `public_id`, UUID, or Slot Id text (`deviceLookupWhere`). Device CSV “Device ID” prefers Slot Id the same way.
