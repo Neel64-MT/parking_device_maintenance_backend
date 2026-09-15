@@ -13,6 +13,7 @@
 - Derive device operational status from open tickets after go-live (do not trust client status for runtime).
 - Device status cards (Working / Under repair / Not working) must filter the Device List via `GET /api/devices?status=…` with those exact labels — do not redirect to tickets or invent a second list API. Filter at SQL (`derived_status`); keep pagination/auth. Tile counts stay unfiltered by `status` so cards remain meaningful while the list is filtered.
 - One open ticket per device / Slot Id (`status <> 'Closed'`). Backend enforces in app code and via partial unique index `idx_tickets_one_open_per_device` on `tickets(device_id) WHERE status <> 'Closed'`. Concurrent duplicate raises must map to `409` / `OPEN_TICKET_EXISTS`. Closed ticket within 7 days reopens the same ticket (reject new raise).
+- Cannot raise a ticket when `devices.slot_identifier` is null/blank → `400` / `SLOT_IDENTIFIER_REQUIRED`. Sync or set MAC first.
 - QR → device → raise/update: `GET /api/devices/scan?q=` then either `POST /api/tickets` or `POST /api/tickets/:id/updates`. Do not invent parallel by-qr / by-slot ticket APIs.
 - Scan `openTicketId` is authoritative for Raise vs Update (not filtered by ticket list visibility); still require `Scan QR` `v`. Site attendant and Technician skip road checks on scan/raise (`assertRoadAccessUnlessFieldWork`); other roles still need road access. Keep `ticketsLast6Months` visibility-filtered.
 - Ticket list rows expose `daysOpen` and `daysAfterClose` (`null` when not closed). Do not invent a second list endpoint for close-age.
@@ -109,4 +110,5 @@
 - Project manager: Users `vce...` — can approve Pending signups and edit users; Roles matrix remains view-only.
 - At least one Admin must always remain active.
 - Cost fields on work report: omit for roles without Work report view.
+- Work report actors are Technician and Engineer only; filter road by `roads.name` (`rd`), never the roles alias; export must use the same filters as `/work`; keep view-shaped `tickets` tuples for FE table headers.
 - Do not add a second permission system or duplicate role checks across dashboard/tickets/devices/reports.

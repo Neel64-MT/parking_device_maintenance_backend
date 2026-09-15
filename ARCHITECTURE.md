@@ -149,6 +149,7 @@ Client scans QR / enters device code
                latitude, longitude (+ legacy id/facts)
   → If openTicketId set → open existing ticket → POST /api/tickets/:id/updates
   → Else POST /api/tickets { deviceId, ... }  (Raise ticket c)
+       → if device has no slot_identifier: 400 SLOT_IDENTIFIER_REQUIRED
        → if another open ticket: 409 OPEN_TICKET_EXISTS { openTicketId, ticketId }
 ```
 
@@ -165,7 +166,7 @@ PATCH /api/devices/:id     authorize Device list e
 
 `GET /api/devices/:deviceId` already returns `slotId` / `slotIdentifier` / `qrNumber` for the Edit form.
 
-One open ticket per device UUID (`status <> 'Closed'`) = one per Slot Id when `devices.slot_id` is set (unique). DB: `idx_tickets_one_open_per_device`. Raise pre-check + unique-violation → same `OPEN_TICKET_EXISTS` details.
+One open ticket per device UUID (`status <> 'Closed'`) = one per Slot Id when `devices.slot_id` is set (unique). DB: `idx_tickets_one_open_per_device`. Raise pre-check + unique-violation → same `OPEN_TICKET_EXISTS` details. Raise also requires non-empty `slot_identifier` → `400` / `SLOT_IDENTIFIER_REQUIRED`.
 
 ## Signup approval
 
@@ -284,6 +285,25 @@ Add Update does **not** use list visibility (`assertTicketAccess`). Authorizatio
 | `VALIDATION_ERROR` | Missing/invalid `visitedBy` (`details[].field`) |
 
 Helper: [`src/lib/visited-by.ts`](src/lib/visited-by.ts). Engineer role: migration `013_engineer_role.sql`.
+
+## Work report (Phase 31)
+
+```text
+GET /api/reports/work
+  → authorize(Work report, v)
+  → ticket_events by Technician|Engineer actors
+  → visibility filter
+  → person / road (rd.name) / date filters
+  → people[] + view-shaped tickets tuples
+```
+
+| Piece | Location |
+|-------|----------|
+| Route | [`src/routes/reports.ts`](src/routes/reports.ts) |
+| Aggregation | [`src/lib/work-report.ts`](src/lib/work-report.ts) |
+| Export | `GET /api/reports/work/export` (same filters) |
+
+**FRONTEND CHANGE REQUIRED:** wire WorkReport.jsx to this API (drop `data/workReport.js` mock).
 
 ## Device Sync (SmartPark)
 

@@ -25,13 +25,13 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 1. **Authentication** — Email or mobile + password, JWT session, logout, current user (`/me`), forgot password, reset password
 2. **Authorization** — Screen × flag matrix (`v c e a x d`), road scope, ticket holder rules
 3. **Dashboard** — Fleet status, down reasons, road-wise status, oldest open tickets
-4. **Tickets** — List (tabs/filters), raise, detail, assign, site-update, close; one non-`Closed` ticket per device (`409 OPEN_TICKET_EXISTS` with `openTicketId`); 7-day reopen = same ticket. List rows include `daysOpen` and `daysAfterClose` (whole days since `closed_at`, or `null` if still open). **Pagination:** `page`/`limit` with default `page=1`, `limit=10`; allowed limits `10|25|50|100`; DB `LIMIT`/`OFFSET` after visibility + filters; response `pagination: { page, limit, total, totalPages }`. **Statuses:** `Open`, `Under repair`, `Waiting for spare`, `Closed` (no `New`). **Visibility:** Admin and Project manager see all (within road scope). All other roles see only tickets where `assignee_id` or `raised_by_user_id` is the current user (enforced in SQL and on detail/mutations). **Add Update:** requires an assignee (`409 TICKET_NOT_ASSIGNED` if none); only **Admin** or the **current assignee** may post (`403 NOT_ASSIGNED_USER` otherwise); required `visitedBy` (active Technician or Engineer UUID) with structured `VALIDATION_ERROR` field details.
+4. **Tickets** — List (tabs/filters), raise, detail, assign, site-update, close; one non-`Closed` ticket per device (`409 OPEN_TICKET_EXISTS` with `openTicketId`); raise requires Slot Identifier (`400 SLOT_IDENTIFIER_REQUIRED` if missing); 7-day reopen = same ticket. List rows include `daysOpen` and `daysAfterClose` (whole days since `closed_at`, or `null` if still open). **Pagination:** `page`/`limit` with default `page=1`, `limit=10`; allowed limits `10|25|50|100`; DB `LIMIT`/`OFFSET` after visibility + filters; response `pagination: { page, limit, total, totalPages }`. **Statuses:** `Open`, `Under repair`, `Waiting for spare`, `Closed` (no `New`). **Visibility:** Admin and Project manager see all (within road scope). All other roles see only tickets where `assignee_id` or `raised_by_user_id` is the current user (enforced in SQL and on detail/mutations). **Add Update:** requires an assignee (`409 TICKET_NOT_ASSIGNED` if none); only **Admin** or the **current assignee** may post (`403 NOT_ASSIGNED_USER` otherwise); required `visitedBy` (active Technician or Engineer UUID) with structured `VALIDATION_ERROR` field details.
 5. **Devices** — List, add, history, QR scan/lookup (`GET /api/devices/scan?q=`), QR label PNG, export; optional `latitude` / `longitude` (TEXT). **List / export / history are city-wide** for every role with Device list/history view (not filtered by `assigned_roads`). Open-ticket overlays on list/history remain ticket-visibility scoped. Create/PATCH keep `assertRoadAccess`. Scan and ticket raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician bypass). **Status cards:** click Working / Under repair / Not working → same Device List with `?status=` (exact labels; SQL `derived_status` filter); not the Ticket page. Tile counts stay stable when `status` is set. **Pagination:** same `page`/`limit` rules as tickets (DB-level after status/repeats filters). **Device Sync** — `POST /api/device-sync` starts an async import from SmartPark (locations → roads, then QR pages → devices); poll `GET /api/device-sync/:id` or `/latest` for `started` / `completed` / `failed`.
 6. **Issue master** — Categories / sub-categories with severity; deactivate if used (no hard delete when used)
 7. **Parts master** — Active parts with `amount` (`NUMERIC(12,2)`); list/lookups return `{ id, name, amount }`; create/patch via `/api/parts` using Issue master `c`/`e`
 8. **Road master** — CRUD roads; sequential `RD-xx` codes
 9. **Users & roles** — Create/edit/inactivate users; Admin and Project manager may approve Pending signups, update details/role/password via `PATCH /api/users/:id`; role permission matrix; never hard-delete users
-10. **Work report** — Day/week/month/range technician load and outcomes
+10. **Work report** — Day/week/month/range field-staff load and outcomes via `GET /api/reports/work` (`view`, `from`, `to`, `person`, `road`). Actors: Technician and Engineer. Road filter uses road name. Detail `tickets` tuples are view-shaped (day = per-event TK- rows; week/range = per-day; month = per-week). Export: `GET /api/reports/work/export` with the same filters (CSV).
 11. **Lookups** — Roads, technicians, parts (with amount), issue categories, road slots
 12. **Uploads** — Multipart photos for tickets/devices
 13. **Exports** — CSV for tickets, devices, roads, work report
@@ -42,6 +42,7 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 - Scan response includes: `deviceId` (Slot Id preferred), `deviceName`, `locationSite`, `slot`, `slotId`, `slotLabel`, `slotIdentifier`, `currentStatus`, `statusDate`, `ticketsLast6Months`, `openTicketId`, `openTicketAge`, `openTicketIssue`, `latitude`, `longitude` (plus legacy fields for older clients).
 - Branch: `openTicketId` set → open that ticket and use `POST /api/tickets/:id/updates`; else `POST /api/tickets` with scan `deviceId` / `deviceUuid` / `publicId` (not QR alone).
 - A device (and thus its Slot Id when set) may have at most one non-`Closed` ticket. Raising another returns `409` / `OPEN_TICKET_EXISTS` with `details.openTicketId` (and `ticketId`). Enforced by app pre-check + DB unique index `012_one_open_ticket_per_device.sql`.
+- Raising a ticket requires a non-empty Slot Identifier (`devices.slot_identifier`). Missing/blank → `400` / `SLOT_IDENTIFIER_REQUIRED` (sync or set MAC on the device first).
 - Scan `openTicketId` is not ticket-list visibility filtered (Raise vs Update must be reliable for any role with Scan QR; Site attendant / Technician need no road match).
 - Device coordinates are optional TEXT on create/PATCH; seed includes Ahmedabad-area dummy values.
 - Manual device create/PATCH may set `slotIdentifier` (MAC) and `qrNumber` when Device Sync is unavailable. **Slot Id is never editable** via create/PATCH (`slotId` in body is ignored; only Device Sync writes `slot_id`).
@@ -126,6 +127,14 @@ Canonical `tickets.status` values (exactly four; never `New`):
 - **Engineer** role exists (Technician-like permissions); lookups `/api/lookups/technicians` include Engineers.
 
 **FRONTEND CHANGE REQUIRED:** Send `visitedBy` on Add Update; toast `Ticket not assigned` / `This ticket is assigned to another user` from `error`; show field error under Visited By from `details`.
+
+### Work report (Phase 31)
+
+- `GET /api/reports/work?view=&from=&to=&person=&road=` — people-centric payload matching WorkReport UI; actors Technician + Engineer; road filter on `roads.name`; `days` / `daysInPeriod` from calendar; `tickets` view-shaped (day / week|range / month).
+- `GET /api/reports/work/export` — same filters; CSV `Person,Ticket,Event,Cost,Road,When`.
+- Visibility: Admin/PM city-wide; others assignee/raiser scoped.
+
+**FRONTEND CHANGE REQUIRED:** Replace `REPORT` mock in WorkReport.jsx with `GET /api/reports/work`; Export → `/work/export`; Person options from lookups; gate page with Work report `v`.
 
 ### Signup approval requirements
 
