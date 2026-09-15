@@ -296,6 +296,16 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
     if (!device.rowCount) throw new ApiError(404, 'Device not found', 'NOT_FOUND')
     assertRoadAccessUnlessFieldWork(req.user!, device.rows[0].road_id)
 
+    const slotIdentifier = String(device.rows[0].slot_identifier || '').trim()
+    if (!slotIdentifier) {
+      throw new ApiError(
+        400,
+        'Cannot raise a ticket: this device has no Slot Identifier',
+        'SLOT_IDENTIFIER_REQUIRED',
+        { deviceId: deviceDisplayId(device.rows[0]) },
+      )
+    }
+
     const open = await query(
       `SELECT public_id, id, status FROM tickets
        WHERE device_id = $1 AND status <> 'Closed'

@@ -20,10 +20,11 @@
 - Phase 28 — Manual device edit: PATCH/create accept MAC (`slotIdentifier`) + QR (`qrNumber`); Slot Id never writable
 - Phase 29 — Device Sync Slot Id only required; MAC/QR optional; update existing row when MAC/QR change for Slot Id
 - Phase 30 — Add Update: require assignee; Admin or assignee only (`NOT_ASSIGNED_USER`); required `visitedBy` (Technician|Engineer); Engineer role
+- Phase 31 — Work report API gap-close: road filter fix, Engineer actors, real days, view-shaped tickets, filtered export
 
 ## Currently Working On
 
-- (idle — Phase 30 complete)
+- (idle — Phase 31 complete)
 
 ## Pending
 
@@ -35,6 +36,7 @@
 - Device list road filter: reads `roads` via `GET /api/lookups/roads` (done); Road master / TicketList still on mocks
 - Device status cards: call `GET /api/devices?status=Working|Under%20repair|Not%20working` (exact labels); stay on Device List — do not open Tickets
 - Add Update: send `visitedBy` UUID; toast `Ticket not assigned` / `This ticket is assigned to another user`; field error for Visited By; only Admin/assignee UI affordance (API enforces)
+- Work report: replace `data/workReport.js` with `GET /api/reports/work`; Export → `/api/reports/work/export`; Person from lookups; gate with Work report `v`
 - When wiring Dashboard / All Tickets / Devices / Work report, trust API ticket scope — no client-side role filters
 - TicketList: change default `limit` from 50/100 to allowed values; use `pagination` for pager UI
 - All Tickets / detail status badge: show `Open`, never `New`
@@ -51,6 +53,7 @@
 - Add Update: require `assignee_id`; only Admin or assignee; `NOT_ASSIGNED_USER` for others (QR user B); no auto-claim; no `assertTicketAccess` on this path (clear toast)
 - `visitedBy` required on Add Update; Active Technician or Engineer; stored in `ticket_events.meta`
 - Engineer role: Technician-like permissions; eligible Visited By; field-work road bypass like Technician
+- Work report: Technician+Engineer actors; road filter on `rd.name`; view-shaped tickets; export filtered like `/work`
 - Visit cost: `eventCost = body.cost (labour) + SUM(parts.amount)`; master amount authoritative; dedupe part IDs per event
 - Parts CRUD reuses Issue master `c`/`e` (no new permission screen); list/lookups need Update ticket `v`
 - Ticket visibility privileged roles: only `Admin` and `Project manager`
@@ -68,6 +71,7 @@
 - Pagination response shape stays `{ page, limit, total, totalPages }` (no hasNextPage)
 - Device Sync unique keys: **Slot Id (`slot_id`)** is primary and immutable after first write; roads by `external_location_id` then `LOWER(name)`; QR/`mac_address` may change on re-sync for the same slot
 - Slot Identifier comes from SmartPark `mac_address` → `devices.slot_identifier` (optional on sync; null does not wipe existing); manual create/PATCH may also set/update MAC + QR; Slot Id never writable manually
+- Raise ticket requires non-empty Slot Identifier → `400` / `SLOT_IDENTIFIER_REQUIRED` if missing
 - Ticket/device APIs prefer Slot Id over `public_id` for `deviceId` / list `id` display and links
 - Device `:deviceId` lookup is dual-key (`deviceLookupWhere`: `public_id` | UUID | `slot_id` text); smoke covers Slot Id path (in-process `UPDATE` on a seeded device) plus PD-xxxx when `slot_id` is null; create/PATCH responses map `id` via `deviceDisplayId`
 - Device Sync auth to SmartPark: `Authorization: Bearer` via `DEVICE_SYNC_API_TOKEN`; also `Accept: application/json`, `Cache-Control: no-cache`; locations path `/locations`
