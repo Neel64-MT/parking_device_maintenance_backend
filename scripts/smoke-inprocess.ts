@@ -958,6 +958,7 @@ async function main() {
     body: JSON.stringify({
       updateType: 'Site visit — not resolved',
       workDone: 'Smoke tech update on held ticket off home road',
+      visitedBy: techAssignee.id,
     }),
   })
   assert(
@@ -972,6 +973,7 @@ async function main() {
     body: JSON.stringify({
       updateType: 'Site visit — not resolved',
       workDone: 'must fail',
+      visitedBy: techAssignee.id,
     }),
   })
   assert(
@@ -997,10 +999,38 @@ async function main() {
       updateType: 'Site visit — not resolved',
       workDone: 'Handover attempt',
       handoverToUserId: otherTech.id,
+      visitedBy: techAssignee.id,
     }),
   })
   assert(techHandover.status === 403, 'technician must not handover/reassign on update')
   console.log('OK tech cannot handover')
+
+  // User B (Jignesh) cannot update ticket assigned to Ramesh (TK-1042)
+  const techBLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9428033471', password: 'Password123' }),
+  })
+  assert(techBLogin.status === 200 && techBLogin.body.data?.token, 'tech B login failed')
+  const techBAuth = { Authorization: `Bearer ${techBLogin.body.data.token as string}` }
+  const techBUpdate = await call('/api/tickets/TK-1042/updates', {
+    method: 'POST',
+    headers: techBAuth,
+    body: JSON.stringify({
+      updateType: 'Site visit — not resolved',
+      workDone: 'B should not update A ticket',
+      visitedBy: techAssignee.id,
+    }),
+  })
+  assert(
+    techBUpdate.status === 403 && techBUpdate.body.code === 'NOT_ASSIGNED_USER',
+    `tech B must get NOT_ASSIGNED_USER: ${JSON.stringify(techBUpdate.body)}`,
+  )
+  assert(
+    techBUpdate.body.error === 'This ticket is assigned to another user',
+    'tech B error message',
+  )
+  assert(techBUpdate.body.details?.assignedTo, 'details.assignedTo for toast')
+  console.log('OK tech B cannot update ticket assigned to A')
 
   // Control room has Dashboard v but is not Admin/PM — openTickets must respect visibility
   const crDash = await call('/api/dashboard', { headers: crAuth })
