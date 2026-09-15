@@ -135,6 +135,20 @@ async function main() {
     console.log('OK', path)
   }
 
+  // Work report day shape for PM (city-wide)
+  const wrDay = await call('/api/reports/work?view=day&from=2026-08-01&to=2026-09-30', {
+    headers: auth,
+  })
+  assert(wrDay.status === 200 && wrDay.body.success, 'work report day shape')
+  assert(Array.isArray(wrDay.body.data?.people), 'work report people')
+  assert(typeof wrDay.body.data.daysInPeriod === 'number' && wrDay.body.data.daysInPeriod >= 1, 'daysInPeriod')
+  for (const p of wrDay.body.data.people) {
+    for (const key of ['name', 'role', 'roads', 'days', 'visits', 'worked', 'closed', 'open', 'load', 'tickets']) {
+      assert(key in p, `work report person missing ${key}`)
+    }
+  }
+  console.log('OK work report day shape')
+
   const scan = await call('/api/devices/scan?q=PD-0428', { headers: auth })
   assert(scan.status === 200 && scan.body.success, 'scan recheck failed')
   const scanData = scan.body.data as Record<string, unknown>
@@ -872,10 +886,14 @@ async function main() {
   const cgRoad = await query<{ id: string }>(`SELECT id FROM roads WHERE name = 'CG Road' LIMIT 1`)
   assert(cgRoad.rows[0]?.id, 'need CG Road for attendant off-road raise')
   await query(
-    `INSERT INTO devices (public_id, qr_code, road_id, slot_number, model, installed_on, install_status)
-     SELECT 'PD-SMOKE-CG', 'QR-PDSMOKECG', $1, 'CG-SMOKE', 'Flap barrier — 4 wheeler', '2026-04-01', 'Working'
+    `INSERT INTO devices (public_id, qr_code, road_id, slot_number, slot_identifier, model, installed_on, install_status)
+     SELECT 'PD-SMOKE-CG', 'QR-PDSMOKECG', $1, 'CG-SMOKE', 'AA:BB:CC:SMOKE:CG', 'Flap barrier — 4 wheeler', '2026-04-01', 'Working'
      WHERE NOT EXISTS (SELECT 1 FROM devices WHERE public_id = 'PD-SMOKE-CG')`,
     [cgRoad.rows[0].id],
+  )
+  await query(
+    `UPDATE devices SET slot_identifier = COALESCE(NULLIF(TRIM(slot_identifier), ''), 'AA:BB:CC:SMOKE:CG')
+     WHERE public_id = 'PD-SMOKE-CG'`,
   )
   await query(
     `UPDATE tickets SET status = 'Closed', closed_at = NOW() - INTERVAL '8 days', updated_at = NOW()
@@ -1084,9 +1102,13 @@ async function main() {
   )
   console.log('OK tech device history city-wide + ticket visibility scoped')
 
-  // Work report (Control room): ticket rows must respect visibility
-  const crWork = await call('/api/reports/work?view=month', { headers: crAuth })
+  // Work report (Control room): ticket rows must respect visibility (day view has TK- ids)
+  const crWork = await call(
+    '/api/reports/work?view=day&from=2026-01-01&to=2026-12-31',
+    { headers: crAuth },
+  )
   assert(crWork.status === 200 && crWork.body.success, 'control room work report failed')
+  assert(typeof crWork.body.data?.daysInPeriod === 'number', 'CR work daysInPeriod')
   const workTicketIds = (crWork.body.data.people || []).flatMap(
     (p: { tickets?: string[][] }) => (p.tickets || []).map((row) => row[0]),
   )

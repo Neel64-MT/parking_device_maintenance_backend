@@ -353,3 +353,39 @@
 **Testing:** unassigned reject; user B / PM blocked; Admin + assignee success; missing/invalid visitedBy JSON; engineer visitedBy
 
 **Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED — Visited By + toasts
+
+## Phase 31 — Work report API gap-close
+
+**Status:** Complete
+
+**Objective:** Make `GET /api/reports/work` (+ export) fully replace frontend mock Work report data.
+
+**Changes:**
+- Road filter uses `rd.name` (not roles alias)
+- Actors: Technician + Engineer
+- Real `days` / `daysInPeriod`; readable `sub` for day view
+- View-shaped `tickets` tuples (day / week|range / month)
+- Export shares same filters + actor scope
+
+**Files:** `src/routes/reports.ts`, `src/lib/work-report.ts`, smoke, docs
+
+**Testing:** day/week/month shapes; road filter; export CSV header; CR visibility scoped
+
+**Done when:** smoke passes; FRONTEND CHANGE REQUIRED — wire WorkReport.jsx
+
+## Phase 32 — Raise requires Slot Identifier
+
+**Status:** Complete
+
+**Objective:** Block `POST /api/tickets` when the device has no Slot Identifier (`slot_identifier` null/blank).
+
+**Changes:**
+- `400` / `SLOT_IDENTIFIER_REQUIRED` with `details.deviceId`
+- Smoke: reject raise without MAC; happy-path devices include `slotIdentifier`
+- Seed devices get demo MAC values
+
+**Files:** `src/routes/tickets.ts`, smoke, seed, docs
+
+**Testing:** smoke-writes negative raise; attendant raise on `PD-SMOKE-CG` with MAC
+
+**Done when:** smoke passes; FE can toast on `SLOT_IDENTIFIER_REQUIRED`

@@ -48,6 +48,7 @@ async function main() {
     body: JSON.stringify({
       roadId,
       slotNumber: `ZZ-${suffix}`,
+      slotIdentifier: `AA:BB:CC:DD:${suffix.slice(0, 2)}:${suffix.slice(2)}`,
       installedOn: '2026-09-01',
       installStatus: 'Working',
     }),
@@ -58,6 +59,35 @@ async function main() {
   )
   const devicePublicId = device.body.data.publicId as string
   console.log('OK device create', devicePublicId)
+
+  // Raise blocked when device has no Slot Identifier
+  const noMacDev = await call('/api/devices', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      roadId,
+      slotNumber: `ZN-${suffix}`,
+      installedOn: '2026-09-01',
+      installStatus: 'Working',
+    }),
+  })
+  assert(noMacDev.status === 201 && noMacDev.body.data?.publicId, 'no-mac device create failed')
+  const noMacRaise = await call('/api/tickets', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      deviceId: noMacDev.body.data.publicId,
+      categoryId,
+      subCategoryId,
+      description: 'Should fail — no Slot Identifier',
+      reporterType: 'Control room',
+    }),
+  })
+  assert(
+    noMacRaise.status === 400 && noMacRaise.body.code === 'SLOT_IDENTIFIER_REQUIRED',
+    `expected SLOT_IDENTIFIER_REQUIRED: ${JSON.stringify(noMacRaise.body).slice(0, 300)}`,
+  )
+  console.log('OK raise rejected without Slot Identifier')
 
   const ticket = await call('/api/tickets', {
     method: 'POST',
@@ -98,6 +128,7 @@ async function main() {
     body: JSON.stringify({
       roadId,
       slotNumber: `ZU-${suffix}`,
+      slotIdentifier: `AA:BB:CC:EE:${suffix.slice(0, 2)}:${suffix.slice(2)}`,
       installedOn: '2026-09-01',
       installStatus: 'Working',
     }),
@@ -374,7 +405,64 @@ async function main() {
 
   const report = await call('/api/reports/work?view=week', { headers: auth })
   assert(report.status === 200 && report.body.success, 'report failed')
+  assert(Array.isArray(report.body.data?.people), 'report people array')
+  assert(typeof report.body.data?.daysInPeriod === 'number', 'daysInPeriod')
+  for (const p of report.body.data.people) {
+    assert(Array.isArray(p.tickets), 'person tickets')
+    for (const row of p.tickets) {
+      assert(Array.isArray(row) && row.length === 6, 'week ticket row length 6')
+    }
+  }
   console.log('OK report week')
+
+  const reportDay = await call('/api/reports/work?view=day&from=2026-08-01&to=2026-09-30', {
+    headers: auth,
+  })
+  assert(reportDay.status === 200 && reportDay.body.success, 'report day failed')
+  const dayPeople = reportDay.body.data.people || []
+  for (const p of dayPeople) {
+    for (const row of p.tickets || []) {
+      assert(typeof row[0] === 'string' && /^TK-/.test(row[0]), 'day row ticket id')
+    }
+  }
+  const roadFiltered = await call(
+    '/api/reports/work?view=day&from=2026-08-01&to=2026-09-30&road=Science%20City',
+    { headers: auth },
+  )
+  assert(roadFiltered.status === 200 && roadFiltered.body.success, 'road filter failed')
+  for (const p of roadFiltered.body.data.people || []) {
+    assert(
+      !p.roads || p.roads === '—' || String(p.roads).includes('Science City'),
+      `road filter person roads unexpected: ${p.roads}`,
+    )
+    for (const row of p.tickets || []) {
+      assert(
+        String(row[2]).includes('Science City'),
+        `road filter ticket road cell: ${row[2]}`,
+      )
+    }
+  }
+  console.log('OK report day + road filter')
+
+  const reportMonth = await call('/api/reports/work?view=month&from=2026-08-01&to=2026-09-30', {
+    headers: auth,
+  })
+  assert(reportMonth.status === 200, 'report month failed')
+  for (const p of reportMonth.body.data.people || []) {
+    for (const row of p.tickets || []) {
+      assert(Array.isArray(row) && row.length === 6, 'month ticket row length 6')
+    }
+  }
+  console.log('OK report month shape')
+
+  const exportRes = await fetch(
+    `${base}/api/reports/work/export?view=day&from=2026-08-01&to=2026-09-30`,
+    { headers: auth },
+  )
+  const exportText = await exportRes.text()
+  assert(exportRes.status === 200, `export status ${exportRes.status}`)
+  assert(exportText.startsWith('Person,Ticket,Event,Cost,Road,When'), 'export CSV header')
+  console.log('OK report export')
 
   // One open ticket per device
   const device2 = await call('/api/devices', {
@@ -383,6 +471,7 @@ async function main() {
     body: JSON.stringify({
       roadId,
       slotNumber: `ZY-${suffix}`,
+      slotIdentifier: `AA:BB:CC:FF:${suffix.slice(0, 2)}:${suffix.slice(2)}`,
       installedOn: '2026-09-01',
       installStatus: 'Working',
     }),
