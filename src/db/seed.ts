@@ -424,12 +424,15 @@ async function seed() {
   }
 
   const deviceIds: Record<string, string> = {}
+  let deviceIdx = 0
   for (const d of DEVICES) {
+    deviceIdx += 1
     const qr = `QR-${d.public_id.replace('-', '')}`
+    const mac = `00:11:22:33:${String(deviceIdx).padStart(2, '0')}:${d.public_id.replace(/\D/g, '').slice(-2).padStart(2, '0')}`
     const r = await query<{ id: string }>(
-      `INSERT INTO devices (public_id, qr_code, road_id, slot_number, side_of_road, model, installed_on, install_status, latitude, longitude)
-       VALUES ($1,$2,$3,$4,'Left','Flap barrier — 4 wheeler',$5,'Working',$6,$7) RETURNING id`,
-      [d.public_id, qr, roadIds[d.road], d.slot, d.installed, d.latitude, d.longitude],
+      `INSERT INTO devices (public_id, qr_code, road_id, slot_number, slot_identifier, side_of_road, model, installed_on, install_status, latitude, longitude)
+       VALUES ($1,$2,$3,$4,$5,'Left','Flap barrier — 4 wheeler',$6,'Working',$7,$8) RETURNING id`,
+      [d.public_id, qr, roadIds[d.road], d.slot, mac, d.installed, d.latitude, d.longitude],
     )
     deviceIds[d.public_id] = r.rows[0].id
   }

@@ -133,6 +133,8 @@ No `/api/devices/:id/scan-details` path — avoids conflict with `GET /:deviceId
 
 ## One open ticket
 
+Before insert on `POST /api/tickets`, require non-empty `devices.slot_identifier`. If missing → `ApiError(400, ..., 'SLOT_IDENTIFIER_REQUIRED', { deviceId })`.
+
 Before insert on `POST /api/tickets`, query non-`Closed` tickets for the device. If any exist → `ApiError(409, ..., 'OPEN_TICKET_EXISTS', { ticketId, openTicketId })`.
 
 DB backstop: partial unique index `idx_tickets_one_open_per_device` on `tickets(device_id) WHERE status <> 'Closed'` (migration `012`). Concurrent insert races map unique-violation to the same `OPEN_TICKET_EXISTS` payload.
@@ -304,6 +306,32 @@ List visibility (`assertTicketAccess`) is not applied on Add Update so QR user B
 ## Frontend
 
 **FRONTEND CHANGE REQUIRED:** require Visited By (Technician/Engineer UUID); toast business errors from `error`; map `details[].field === "visitedBy"` under the field; hide/disable Add Update when unassigned or when caller is not Admin/assignee (API still enforces).
+
+---
+
+# Design — Work report (Phase 31)
+
+## Endpoint
+
+`GET /api/reports/work` and `/work/export` — `authorize('Work report','v')`.
+
+Query: `view` (`day|week|month|range`), `from`, `to`, `person` (`Everyone`), `road` (`All roads`).
+
+## Response people shape
+
+Matches frontend mock: `name`, `role`, `roads`, `days`, `visits`, `worked`, `closed`, `open`, `cost`, `load`, `tickets` (6-string tuples).
+
+| view | tickets row meaning |
+|------|---------------------|
+| day | Ticket, Slot Id, Road/slot, Issue, Work done, Result |
+| week / range | Day, Volume, Roads, Main issues, Outcome, Result |
+| month | Week, Dates, Volume, Main issues, Outcome, Result |
+
+Aggregation helpers: [`src/lib/work-report.ts`](src/lib/work-report.ts). Road filter uses `rd.name`. Actors: Technician + Engineer.
+
+## Frontend
+
+**FRONTEND CHANGE REQUIRED:** replace `REPORT[view]` with API fetch; Export → CSV blob; Person select from `/api/lookups/technicians`.
 
 ---
 
