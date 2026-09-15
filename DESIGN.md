@@ -275,6 +275,38 @@ Event `parts` JSONB: `[{ "id", "name", "amount" }, ...]`. Device history reads `
 
 ---
 
+# Design — Add Update restrictions (Phase 30)
+
+## Gates (order)
+
+1. Auth + `authorize('Update ticket','e')`
+2. Ticket exists (`404 NO_TICKETS_AVAILABLE` if not)
+3. `assertTicketAssigned` → `409 TICKET_NOT_ASSIGNED` / `Ticket not assigned`
+4. `assertCanAddUpdate` → Admin or `assignee_id === me` else `403 NOT_ASSIGNED_USER` / `This ticket is assigned to another user` + `details.assignedTo`
+5. Zod body including required `visitedBy` UUID
+6. `assertValidVisitedBy` — Active user with role Technician or Engineer
+7. Existing parts/cost/transaction (no auto-claim of unassigned tickets)
+
+List visibility (`assertTicketAccess`) is not applied on Add Update so QR user B receives `NOT_ASSIGNED_USER` rather than a generic road Forbidden.
+
+## Request
+
+```json
+{ "updateType": "Site visit — not resolved", "cost": 1000, "parts": ["uuid"], "visitedBy": "user-uuid" }
+```
+
+`visitedBy` is stored in `ticket_events.meta` as `{ "visitedBy": "<uuid>" }` (detail `workHistory[].meta`).
+
+## Roles
+
+- **Engineer** — seeded/migrated (`013_engineer_role.sql`); Technician-like permissions; included in `GET /api/lookups/technicians`.
+
+## Frontend
+
+**FRONTEND CHANGE REQUIRED:** require Visited By (Technician/Engineer UUID); toast business errors from `error`; map `details[].field === "visitedBy"` under the field; hide/disable Add Update when unassigned or when caller is not Admin/assignee (API still enforces).
+
+---
+
 # Design — Device Sync (Phase 23 / 29)
 
 ## Device / road fields
