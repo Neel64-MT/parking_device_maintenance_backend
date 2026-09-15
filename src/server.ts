@@ -11,5 +11,5 @@ if (!fs.existsSync(uploadDir)) {
 const app = createApp()
 
 app.listen(env.PORT, () => {
-  console.log(`API server running on http://localhost:${env.PORT}`)
+  console.log(`API server running on http://209.182.213.242/:${env.PORT}`)
 })
