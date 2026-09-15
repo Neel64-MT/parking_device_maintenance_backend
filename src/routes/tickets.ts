@@ -591,9 +591,7 @@ const updateSchema = z.object({
   parts: z.array(z.string().uuid()).default([]),
   photos: z.array(z.string()).default([]),
   handoverToUserId: z.string().uuid().nullable().optional(),
-  visitedBy: z
-    .string({ required_error: 'Visited By is required', invalid_type_error: 'Visited By is required' })
-    .uuid('Visited By is invalid'),
+  visitedBy: z.string({ error: 'Visited By is required' }).uuid('Visited By is invalid'),
 })
 
 router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: AuthedRequest, res) => {

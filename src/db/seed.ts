@@ -2,7 +2,7 @@ import { closeDb, query } from './pool.js'
 import { hashPassword } from '../lib/auth.js'
 import { DEFAULT_ROLE_PERMS, SCREENS, codeToFlags } from '../lib/permissions.js'
 
-const DEMO_PASSWORD = 'Password123'
+const DEMO_PASSWORD = '#Admin@2026'
 
 function emailFromName(name: string) {
   const slug = name
