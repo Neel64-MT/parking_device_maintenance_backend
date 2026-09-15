@@ -391,6 +391,7 @@ async function seed() {
     { name: 'Ramesh Vaghela', mobile: '9099941128', role: 'Technician', roads: ['Science City'] },
     { name: 'Jignesh Solanki', mobile: '9428033471', role: 'Technician', roads: ['CG Road', 'Sindhu Bhavan Road'] },
     { name: 'Mahesh Thakor', mobile: '9712955620', role: 'Technician', roads: ['Makarba'] },
+    { name: 'Priya Desai', mobile: '9876501122', role: 'Engineer', roads: ['Science City'] },
     { name: 'Nilesh Chauhan', mobile: '9016374408', role: 'Site attendant', roads: ['Science City'] },
     { name: 'Kiran Bhatt', mobile: '9377720914', role: 'Site attendant', roads: ['CG Road'] },
     { name: 'Control Room — Shift A', mobile: '7990011002', role: 'Control room', roads: [] },

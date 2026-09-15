@@ -168,8 +168,13 @@ export function assertRoadAccess(user: AuthUser, roadId: string) {
   }
 }
 
-/** Site attendant / Technician may scan and raise on any road; other roles still use road scope. */
+/** Site attendant / Technician / Engineer may scan and raise on any road; other roles still use road scope. */
 export function assertRoadAccessUnlessFieldWork(user: AuthUser, roadId: string) {
-  if (user.roleName === 'Site attendant' || user.roleName === 'Technician') return
-  assertRoadAccess(user, roadId)
+  if (
+    user.roleName === 'Site attendant' ||
+    user.roleName === 'Technician' ||
+    user.roleName === 'Engineer'
+  ) {
+    return
+  }  assertRoadAccess(user, roadId)
 }

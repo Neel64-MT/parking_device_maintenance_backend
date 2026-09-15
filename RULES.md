@@ -23,16 +23,20 @@
 - Pagination `total` / `totalPages` must reflect only authorized (+ filtered) rows.
 - Parts master `amount` is authoritative for visit pricing; ticket update/close `cost` is labour-only; compute `eventCost = labour + SUM(selected part amounts)` server-side (dedupe IDs; reject unknown/inactive parts).
 - Parts create/patch use Issue master `c`/`e`; do not invent a new permission screen name.
+- Add Update (`POST /api/tickets/:id/updates`) requires `assignee_id`; reject unassigned with `409` / `TICKET_NOT_ASSIGNED` / `Ticket not assigned`. Do not auto-claim on update.
+- Add Update is allowed only for **Admin** or the **current assignee**. Reject others (including PM/raiser/user B after QR scan) with `403` / `NOT_ASSIGNED_USER` / `This ticket is assigned to another user` and `details.assignedTo`. Enforce server-side — do not rely on frontend hiding the button.
+- `visitedBy` is required on Add Update; return structured Zod/`VALIDATION_ERROR` JSON (`details[].field = "visitedBy"`), never HTML. Eligible users: Active Technician or Engineer.
+- API validation and business errors must return the existing JSON envelope via `handleApiError` — never framework HTML pages for handled routes.
 - Ticket `status` is one of `Open`, `Under repair`, `Waiting for spare`, `Closed`. Never persist `New`; unassigned raise uses `Open`.
 - Duplicate raise must return `409` / `OPEN_TICKET_EXISTS` with `details.openTicketId` (and `ticketId`) for UI redirect — never create a second open ticket.
 - QR scan details use `GET /api/devices/scan?q=` (do not invent a second `/scan-details` route that fights `/:deviceId`). Trim `q` before lookup. When the device has no open ticket, respond with message `No tickets available` (still 200 + device payload, `openTicketId: null`) so Update can show that copy; raise remains available.
 - Ticket update (`POST /api/tickets/:id/updates`) when the ticket id does not exist returns `404` / `NO_TICKETS_AVAILABLE` with error `No tickets available`.
 - Device `latitude` / `longitude` are optional TEXT; seed and create/PATCH may set them.
-- Only the current ticket holder may update or close. Assign / reassign is Control room, Admin, or Project manager only — technicians cannot handover.
-- Admin and Project manager retain city-wide ticket visibility; other roles only see tickets they raised or are assigned to (SQL + detail asserts).
+- Close: only the current ticket holder (or privileged close path) may close. Assign / reassign is Control room, Admin, or Project manager only — technicians cannot handover. Add Update holder rule is Admin-or-assignee (stricter than list visibility).
+- Admin and Project manager retain city-wide ticket visibility; other roles only see tickets they raised or are assigned to (SQL + detail asserts). Visibility is not the same as Add Update permission.
 - Apply the same ticket visibility helper to dashboard metrics, device ticket overlays/history, and work report rows — do not duplicate Admin/PM branches per route.
 - Backend authorization is mandatory; frontend filtering is not a security boundary.
-- Assign may use road scope only (Control room routing); ticket list/detail/dashboard/reports stay visibility-scoped. Device **list / export / history** are city-wide for any role with Device list/history view (no `assigned_roads` filter). Create/PATCH still use `assertRoadAccess`. Scan and ticket raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician bypass).
+- Assign may use road scope only (Control room routing); ticket list/detail/dashboard/reports stay visibility-scoped. Device **list / export / history** are city-wide for any role with Device list/history view (no `assigned_roads` filter). Create/PATCH still use `assertRoadAccess`. Scan and ticket raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician / Engineer bypass).
 - Signup approval/update requires `authorize('Users', 'e')` (Admin or Project manager with Users edit).
 - Reuse existing authorization mechanisms; avoid duplicate Admin/PM code paths.
 - Keep the sibling `frontend/` directory **read-only** — document needed UI wiring as FRONTEND CHANGE REQUIRED.

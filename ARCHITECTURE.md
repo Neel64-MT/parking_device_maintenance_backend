@@ -262,6 +262,29 @@ POST /api/tickets/:id/updates|close
 
 **FRONTEND CHANGE REQUIRED:** send part UUIDs; keep `cost` labour-only.
 
+## Add Update restrictions (Phase 30)
+
+```text
+POST /api/tickets/:id/updates
+  → auth + authorize(Update ticket, e)
+  → ticket lookup
+  → assertTicketAssigned (assignee_id required)
+  → assertCanAddUpdate (Admin OR assignee_id === me)
+  → Zod body (visitedBy required)
+  → assertValidVisitedBy (Active Technician|Engineer)
+  → parts/cost transaction (no auto-claim)
+```
+
+Add Update does **not** use list visibility (`assertTicketAccess`). Authorization is `Update ticket` `e` plus Admin-or-assignee so QR user B gets `NOT_ASSIGNED_USER` instead of a generic road/visibility Forbidden.
+
+| Code | When |
+|------|------|
+| `TICKET_NOT_ASSIGNED` | `assignee_id` is null |
+| `NOT_ASSIGNED_USER` | Caller is not Admin and not assignee (includes QR user B) |
+| `VALIDATION_ERROR` | Missing/invalid `visitedBy` (`details[].field`) |
+
+Helper: [`src/lib/visited-by.ts`](src/lib/visited-by.ts). Engineer role: migration `013_engineer_role.sql`.
+
 ## Device Sync (SmartPark)
 
 ```text

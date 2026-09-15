@@ -91,6 +91,84 @@ async function main() {
   assert(assign.status === 200, `assign failed: ${JSON.stringify(assign.body).slice(0, 200)}`)
   console.log('OK assign')
 
+  // Unassigned ticket cannot receive Add Update
+  const unassignedDev = await call('/api/devices', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      roadId,
+      slotNumber: `ZU-${suffix}`,
+      installedOn: '2026-09-01',
+      installStatus: 'Working',
+    }),
+  })
+  assert(unassignedDev.status === 201, 'unassigned device create failed')
+  const unassignedTicket = await call('/api/tickets', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      deviceId: unassignedDev.body.data.publicId,
+      categoryId,
+      subCategoryId,
+      description: 'Unassigned smoke',
+      reporterType: 'Control room',
+    }),
+  })
+  assert(unassignedTicket.status === 201, 'unassigned ticket raise failed')
+  const unassignedId = unassignedTicket.body.data.id as string
+  const unassignedUpdate = await call(`/api/tickets/${unassignedId}/updates`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      updateType: 'Site visit — not resolved',
+      workDone: 'should fail',
+      cost: 0,
+      visitedBy: tech.id,
+    }),
+  })
+  assert(
+    unassignedUpdate.status === 409 && unassignedUpdate.body.code === 'TICKET_NOT_ASSIGNED',
+    `expected TICKET_NOT_ASSIGNED: ${JSON.stringify(unassignedUpdate.body).slice(0, 300)}`,
+  )
+  assert(unassignedUpdate.body.error === 'Ticket not assigned', 'Ticket not assigned message')
+  console.log('OK unassigned ticket update rejected')
+
+  // Missing Visited By → structured JSON validation
+  const missingVisited = await call(`/api/tickets/${ticketId}/updates`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      updateType: 'Remote check',
+      workDone: 'no visitedBy',
+      cost: 0,
+    }),
+  })
+  assert(missingVisited.status === 400 && missingVisited.body.code === 'VALIDATION_ERROR', 'missing visitedBy')
+  assert(
+    Array.isArray(missingVisited.body.details) &&
+      missingVisited.body.details.some((d: { field: string }) => d.field === 'visitedBy'),
+    'visitedBy field error required',
+  )
+  console.log('OK visitedBy missing validation')
+
+  const invalidVisited = await call(`/api/tickets/${ticketId}/updates`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      updateType: 'Remote check',
+      workDone: 'bad visitedBy',
+      cost: 0,
+      visitedBy: '00000000-0000-4000-8000-000000000001',
+    }),
+  })
+  assert(invalidVisited.status === 400 && invalidVisited.body.code === 'VALIDATION_ERROR', 'invalid visitedBy')
+  assert(
+    Array.isArray(invalidVisited.body.details) &&
+      invalidVisited.body.details.some((d: { field: string }) => d.field === 'visitedBy'),
+    'invalid visitedBy field error',
+  )
+  console.log('OK visitedBy invalid validation')
+
   // Parts master create/update (Issue c/e or Technician) + amounts on list/lookups
   const partA = await call('/api/parts', {
     method: 'POST',
@@ -127,7 +205,7 @@ async function main() {
   )
   console.log('OK parts master CRUD')
 
-  // Labour-only update (no parts)
+  // Labour-only update (no parts) — Admin may update assigned ticket
   const labourOnly = await call(`/api/tickets/${ticketId}/updates`, {
     method: 'POST',
     headers: auth,
@@ -136,6 +214,7 @@ async function main() {
       workDone: 'Checked remotely',
       cost: 100,
       parts: [],
+      visitedBy: tech.id,
     }),
   })
   assert(labourOnly.status === 201 || labourOnly.status === 200, `labour-only update failed: ${JSON.stringify(labourOnly.body).slice(0, 300)}`)
@@ -151,6 +230,7 @@ async function main() {
       workDone: 'Adjusted sensor; replaced parts',
       cost: 1000,
       parts: [partAId, partBId, partAId],
+      visitedBy: tech.id,
     }),
   })
   assert(update.status === 201 || update.status === 200, `update failed: ${JSON.stringify(update.body).slice(0, 300)}`)
@@ -173,10 +253,86 @@ async function main() {
       workDone: 'Bad part id',
       cost: 50,
       parts: ['00000000-0000-4000-8000-000000000099'],
+      visitedBy: tech.id,
     }),
   })
   assert(badPart.status === 400 && badPart.body.code === 'INVALID_PARTS', 'expected INVALID_PARTS')
   console.log('OK invalid part rejected')
+
+  // Engineer as Visited By
+  const engineer = users.body.data.users.find(
+    (u: { role: string; status: string; name: string }) =>
+      u.role === 'Engineer' && u.status === 'Active',
+  )
+  if (engineer?.id) {
+    const engVisit = await call(`/api/tickets/${ticketId}/updates`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({
+        updateType: 'Remote check',
+        workDone: 'Engineer visited',
+        cost: 0,
+        visitedBy: engineer.id,
+      }),
+    })
+    assert(
+      engVisit.status === 201 && engVisit.body.data?.visitedBy === engineer.id,
+      `engineer visitedBy failed: ${JSON.stringify(engVisit.body).slice(0, 300)}`,
+    )
+    console.log('OK engineer visitedBy')
+  } else {
+    console.log('SKIP engineer visitedBy (no seeded Engineer — run db:seed after migrate)')
+  }
+
+  // User B (other technician) cannot update ticket assigned to tech A
+  const techB = users.body.data.users.find(
+    (u: { role: string; status: string; id: string; mobile?: string }) =>
+      u.role === 'Technician' && u.status === 'Active' && u.id !== tech.id && u.mobile,
+  )
+  assert(techB?.mobile, 'need second technician with mobile for holder check')
+  const techBLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: techB.mobile, password: 'Password123' }),
+  })
+  assert(techBLogin.status === 200 && techBLogin.body.data?.token, 'second tech login failed')
+  const blockedB = await call(`/api/tickets/${ticketId}/updates`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${techBLogin.body.data.token as string}` },
+    body: JSON.stringify({
+      updateType: 'Site visit — not resolved',
+      workDone: 'user B attempt',
+      cost: 0,
+      visitedBy: tech.id,
+    }),
+  })
+  assert(
+    blockedB.status === 403 && blockedB.body.code === 'NOT_ASSIGNED_USER',
+    `user B must get NOT_ASSIGNED_USER: ${JSON.stringify(blockedB.body).slice(0, 300)}`,
+  )
+  assert(blockedB.body.error === 'This ticket is assigned to another user', 'holder error message')
+  console.log('OK user B cannot update assigned ticket')
+
+  // PM (not assignee) cannot Add Update
+  const pmLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9825012345', password: 'Password123' }),
+  })
+  assert(pmLogin.status === 200, 'PM login failed')
+  const pmBlocked = await call(`/api/tickets/${ticketId}/updates`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${pmLogin.body.data.token as string}` },
+    body: JSON.stringify({
+      updateType: 'Remote check',
+      workDone: 'PM attempt',
+      cost: 0,
+      visitedBy: tech.id,
+    }),
+  })
+  assert(
+    pmBlocked.status === 403 && pmBlocked.body.code === 'NOT_ASSIGNED_USER',
+    `PM must get NOT_ASSIGNED_USER: ${JSON.stringify(pmBlocked.body).slice(0, 300)}`,
+  )
+  console.log('OK PM cannot update when not assignee')
 
   const close = await call(`/api/tickets/${ticketId}/close`, {
     method: 'POST',

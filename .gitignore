@@ -6,3 +6,4 @@ uploads/
 *.db
 *.db-journal
 .DS_Store
+package-lock.json
