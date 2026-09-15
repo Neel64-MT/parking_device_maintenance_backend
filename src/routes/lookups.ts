@@ -30,7 +30,7 @@ router.get('/technicians', authorize('All tickets', 'v'), async (_req, res) => {
        LEFT JOIN user_roads ur ON ur.user_id = u.id
        LEFT JOIN roads rd ON rd.id = ur.road_id
        WHERE u.status = 'Active'
-         AND r.name IN ('Technician', 'Control room', 'Project manager')
+         AND r.name IN ('Technician', 'Engineer', 'Control room', 'Project manager')
        GROUP BY u.id, u.full_name, r.name
        ORDER BY u.full_name`,
     )

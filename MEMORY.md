@@ -19,10 +19,11 @@
 - Phase 27 — Device Sync Slot/MAC validation: skip incomplete records; update MAC on existing Slot Id; no-op when unchanged; keep async `setImmediate`
 - Phase 28 — Manual device edit: PATCH/create accept MAC (`slotIdentifier`) + QR (`qrNumber`); Slot Id never writable
 - Phase 29 — Device Sync Slot Id only required; MAC/QR optional; update existing row when MAC/QR change for Slot Id
+- Phase 30 — Add Update: require assignee; Admin or assignee only (`NOT_ASSIGNED_USER`); required `visitedBy` (Technician|Engineer); Engineer role
 
 ## Currently Working On
 
-- (idle — Phase 29 complete)
+- (idle — Phase 30 complete)
 
 ## Pending
 
@@ -33,6 +34,7 @@
 - Wire Sync Device to `POST /api/device-sync`; poll `GET /api/device-sync/latest` or `/:id` for status (Device list done)
 - Device list road filter: reads `roads` via `GET /api/lookups/roads` (done); Road master / TicketList still on mocks
 - Device status cards: call `GET /api/devices?status=Working|Under%20repair|Not%20working` (exact labels); stay on Device List — do not open Tickets
+- Add Update: send `visitedBy` UUID; toast `Ticket not assigned` / `This ticket is assigned to another user`; field error for Visited By; only Admin/assignee UI affordance (API enforces)
 - When wiring Dashboard / All Tickets / Devices / Work report, trust API ticket scope — no client-side role filters
 - TicketList: change default `limit` from 50/100 to allowed values; use `pagination` for pager UI
 - All Tickets / detail status badge: show `Open`, never `New`
@@ -46,6 +48,9 @@
 
 ## Important Decisions
 
+- Add Update: require `assignee_id`; only Admin or assignee; `NOT_ASSIGNED_USER` for others (QR user B); no auto-claim; no `assertTicketAccess` on this path (clear toast)
+- `visitedBy` required on Add Update; Active Technician or Engineer; stored in `ticket_events.meta`
+- Engineer role: Technician-like permissions; eligible Visited By; field-work road bypass like Technician
 - Visit cost: `eventCost = body.cost (labour) + SUM(parts.amount)`; master amount authoritative; dedupe part IDs per event
 - Parts CRUD reuses Issue master `c`/`e` (no new permission screen); list/lookups need Update ticket `v`
 - Ticket visibility privileged roles: only `Admin` and `Project manager`
@@ -53,8 +58,8 @@
 - Same helper scopes dashboard ticket metrics, device ticket overlays/history, and work report rows
 - Assign / reassign: Control room, Admin, or Project manager only; technicians cannot `/assign` or `handoverToUserId`
 - Assign stays road-only (`assertRoadAccess`) for Control room routing; list/detail/dashboard/reports stay visibility-scoped
-- Device list / export / history are city-wide (no `assigned_roads` filter); open-ticket overlays stay ticket-visibility scoped; create/PATCH keep `assertRoadAccess`; scan + raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician)
-- Site attendant: city-wide scan/raise; Technician: city-wide scan; update/close remain holder/raiser-only (any road)
+- Device list / export / history are city-wide (no `assigned_roads` filter); open-ticket overlays stay ticket-visibility scoped; create/PATCH keep `assertRoadAccess`; scan + raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician / Engineer)
+- Site attendant: city-wide scan/raise; Technician/Engineer: city-wide scan; Add Update = Admin or assignee only
 - Scan details stay on `GET /api/devices/scan?q=` (no `/scan-details` alias); scan `openTicketId` is not ticket-visibility filtered
 - One open ticket per device means `status <> 'Closed'`; unassigned stored status is `Open` (not `New`); DB partial unique index `idx_tickets_one_open_per_device` (migration `012`); Slot Id uniqueness follows via unique `devices.slot_id`
 - List tab `new` = unassigned non-closed; list may show assigned+`Open` as `Under repair` without DB update

@@ -334,3 +334,22 @@
 **Testing:** smoke — 401/403/503/409 + GET latest/id; live sync requires `DEVICE_SYNC_API_TOKEN`. Dual identity: legacy `GET /api/devices/PD-xxxx` when no `slot_id`; `GET /api/devices/{slotId}` + ticket list/detail `deviceId`/`slotId` when `slot_id` is set (smoke may `UPDATE` a seeded device with a test Slot Id).
 
 **Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED — Sync Device → `POST /api/device-sync`; Ticket → Device history links by Slot Id
+
+## Phase 30 — Add Update restrictions & Visited By
+
+**Status:** Complete
+
+**Objective:** Reject Add Update on unassigned tickets; allow only Admin or current assignee; require `visitedBy` with structured JSON validation; add Engineer role for Visited By.
+
+**APIs:**
+- `POST /api/tickets/:id/updates` — gates: assigned → Admin/assignee → `visitedBy` (Technician|Engineer); no auto-claim
+- `PATCH .../updates/:eventId/photos` — same assignment/holder gates
+- `GET /api/lookups/technicians` — includes Engineer
+
+**Errors:** `TICKET_NOT_ASSIGNED`, `NOT_ASSIGNED_USER` (+ `details.assignedTo`), `VALIDATION_ERROR` field `visitedBy`
+
+**Files:** `tickets.ts`, `visited-by.ts`, `013_engineer_role.sql`, `permissions.ts`, seed, lookups, auth field-work bypass, smoke, docs
+
+**Testing:** unassigned reject; user B / PM blocked; Admin + assignee success; missing/invalid visitedBy JSON; engineer visitedBy
+
+**Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED — Visited By + toasts
