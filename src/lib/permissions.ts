@@ -78,7 +78,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     },
   },
   Technician: {
-    note: 'Scan/raise any road; update/close only tickets they hold or raised. Cannot assign or reassign. List stays assignee/raiser-scoped.',
+    note: 'Scan/raise any road; update/close only tickets they hold or raised. Cannot assign or reassign. May run Device Sync. List stays assignee/raiser-scoped.',
     scope: 'assigned_roads',
     p: {
       Dashboard: '......',
@@ -86,7 +86,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
       'Update ticket': 'vce.x.',
       'All tickets': 'v.....',
       'Work report': '......',
-      'Device list': 'v.....',
+      'Device list': 'vc....',
       'Add device': '......',
       'Device history': 'v.....',
       'Scan QR': 'v.....',
@@ -97,7 +97,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     },
   },
   Engineer: {
-    note: 'Field engineer: same ticket hold/update rules as Technician; eligible for Visited By. Cannot assign or reassign.',
+    note: 'Field engineer: same ticket hold/update rules as Technician; eligible for Visited By. Cannot assign or reassign. May run Device Sync.',
     scope: 'assigned_roads',
     p: {
       Dashboard: '......',
@@ -105,7 +105,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
       'Update ticket': 'vce.x.',
       'All tickets': 'v.....',
       'Work report': '......',
-      'Device list': 'v.....',
+      'Device list': 'vc....',
       'Add device': '......',
       'Device history': 'v.....',
       'Scan QR': 'v.....',

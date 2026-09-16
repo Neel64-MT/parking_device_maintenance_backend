@@ -1129,15 +1129,43 @@ async function main() {
   const syncUnauth = await call('/api/device-sync', { method: 'POST', body: '{}' })
   assert(syncUnauth.status === 401, 'device-sync without auth must be 401')
 
+  const prevSyncToken = process.env.DEVICE_SYNC_API_TOKEN
+  process.env.DEVICE_SYNC_API_TOKEN = ''
+
+  // Technician / Engineer may start sync (Device list c); unconfigured → 503 after authz
   const syncTech = await call('/api/device-sync', {
     method: 'POST',
     headers: techAuth,
     body: '{}',
   })
-  assert(syncTech.status === 403, 'tech must not start device-sync')
+  assert(
+    syncTech.status === 503 && syncTech.body.code === 'DEVICE_SYNC_NOT_CONFIGURED',
+    `tech must be allowed to start device-sync (503 when unconfigured): ${syncTech.status}`,
+  )
 
-  const prevSyncToken = process.env.DEVICE_SYNC_API_TOKEN
-  process.env.DEVICE_SYNC_API_TOKEN = ''
+  const engSyncLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9876501122', password: 'Password123' }),
+  })
+  assert(engSyncLogin.status === 200 && engSyncLogin.body.data?.token, 'engineer login for device-sync')
+  const engSyncAuth = { Authorization: `Bearer ${engSyncLogin.body.data.token as string}` }
+  const syncEng = await call('/api/device-sync', {
+    method: 'POST',
+    headers: engSyncAuth,
+    body: '{}',
+  })
+  assert(
+    syncEng.status === 503 && syncEng.body.code === 'DEVICE_SYNC_NOT_CONFIGURED',
+    `engineer must be allowed to start device-sync (503 when unconfigured): ${syncEng.status}`,
+  )
+
+  // Site attendant still cannot sync
+  const syncAttendant = await call('/api/device-sync', {
+    method: 'POST',
+    headers: attendantAuth,
+    body: '{}',
+  })
+  assert(syncAttendant.status === 403, 'site attendant must not start device-sync')
 
   const syncNoToken = await call('/api/device-sync', {
     method: 'POST',
@@ -1179,6 +1207,38 @@ async function main() {
   if (prevSyncToken === undefined) delete process.env.DEVICE_SYNC_API_TOKEN
   else process.env.DEVICE_SYNC_API_TOKEN = prevSyncToken
   console.log('OK device-sync authz + single-flight + status')
+
+  // Phase 33 — QR token → slot-mac proxy (validation / authz; live SmartPark optional)
+  const slotMacUnauth = await call('/api/devices/slot-mac', {
+    method: 'POST',
+    body: JSON.stringify({ qr_token: 'smoke-token' }),
+  })
+  assert(slotMacUnauth.status === 401, 'slot-mac without auth must be 401')
+
+  const slotMacEmpty = await call('/api/devices/slot-mac', {
+    method: 'POST',
+    headers: adminSyncAuth,
+    body: JSON.stringify({}),
+  })
+  assert(
+    slotMacEmpty.status === 400 && slotMacEmpty.body.code === 'VALIDATION_ERROR',
+    `slot-mac empty body must be 400: ${JSON.stringify(slotMacEmpty.body).slice(0, 200)}`,
+  )
+
+  const prevSlotToken = process.env.DEVICE_SYNC_API_TOKEN
+  process.env.DEVICE_SYNC_API_TOKEN = ''
+  const slotMacNoCfg = await call('/api/devices/slot-mac', {
+    method: 'POST',
+    headers: adminSyncAuth,
+    body: JSON.stringify({ qr_token: 'smoke-token' }),
+  })
+  assert(
+    slotMacNoCfg.status === 503 && slotMacNoCfg.body.code === 'DEVICE_SYNC_NOT_CONFIGURED',
+    'slot-mac without DEVICE_SYNC_API_TOKEN must be 503',
+  )
+  if (prevSlotToken === undefined) delete process.env.DEVICE_SYNC_API_TOKEN
+  else process.env.DEVICE_SYNC_API_TOKEN = prevSlotToken
+  console.log('OK slot-mac validation + authz + not-configured')
 
   console.log('\nAll smoke checks passed')
   server.close()
