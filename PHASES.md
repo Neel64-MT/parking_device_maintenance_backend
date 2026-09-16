@@ -389,3 +389,37 @@
 **Testing:** smoke-writes negative raise; attendant raise on `PD-SMOKE-CG` with MAC
 
 **Done when:** smoke passes; FE can toast on `SLOT_IDENTIFIER_REQUIRED`
+
+## Phase 33 — QR token → get-slot-mac → local scan
+
+**Status:** Complete
+
+**Objective:** Accept sticker `qr_token` from FE, proxy SmartPark `POST /api/v1/get-slot-mac`, resolve local device by `mac_id` → `slot_identifier`, return existing scan payload.
+
+**Changes:**
+- `POST /api/devices/slot-mac` (`Scan QR` `v`)
+- Client: `fetchSlotMacByQrToken` + `SMARTPARK_API_BASE_URL` / derived v1 root
+- Match `devices.slot_identifier` to `mac_id`; response = scan shape + `macId`/`bleMac`
+- FE `resolveScan` extracts `qr_token` and calls slot-mac
+
+**Files:** `device-sync-client.ts`, `devices.ts`, `env.ts`, smoke, docs, `frontend/src/services/devices.js`
+
+**Testing:** empty body 400; unauth 401; no token 503; live SmartPark optional
+
+**Done when:** smoke passes; FE Scan/Raise/Update use token path via `resolveScan`
+
+## Phase 34 — Technician / Engineer Device Sync
+
+**Status:** Complete
+
+**Objective:** Allow Technician and Engineer to start Device Sync (`POST /api/device-sync`).
+
+**Changes:**
+- Default matrix: Device list `vc....` for Technician and Engineer
+- Migration `014_tech_engineer_device_sync.sql` sets `can_create` on Device list
+- Add device screen unchanged (still denied)
+- Smoke: tech/engineer pass authz (503 when unconfigured); site attendant still 403
+
+**Files:** `permissions.ts`, migration `014`, smoke, docs
+
+**Done when:** smoke passes; FE Sync button shows for tech/engineer via `/me` permissions

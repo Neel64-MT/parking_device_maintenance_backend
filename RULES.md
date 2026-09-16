@@ -14,7 +14,7 @@
 - Device status cards (Working / Under repair / Not working) must filter the Device List via `GET /api/devices?status=…` with those exact labels — do not redirect to tickets or invent a second list API. Filter at SQL (`derived_status`); keep pagination/auth. Tile counts stay unfiltered by `status` so cards remain meaningful while the list is filtered.
 - One open ticket per device / Slot Id (`status <> 'Closed'`). Backend enforces in app code and via partial unique index `idx_tickets_one_open_per_device` on `tickets(device_id) WHERE status <> 'Closed'`. Concurrent duplicate raises must map to `409` / `OPEN_TICKET_EXISTS`. Closed ticket within 7 days reopens the same ticket (reject new raise).
 - Cannot raise a ticket when `devices.slot_identifier` is null/blank → `400` / `SLOT_IDENTIFIER_REQUIRED`. Sync or set MAC first.
-- QR → device → raise/update: `GET /api/devices/scan?q=` then either `POST /api/tickets` or `POST /api/tickets/:id/updates`. Do not invent parallel by-qr / by-slot ticket APIs.
+- QR → device → raise/update: `GET /api/devices/scan?q=` for legacy codes; sticker `qr_token` → `POST /api/devices/slot-mac` (server proxies SmartPark `get-slot-mac`, matches local `slot_identifier` to `mac_id`, returns scan shape). Do not call SmartPark from the browser. Do not invent parallel by-qr / by-slot ticket APIs.
 - Scan `openTicketId` is authoritative for Raise vs Update (not filtered by ticket list visibility); still require `Scan QR` `v`. Site attendant and Technician skip road checks on scan/raise (`assertRoadAccessUnlessFieldWork`); other roles still need road access. Keep `ticketsLast6Months` visibility-filtered.
 - Ticket list rows expose `daysOpen` and `daysAfterClose` (`null` when not closed). Do not invent a second list endpoint for close-age.
 - Ticket list tab `new` = unassigned non-closed; do not treat tab key `new` as stored status `New`.
@@ -102,7 +102,8 @@
 - Technician / Site attendant / Control room / AMC officer: ticket list/detail/export, dashboard ticket stats, device open-ticket overlays/history ticket rows, and work report ticket rows limited to `assignee_id = me OR raised_by_user_id = me`. Device list/history itself is city-wide (not road-filtered).
 - Admin / Project manager: city-wide ticket visibility (road scope still `all_roads`).
 - Technician: no Work report cost visibility when matrix denies Work report. Cannot assign or reassign (`All tickets` has no `a`); cannot send `handoverToUserId`.
-- Site attendant: scan + raise on **any** road (field-work bypass); list stays raiser-scoped; cannot assign/close.
+- Technician / Engineer: Device list includes create (`vc....`) so they may run Device Sync; Add device stays denied.
+- Site attendant: scan + raise on **any** road (field-work bypass); list stays raiser-scoped; cannot assign/close; cannot Device Sync.
 - Technician: scan any road; update/close only tickets they hold or raised (any road); cannot assign or reassign; list stays assignee/raiser-scoped.
 - Assign / reassign: Control room, Admin, or Project manager only (`assertCanAssignTickets`). Technicians cannot use `/assign` or `handoverToUserId`.
 - Control room: raise/assign; cannot close; list/dashboard visibility is assignee/raiser only; assign uses road access so CR can route tickets they did not raise.

@@ -141,7 +141,11 @@ Road/user/issue-master aggregate catalogs stay city-wide admin metrics (not pers
 
 ```text
 Client scans QR / enters device code
-  → GET /api/devices/scan?q={publicId|qr|slot|slotId}  (authorize Scan QR v)
+  → Legacy PD/QR/slot: GET /api/devices/scan?q=…  (authorize Scan QR v)
+  → Sticker qr_token: POST /api/devices/slot-mac { "qr_token": "..." }
+       → SmartPark POST /api/v1/get-slot-mac { qr_token }
+       → local device WHERE slot_identifier = mac_id
+       → same ScanDevice shape (+ macId, bleMac)
   → Response: deviceId (Slot Id preferred), deviceName, locationSite, slot, slotId,
                slotLabel, slotIdentifier, qrNumber, parkingLocation,
                currentStatus, statusDate, ticketsLast6Months,
@@ -153,7 +157,7 @@ Client scans QR / enters device code
        → if another open ticket: 409 OPEN_TICKET_EXISTS { openTicketId, ticketId }
 ```
 
-Reuse only — no `/devices/by-qr` or `/tickets/by-slot` endpoints. Device `latitude` / `longitude` are TEXT. Scan `openTicketId` is **not** ticket-visibility filtered (Raise vs Update must be reliable); 6-month ticket count remains visibility-scoped. Scan and raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician bypass); device create/PATCH and assign still use `assertRoadAccess`.
+Reuse only — no `/devices/by-qr` or `/tickets/by-slot` endpoints. Device `latitude` / `longitude` are TEXT. Scan `openTicketId` is **not** ticket-visibility filtered (Raise vs Update must be reliable); 6-month ticket count remains visibility-scoped. Scan and raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician bypass); device create/PATCH and assign still use `assertRoadAccess`. FE must not call SmartPark directly (`DEVICE_SYNC_API_TOKEN` stays server-side).
 
 ### Manual device create / edit (fallback when Sync is down)
 
@@ -310,6 +314,7 @@ GET /api/reports/work
 ```text
 Client Sync Device
   → POST /api/device-sync  (authorize Device list c)
+     Default roles with Device list c: Admin, Project manager, Technician, Engineer
   → INSERT device_sync_runs status=started
   → 202 { id, status }
   → setImmediate background job (does not block HTTP)

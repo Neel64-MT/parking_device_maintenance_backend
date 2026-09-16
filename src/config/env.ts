@@ -43,6 +43,11 @@ const envSchema = z
       .default('https://v2smartpark.mtapps.in/api/v1/engineer/device-binding'),
     /** SmartPark Authorization token (Bearer). Required to run device sync. */
     DEVICE_SYNC_API_TOKEN: z.string().optional(),
+    /**
+     * SmartPark API v1 root (get-slot-mac lives here, not under device-binding).
+     * When unset, derived by stripping `/engineer/device-binding` from DEVICE_SYNC_BASE_URL.
+     */
+    SMARTPARK_API_BASE_URL: z.string().optional(),
   })
   .superRefine((data, ctx) => {
     const hasDiscrete =
@@ -74,6 +79,7 @@ const raw = {
   MAIL_FROM: unquote(process.env.MAIL_FROM),
   DEVICE_SYNC_BASE_URL: unquote(process.env.DEVICE_SYNC_BASE_URL),
   DEVICE_SYNC_API_TOKEN: unquote(process.env.DEVICE_SYNC_API_TOKEN),
+  SMARTPARK_API_BASE_URL: unquote(process.env.SMARTPARK_API_BASE_URL),
 }
 
 const parsed = envSchema.parse(raw)

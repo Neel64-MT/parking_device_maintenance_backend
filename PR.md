@@ -38,7 +38,8 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 
 ### QR scan & raise-ticket requirements
 
-- After scanning a QR / device code, clients call `GET /api/devices/scan?q={identifier}` (canonical scan-details API; no separate `/scan-details` path).
+- After scanning a QR / device code, clients call `GET /api/devices/scan?q={identifier}` for legacy PD/QR/slot codes (canonical scan-details API; no separate `/scan-details` path).
+- Sticker QR tokens: `POST /api/devices/slot-mac` with `{ "qr_token": "..." }` — backend calls SmartPark `get-slot-mac`, matches local device by **`mac_id` → `slot_identifier`**, returns the same scan payload (+ `macId`, `bleMac`). FE must not call SmartPark directly.
 - Scan response includes: `deviceId` (Slot Id preferred), `deviceName`, `locationSite`, `slot`, `slotId`, `slotLabel`, `slotIdentifier`, `currentStatus`, `statusDate`, `ticketsLast6Months`, `openTicketId`, `openTicketAge`, `openTicketIssue`, `latitude`, `longitude` (plus legacy fields for older clients).
 - Branch: `openTicketId` set → open that ticket and use `POST /api/tickets/:id/updates`; else `POST /api/tickets` with scan `deviceId` / `deviceUuid` / `publicId` (not QR alone).
 - A device (and thus its Slot Id when set) may have at most one non-`Closed` ticket. Raising another returns `409` / `OPEN_TICKET_EXISTS` with `details.openTicketId` (and `ticketId`). Enforced by app pre-check + DB unique index `012_one_open_ticket_per_device.sql`.
@@ -49,7 +50,7 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 
 ### Device Sync requirements
 
-- Frontend **Sync Device** calls `POST /api/device-sync` (JWT + `authorize('Device list', 'c')`).
+- Frontend **Sync Device** calls `POST /api/device-sync` (JWT + `authorize('Device list', 'c')`). Default roles with sync: Admin, Project manager, **Technician**, **Engineer**.
 - Handler returns **202** immediately with a sync run (`started`); work continues in the background (non-blocking via `setImmediate`).
 - Flow: fetch SmartPark `/locations` → insert new `roads` only → then page QR codes (`status=all`, `per_page=50`) using `data.summary.total` / `data.pagination.last_page` → create/update devices by stable **Slot Id** (`slot_id` = external `slot.id`).
 - **Validation:** every QR record must have a Slot Id (`slot.id`). Missing Slot Id → skip that record; one skip does not stop the run. MAC and QR are optional — when they change for the same Slot Id, the existing device row is updated.
@@ -61,7 +62,7 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 - Acceptance (smoke): list/detail `deviceId` equals `slot_id` when present; `GET /api/devices/{slotId}` returns 200; legacy `GET /api/devices/PD-xxxx` still works when `slot_id` is null; PATCH by Slot Id + create without `slot_id` return mapped ids.
 - Idempotent: re-running sync does not duplicate roads/devices; updates existing devices’ sync fields only.
 - Status: `GET /api/device-sync/:id` and `GET /api/device-sync/latest` (`started` | `completed` | `failed`).
-- Config: `DEVICE_SYNC_BASE_URL`, `DEVICE_SYNC_API_TOKEN` (sent as `Authorization: Bearer …` with `Accept: application/json` and `Cache-Control: no-cache`). Locations path: `/locations`.
+- Config: `DEVICE_SYNC_BASE_URL`, `DEVICE_SYNC_API_TOKEN` (sent as `Authorization: Bearer …` with `Accept: application/json` and `Cache-Control: no-cache`). Locations path: `/locations`. Optional `SMARTPARK_API_BASE_URL` (default `https://v2smartpark.mtapps.in/api/v1`) for `get-slot-mac`.
 - Synced locations upsert into `roads` (single source of truth). Existing `GET /api/roads` / `GET /api/lookups/roads` already return them — no sync-specific road API.
 
 **FRONTEND:** Device list road filter reads `GET /api/lookups/roads` (same `roads` table) and refetches after sync. **Still FRONTEND CHANGE REQUIRED:** Road master / TicketList mocks → `/api/roads` or lookups when authorized.

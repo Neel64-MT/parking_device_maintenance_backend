@@ -16,6 +16,24 @@ function baseUrl() {
   return (process.env.DEVICE_SYNC_BASE_URL || env.DEVICE_SYNC_BASE_URL).replace(/\/+$/, '')
 }
 
+/**
+ * SmartPark `/api/v1` root for endpoints outside device-binding (e.g. get-slot-mac).
+ * Prefer SMARTPARK_API_BASE_URL; else strip `/engineer/device-binding` from sync base.
+ */
+export function smartParkV1Base() {
+  const explicit =
+    (Object.prototype.hasOwnProperty.call(process.env, 'SMARTPARK_API_BASE_URL')
+      ? process.env.SMARTPARK_API_BASE_URL
+      : env.SMARTPARK_API_BASE_URL) || ''
+  const trimmed = String(explicit).trim().replace(/\/+$/, '')
+  if (trimmed) return trimmed
+
+  const sync = baseUrl()
+  const stripped = sync.replace(/\/engineer\/device-binding\/?$/i, '')
+  if (stripped && stripped !== sync) return stripped
+  return 'https://v2smartpark.mtapps.in/api/v1'
+}
+
 /** Read at call time so tests can override process.env. */
 export function getDeviceSyncApiToken() {
   if (Object.prototype.hasOwnProperty.call(process.env, 'DEVICE_SYNC_API_TOKEN')) {
@@ -30,6 +48,91 @@ function authorizationHeader() {
     throw new DeviceSyncClientError('Device sync API token is not configured')
   }
   return /^Bearer\s+/i.test(token) ? token : `Bearer ${token}`
+}
+
+export type SlotMacResult = {
+  macId: string
+  bleMac: string | null
+  slotLabel: string | null
+}
+
+/**
+ * POST /get-slot-mac — resolve sticker QR token to mac_id / BLE MAC / slot label.
+ */
+export async function fetchSlotMacByQrToken(qrToken: string): Promise<SlotMacResult> {
+  const token = qrToken.trim()
+  if (!token) {
+    throw new DeviceSyncClientError('qr_token is required', 400)
+  }
+
+  const url = new URL(`${smartParkV1Base()}/get-slot-mac`)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: authorizationHeader(),
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+      },
+      body: JSON.stringify({ qr_token: token }),
+      signal: controller.signal,
+    })
+    const text = await res.text()
+    let json: unknown
+    try {
+      json = text ? JSON.parse(text) : null
+    } catch {
+      throw new DeviceSyncClientError(
+        `Invalid JSON from external slot-mac API (${res.status})`,
+        res.status,
+      )
+    }
+    if (!res.ok) {
+      throw new DeviceSyncClientError(
+        `External slot-mac API error (${res.status})`,
+        res.status,
+      )
+    }
+
+    const root = json as {
+      success?: boolean
+      data?: {
+        mac_id?: unknown
+        ble_mac?: unknown
+        slot_label?: unknown
+      }
+    }
+    if (root?.success === false) {
+      throw new DeviceSyncClientError('Slot MAC not found for this QR token', 404)
+    }
+    const macId =
+      typeof root?.data?.mac_id === 'string' ? root.data.mac_id.trim() : ''
+    if (!macId) {
+      throw new DeviceSyncClientError('Slot MAC response missing mac_id', 404)
+    }
+    const bleMac =
+      typeof root?.data?.ble_mac === 'string' && root.data.ble_mac.trim()
+        ? root.data.ble_mac.trim()
+        : null
+    const slotLabel =
+      typeof root?.data?.slot_label === 'string' && root.data.slot_label.trim()
+        ? root.data.slot_label.trim()
+        : null
+    return { macId, bleMac, slotLabel }
+  } catch (err) {
+    if (err instanceof DeviceSyncClientError) throw err
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new DeviceSyncClientError('External slot-mac API request timed out')
+    }
+    throw new DeviceSyncClientError(
+      err instanceof Error ? err.message : 'External slot-mac API request failed',
+    )
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 export async function deviceSyncFetch<T = unknown>(
