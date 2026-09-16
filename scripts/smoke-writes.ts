@@ -588,6 +588,31 @@ async function main() {
   assert(uploadRes.status === 201 && uploadBody.success && uploadBody.data?.url, 'upload failed')
   console.log('OK upload')
 
+  // Phase 33 — slot-mac validation (no live SmartPark required)
+  const slotMacEmpty = await call('/api/devices/slot-mac', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({}),
+  })
+  assert(
+    slotMacEmpty.status === 400 && slotMacEmpty.body.code === 'VALIDATION_ERROR',
+    'slot-mac empty body must be 400',
+  )
+  const prevSlotTok = process.env.DEVICE_SYNC_API_TOKEN
+  process.env.DEVICE_SYNC_API_TOKEN = ''
+  const slotMacNoCfg = await call('/api/devices/slot-mac', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ qr_token: 'smoke-token' }),
+  })
+  assert(
+    slotMacNoCfg.status === 503 && slotMacNoCfg.body.code === 'DEVICE_SYNC_NOT_CONFIGURED',
+    'slot-mac without token must be 503',
+  )
+  if (prevSlotTok === undefined) delete process.env.DEVICE_SYNC_API_TOKEN
+  else process.env.DEVICE_SYNC_API_TOKEN = prevSlotTok
+  console.log('OK slot-mac validation')
+
   // Soft-inactivate a non-admin user created earlier is covered in auth smoke;
   // here verify PATCH inactive on a technician is allowed for Admin
   const patchUser = await call(`/api/users/${tech.id}`, {

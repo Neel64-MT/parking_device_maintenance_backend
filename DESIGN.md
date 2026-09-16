@@ -127,6 +127,14 @@ Legacy fields (`id`, `location`, `status`, `statusTone`, `facts`, `deviceUuid`, 
 
 No `/api/devices/:id/scan-details` path — avoids conflict with `GET /:deviceId`.
 
+## QR sticker token → Slot MAC (Phase 33)
+
+`POST /api/devices/slot-mac` (`authorize('Scan QR', 'v')`), body `{ "qr_token": "..." }` (also accepts `qrToken`).
+
+Flow: require `DEVICE_SYNC_API_TOKEN` → SmartPark `POST {SMARTPARK_API_BASE_URL}/get-slot-mac` with `{ qr_token }` → match local device `LOWER(TRIM(slot_identifier)) = LOWER(TRIM(mac_id))` → return the same scan payload as `/scan`, plus `macId` / `bleMac` (and SmartPark `slotLabel` when present).
+
+Errors: `503 DEVICE_SYNC_NOT_CONFIGURED`; `502 SLOT_MAC_UPSTREAM_ERROR`; `404 SLOT_MAC_NOT_FOUND`; `404 NOT_FOUND` if MAC resolves but no local device.
+
 ## Device coordinates
 
 `devices.latitude` / `devices.longitude` are TEXT (migration `001_init`). Seed populates Ahmedabad-area dummy strings. Create/PATCH accept optional string coords.
