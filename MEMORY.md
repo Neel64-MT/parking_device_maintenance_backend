@@ -72,9 +72,11 @@
 - Device Sync unique keys: **Slot Id (`slot_id`)** is primary and immutable after first write; roads by `external_location_id` then `LOWER(name)`; QR/`mac_address` may change on re-sync for the same slot
 - Slot Identifier comes from SmartPark `mac_address` → `devices.slot_identifier` (optional on sync; null does not wipe existing); manual create/PATCH may also set/update MAC + QR; Slot Id never writable manually
 - Raise ticket requires non-empty Slot Identifier → `400` / `SLOT_IDENTIFIER_REQUIRED` if missing
+- Technician / Engineer have Device list `c` (migration `014`) so they can `POST /api/device-sync`; Add device remains separate/denied
 - Ticket/device APIs prefer Slot Id over `public_id` for `deviceId` / list `id` display and links
 - Device `:deviceId` lookup is dual-key (`deviceLookupWhere`: `public_id` | UUID | `slot_id` text); smoke covers Slot Id path (in-process `UPDATE` on a seeded device) plus PD-xxxx when `slot_id` is null; create/PATCH responses map `id` via `deviceDisplayId`
 - Device Sync auth to SmartPark: `Authorization: Bearer` via `DEVICE_SYNC_API_TOKEN`; also `Accept: application/json`, `Cache-Control: no-cache`; locations path `/locations`
+- QR sticker token: `POST /api/devices/slot-mac` → SmartPark `get-slot-mac` → local match on `slot_identifier` = `mac_id` → scan-shaped response; reuse same token; `SMARTPARK_API_BASE_URL` optional
 - Device Sync pagination: `per_page=50`, pages from `data.pagination.last_page` (fallback `ceil(summary.total / per_page)`); background via `setImmediate` + `device_sync_runs`
 - Duplicate raise 409 includes both `ticketId` and `openTicketId`
 - Device lat/lng are TEXT strings; seed includes Ahmedabad-area dummies
