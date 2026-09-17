@@ -335,91 +335,21 @@
 
 **Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED — Sync Device → `POST /api/device-sync`; Ticket → Device history links by Slot Id
 
-## Phase 30 — Add Update restrictions & Visited By
+## Phase 35 — Ticket assignment harden
 
 **Status:** Complete
 
-**Objective:** Reject Add Update on unassigned tickets; allow only Admin or current assignee; require `visitedBy` with structured JSON validation; add Engineer role for Visited By.
-
-**APIs:**
-- `POST /api/tickets/:id/updates` — gates: assigned → Admin/assignee → `visitedBy` (Technician|Engineer); no auto-claim
-- `PATCH .../updates/:eventId/photos` — same assignment/holder gates
-- `GET /api/lookups/technicians` — includes Engineer
-
-**Errors:** `TICKET_NOT_ASSIGNED`, `NOT_ASSIGNED_USER` (+ `details.assignedTo`), `VALIDATION_ERROR` field `visitedBy`
-
-**Files:** `tickets.ts`, `visited-by.ts`, `013_engineer_role.sql`, `permissions.ts`, seed, lookups, auth field-work bypass, smoke, docs
-
-**Testing:** unassigned reject; user B / PM blocked; Admin + assignee success; missing/invalid visitedBy JSON; engineer visitedBy
-
-**Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED — Visited By + toasts
-
-## Phase 31 — Work report API gap-close
-
-**Status:** Complete
-
-**Objective:** Make `GET /api/reports/work` (+ export) fully replace frontend mock Work report data.
+**Objective:** Harden existing assign/reassign for Ticket Detail (no new tables/endpoints).
 
 **Changes:**
-- Road filter uses `rd.name` (not roles alias)
-- Actors: Technician + Engineer
-- Real `days` / `daysInPeriod`; readable `sub` for day view
-- View-shaped `tickets` tuples (day / week|range / month)
-- Export shares same filters + actor scope
+- `POST /api/tickets/:id/assign` — transactional update + `ticket_assignments` + event
+- Eligible assignee validation (`400 INVALID_ASSIGNEE`)
+- Idempotent same assignee (`Already assigned`, no trail growth)
+- Response `{ id, assigneeId, assigneeName, assignmentTrail }`
+- `GET /api/lookups/technicians` includes Engineer
 
-**Files:** `src/routes/reports.ts`, `src/lib/work-report.ts`, smoke, docs
+**Files:** `src/routes/tickets.ts`, `src/routes/lookups.ts`, smoke, docs
 
-**Testing:** day/week/month shapes; road filter; export CSV header; CR visibility scoped
+**Testing:** assign trail growth; reassign; idempotent; invalid assignee; CR assign; tech 403
 
-**Done when:** smoke passes; FRONTEND CHANGE REQUIRED — wire WorkReport.jsx
-
-## Phase 32 — Raise requires Slot Identifier
-
-**Status:** Complete
-
-**Objective:** Block `POST /api/tickets` when the device has no Slot Identifier (`slot_identifier` null/blank).
-
-**Changes:**
-- `400` / `SLOT_IDENTIFIER_REQUIRED` with `details.deviceId`
-- Smoke: reject raise without MAC; happy-path devices include `slotIdentifier`
-- Seed devices get demo MAC values
-
-**Files:** `src/routes/tickets.ts`, smoke, seed, docs
-
-**Testing:** smoke-writes negative raise; attendant raise on `PD-SMOKE-CG` with MAC
-
-**Done when:** smoke passes; FE can toast on `SLOT_IDENTIFIER_REQUIRED`
-
-## Phase 33 — QR token → get-slot-mac → local scan
-
-**Status:** Complete
-
-**Objective:** Accept sticker `qr_token` from FE, proxy SmartPark `POST /api/v1/get-slot-mac`, resolve local device by `mac_id` → `slot_identifier`, return existing scan payload.
-
-**Changes:**
-- `POST /api/devices/slot-mac` (`Scan QR` `v`)
-- Client: `fetchSlotMacByQrToken` + `SMARTPARK_API_BASE_URL` / derived v1 root
-- Match `devices.slot_identifier` to `mac_id`; response = scan shape + `macId`/`bleMac`
-- FE `resolveScan` extracts `qr_token` and calls slot-mac
-
-**Files:** `device-sync-client.ts`, `devices.ts`, `env.ts`, smoke, docs, `frontend/src/services/devices.js`
-
-**Testing:** empty body 400; unauth 401; no token 503; live SmartPark optional
-
-**Done when:** smoke passes; FE Scan/Raise/Update use token path via `resolveScan`
-
-## Phase 34 — Technician / Engineer Device Sync
-
-**Status:** Complete
-
-**Objective:** Allow Technician and Engineer to start Device Sync (`POST /api/device-sync`).
-
-**Changes:**
-- Default matrix: Device list `vc....` for Technician and Engineer
-- Migration `014_tech_engineer_device_sync.sql` sets `can_create` on Device list
-- Add device screen unchanged (still denied)
-- Smoke: tech/engineer pass authz (503 when unconfigured); site attendant still 403
-
-**Files:** `permissions.ts`, migration `014`, smoke, docs
-
-**Done when:** smoke passes; FE Sync button shows for tech/engineer via `/me` permissions
+**Done when:** smoke passes; FRONTEND CHANGE REQUIRED — Detail Save → assign API; Hand to → technicians lookup
