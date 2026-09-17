@@ -82,7 +82,7 @@ All other roles: list/export/aggregate SQL adds
 
 Detail, updates, close-preview, close call `assertTicketAccess` after load (plus existing road/holder rules).
 
-**Assign exception:** `POST /api/tickets/:id/assign` uses `assertCanAssignTickets` (Control room / Admin / Project manager only) plus `assertRoadAccess` (not `assertTicketAccess`) so Control room can assign tickets they did not raise. Technicians cannot assign, reassign, or handover (`handoverToUserId` is rejected unless the caller can assign). List, detail, dashboard, devices, and work report remain visibility-scoped.
+**Assign exception:** `POST /api/tickets/:id/assign` uses `assertCanAssignTickets` (Control room / Admin / Project manager only) plus `assertRoadAccess` (not `assertTicketAccess`) so Control room can assign tickets they did not raise. Technicians cannot assign, reassign, or handover (`handoverToUserId` is rejected unless the caller can assign). Eligible assignees: Active Technician / Engineer / Control room / Project manager. Writes are transactional (`tickets.assignee_id` + `ticket_assignments` + `ticket_events`). Same assignee → no new history. Detail `assignmentTrail` and assign response use `{ when, title, body }` from `ticket_assignments` (newest first). List, detail, dashboard, devices, and work report remain visibility-scoped.
 
 **Field-work road bypass:** Site attendant and Technician skip road checks on `GET /api/devices/scan` and `POST /api/tickets` via `assertRoadAccessUnlessFieldWork`. Role scope stays `assigned_roads`. Technicians still only update/close tickets they hold or raised (`assertTicketAccess` / holder rules). Device create/PATCH and assign remain `assertRoadAccess`.
 

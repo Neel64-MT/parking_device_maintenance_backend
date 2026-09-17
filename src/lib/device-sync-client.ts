@@ -16,6 +16,17 @@ function baseUrl() {
   return (process.env.DEVICE_SYNC_BASE_URL || env.DEVICE_SYNC_BASE_URL).replace(/\/+$/, '')
 }
 
+/** SmartPark `/api/v1` root for endpoints like get-slot-mac. */
+export function smartParkV1Base() {
+  const explicit = (
+    process.env.SMARTPARK_API_BASE_URL ||
+    env.SMARTPARK_API_BASE_URL ||
+    ''
+  ).trim()
+  if (explicit) return explicit.replace(/\/+$/, '')
+  return baseUrl().replace(/\/engineer\/device-binding\/?$/i, '')
+}
+
 /** Read at call time so tests can override process.env. */
 export function getDeviceSyncApiToken() {
   if (Object.prototype.hasOwnProperty.call(process.env, 'DEVICE_SYNC_API_TOKEN')) {
@@ -30,6 +41,76 @@ function authorizationHeader() {
     throw new DeviceSyncClientError('Device sync API token is not configured')
   }
   return /^Bearer\s+/i.test(token) ? token : `Bearer ${token}`
+}
+
+export type SlotMacResult = {
+  macId: string | null
+  bleMac: string | null
+  slotLabel: string | null
+}
+
+/**
+ * POST SmartPark `/api/v1/get-slot-mac` with `{ qr_token }`.
+ * Uses the same Bearer token as Device Sync.
+ * SmartPark may return success with null mac_id (slot known, MAC not bound yet).
+ */
+export async function fetchSlotMacByQrToken(qrToken: string): Promise<SlotMacResult> {
+  const url = `${smartParkV1Base()}/get-slot-mac`
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: authorizationHeader(),
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-cache',
+      },
+      body: JSON.stringify({ qr_token: qrToken }),
+      signal: controller.signal,
+    })
+    const text = await res.text()
+    let json: unknown
+    try {
+      json = text ? JSON.parse(text) : null
+    } catch {
+      throw new DeviceSyncClientError(
+        `Invalid JSON from get-slot-mac (${res.status})`,
+        res.status,
+      )
+    }
+    if (!res.ok) {
+      throw new DeviceSyncClientError(`get-slot-mac error (${res.status})`, res.status)
+    }
+    const root = json as {
+      success?: boolean
+      data?: { mac_id?: unknown; ble_mac?: unknown; slot_label?: unknown }
+    }
+    if (root?.success === false) {
+      throw new DeviceSyncClientError('get-slot-mac returned success=false', 404)
+    }
+    const data = root?.data
+    const macId =
+      typeof data?.mac_id === 'string' && data.mac_id.trim() ? data.mac_id.trim() : null
+    const bleMac =
+      typeof data?.ble_mac === 'string' && data.ble_mac.trim() ? data.ble_mac.trim() : null
+    const slotLabel =
+      typeof data?.slot_label === 'string' && data.slot_label.trim()
+        ? data.slot_label.trim()
+        : null
+    return { macId, bleMac, slotLabel }
+  } catch (err) {
+    if (err instanceof DeviceSyncClientError) throw err
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new DeviceSyncClientError('get-slot-mac request timed out')
+    }
+    throw new DeviceSyncClientError(
+      err instanceof Error ? err.message : 'get-slot-mac request failed',
+    )
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 export async function deviceSyncFetch<T = unknown>(

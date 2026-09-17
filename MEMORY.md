@@ -68,8 +68,11 @@
 - PM Users permission: `vce...` (approve Pending via existing PATCH); Roles matrix remains view-only
 - No separate signup-request table
 - Control room is scoped like other non-privileged roles for viewing (per product requirement)
+- Ticket assign (Phase 35): transactional `POST …/assign`; eligible Active Technician/Engineer/CR/PM; idempotent same assignee; response `{ id, assigneeId, assigneeName, assignmentTrail }`; detail trail from `ticket_assignments`; lookups/technicians includes Engineer
+- FRONTEND CHANGE REQUIRED: TicketDetail Save → `POST /api/tickets/:id/assign`; Hand to → `GET /api/lookups/technicians`
 
 ## Known Issues
 
 - Device Sync Slot Identifier is sourced from external `mac_address` (nullable only when the QR item omits it).
 - Live Device Sync requires `DEVICE_SYNC_API_TOKEN`; without it `POST /api/device-sync` returns `503 DEVICE_SYNC_NOT_CONFIGURED`.
+- Ticket Detail assignment Save is still a design-preview toast until FE wires `POST …/assign`.

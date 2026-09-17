@@ -86,7 +86,7 @@ Canonical `tickets.status` values (exactly four; never `New`):
 - Every other role may only access tickets assigned to them or raised by them.
 - Restrictions are enforced server-side on ticket list, export, detail, update, and close.
 - The same visibility scope applies to dashboard ticket metrics, device open-ticket overlays/history counts, and work report ticket rows/export.
-- Assign (`POST /api/tickets/:id/assign`) is **Control room, Admin, or Project manager only**. Technicians cannot assign, reassign, or handover. Assign is road-scoped so Control room can route tickets they did not raise.
+- Assign (`POST /api/tickets/:id/assign`) is **Control room, Admin, or Project manager only**. Technicians cannot assign, reassign, or handover. Assign is road-scoped so Control room can route tickets they did not raise. Assignee must be an Active Technician / Engineer / Control room / Project manager (`400 INVALID_ASSIGNEE` otherwise). Same assignee is idempotent (`Already assigned`, no trail growth). Response includes `assigneeId`, `assigneeName`, `assignmentTrail`. Detail returns the same trail from `ticket_assignments`. **FRONTEND CHANGE REQUIRED:** Ticket Detail Save → this API; Hand to → `GET /api/lookups/technicians`.
 - Frontend role filtering is presentation only; never the security boundary.
 
 ### Ticket list aging fields

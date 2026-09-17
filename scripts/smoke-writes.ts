@@ -86,10 +86,68 @@ async function main() {
   const assign = await call(`/api/tickets/${ticketId}/assign`, {
     method: 'POST',
     headers: auth,
-    body: JSON.stringify({ assigneeId: tech.id }),
+    body: JSON.stringify({ assigneeId: tech.id, reason: 'Smoke assign note' }),
   })
   assert(assign.status === 200, `assign failed: ${JSON.stringify(assign.body).slice(0, 200)}`)
+  assert(assign.body.data?.assigneeId === tech.id, 'assign response assigneeId')
+  assert(typeof assign.body.data?.assigneeName === 'string' && assign.body.data.assigneeName.length > 0, 'assign assigneeName')
+  assert(Array.isArray(assign.body.data?.assignmentTrail), 'assign assignmentTrail')
+  const trailAfterAssign = assign.body.data.assignmentTrail.length as number
+  assert(trailAfterAssign >= 1, 'assignment trail should grow after assign')
+  assert(
+    assign.body.data.assignmentTrail.some((row: { body?: string }) => row.body === 'Smoke assign note'),
+    'optional reason on trail',
+  )
   console.log('OK assign')
+
+  const detailAfter = await call(`/api/tickets/${ticketId}`, { headers: auth })
+  assert(detailAfter.status === 200 && detailAfter.body.data?.assigneeId === tech.id, 'detail assignee after assign')
+  assert(
+    Array.isArray(detailAfter.body.data?.assignmentTrail) &&
+      detailAfter.body.data.assignmentTrail.length === trailAfterAssign,
+    'detail trail matches assign response',
+  )
+
+  const sameAssign = await call(`/api/tickets/${ticketId}/assign`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ assigneeId: tech.id }),
+  })
+  assert(sameAssign.status === 200 && sameAssign.body.message === 'Already assigned', 'idempotent same assignee')
+  assert(
+    sameAssign.body.data?.assignmentTrail?.length === trailAfterAssign,
+    'same assignee must not grow trail',
+  )
+  console.log('OK assign idempotent')
+
+  const techB = users.body.data.users.find(
+    (u: { role: string; status: string; id: string }) =>
+      u.role === 'Technician' && u.status === 'Active' && u.id !== tech.id,
+  )
+  if (techB?.id) {
+    const reassign = await call(`/api/tickets/${ticketId}/assign`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ assigneeId: techB.id }),
+    })
+    assert(reassign.status === 200 && reassign.body.data?.assigneeId === techB.id, 'reassign failed')
+    assert(
+      reassign.body.data.assignmentTrail.length === trailAfterAssign + 1,
+      'reassign must grow trail',
+    )
+    console.log('OK reassign trail')
+  }
+
+  const badAssignee = await call(`/api/tickets/${ticketId}/assign`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ assigneeId: '00000000-0000-4000-8000-000000000099' }),
+  })
+  assert(
+    badAssignee.status === 400 && badAssignee.body.code === 'INVALID_ASSIGNEE',
+    `expected INVALID_ASSIGNEE: ${JSON.stringify(badAssignee.body).slice(0, 200)}`,
+  )
+  console.log('OK invalid assignee rejected')
 
   // Parts master create/update (Issue c/e or Technician) + amounts on list/lookups
   const partA = await call('/api/parts', {
@@ -342,6 +400,31 @@ async function main() {
   const uploadBody = await uploadRes.json()
   assert(uploadRes.status === 201 && uploadBody.success && uploadBody.data?.url, 'upload failed')
   console.log('OK upload')
+
+  // Phase 33 — slot-mac validation (no live SmartPark required)
+  const slotMacEmpty = await call('/api/devices/slot-mac', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({}),
+  })
+  assert(
+    slotMacEmpty.status === 400 && slotMacEmpty.body.code === 'VALIDATION_ERROR',
+    'slot-mac empty body must be 400',
+  )
+  const prevSlotTok = process.env.DEVICE_SYNC_API_TOKEN
+  process.env.DEVICE_SYNC_API_TOKEN = ''
+  const slotMacNoCfg = await call('/api/devices/slot-mac', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ qr_token: 'smoke-token' }),
+  })
+  assert(
+    slotMacNoCfg.status === 503 && slotMacNoCfg.body.code === 'DEVICE_SYNC_NOT_CONFIGURED',
+    'slot-mac without token must be 503',
+  )
+  if (prevSlotTok === undefined) delete process.env.DEVICE_SYNC_API_TOKEN
+  else process.env.DEVICE_SYNC_API_TOKEN = prevSlotTok
+  console.log('OK slot-mac validation')
 
   // Soft-inactivate a non-admin user created earlier is covered in auth smoke;
   // here verify PATCH inactive on a technician is allowed for Admin

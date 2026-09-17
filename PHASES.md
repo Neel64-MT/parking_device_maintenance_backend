@@ -281,3 +281,22 @@
 **Testing:** smoke — 401/403/503/409 + GET latest/id; live sync requires `DEVICE_SYNC_API_TOKEN`. Dual identity: legacy `GET /api/devices/PD-xxxx` when no `slot_id`; `GET /api/devices/{slotId}` + ticket list/detail `deviceId`/`slotId` when `slot_id` is set (smoke may `UPDATE` a seeded device with a test Slot Id).
 
 **Done when:** smoke passes; docs match; FRONTEND CHANGE REQUIRED — Sync Device → `POST /api/device-sync`; Ticket → Device history links by Slot Id
+
+## Phase 35 — Ticket assignment harden
+
+**Status:** Complete
+
+**Objective:** Harden existing assign/reassign for Ticket Detail (no new tables/endpoints).
+
+**Changes:**
+- `POST /api/tickets/:id/assign` — transactional update + `ticket_assignments` + event
+- Eligible assignee validation (`400 INVALID_ASSIGNEE`)
+- Idempotent same assignee (`Already assigned`, no trail growth)
+- Response `{ id, assigneeId, assigneeName, assignmentTrail }`
+- `GET /api/lookups/technicians` includes Engineer
+
+**Files:** `src/routes/tickets.ts`, `src/routes/lookups.ts`, smoke, docs
+
+**Testing:** assign trail growth; reassign; idempotent; invalid assignee; CR assign; tech 403
+
+**Done when:** smoke passes; FRONTEND CHANGE REQUIRED — Detail Save → assign API; Hand to → technicians lookup

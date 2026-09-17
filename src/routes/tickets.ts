@@ -483,17 +483,18 @@ router.get('/:ticketId', authorize('All tickets', 'v'), async (req: AuthedReques
         title: e.title,
         status: e.status_label,
         body: e.body,
+        eventType: e.event_type,
+        category: e.cat_name || null,
+        subcategory: e.sub_name || null,
+        workDone: e.work_done || null,
+        note: e.not_fixed_reason || null,
         cost: e.cost,
         nextVisit: e.next_visit_at,
         parts: e.parts,
         photos: e.photos,
         meta: e.meta,
       })),
-      assignmentTrail: assignments.rows.map((a) => ({
-        when: a.created_at,
-        title: a.from_name ? `${a.from_name} → ${a.to_name || '—'}` : `Raised / ${a.to_name || 'unassigned'}`,
-        body: a.reason,
-      })),
+      assignmentTrail: assignments.rows.map(mapAssignmentTrailRow),
       devicePreviousTickets: previous.rows,
       assigneeId: t.assignee_id,
     })
@@ -501,6 +502,51 @@ router.get('/:ticketId', authorize('All tickets', 'v'), async (req: AuthedReques
     return handleApiError(res, error)
   }
 })
+
+function mapAssignmentTrailRow(a: {
+  created_at: Date | string
+  from_name?: string | null
+  to_name?: string | null
+  reason?: string | null
+}) {
+  return {
+    when: a.created_at,
+    title: a.from_name
+      ? `${a.from_name} → ${a.to_name || '—'}`
+      : `Raised / ${a.to_name || 'unassigned'}`,
+    body: a.reason,
+  }
+}
+
+async function loadAssignmentTrail(ticketUuid: string) {
+  const assignments = await query(
+    `SELECT a.*, fu.full_name AS from_name, tu.full_name AS to_name
+     FROM ticket_assignments a
+     LEFT JOIN users fu ON fu.id = a.from_user_id
+     LEFT JOIN users tu ON tu.id = a.to_user_id
+     WHERE a.ticket_id = $1
+     ORDER BY a.created_at DESC`,
+    [ticketUuid],
+  )
+  return assignments.rows.map(mapAssignmentTrailRow)
+}
+
+/** Active field/ops users eligible for Hand to / assign (matches lookups/technicians). */
+async function assertEligibleAssignee(assigneeId: string) {
+  const result = await query<{ id: string; full_name: string }>(
+    `SELECT u.id, u.full_name
+     FROM users u
+     JOIN roles r ON r.id = u.role_id
+     WHERE u.id = $1
+       AND u.status = 'Active'
+       AND r.name IN ('Technician', 'Engineer', 'Control room', 'Project manager')`,
+    [assigneeId],
+  )
+  if (!result.rowCount) {
+    throw new ApiError(400, 'Assignee is not an eligible active worker', 'INVALID_ASSIGNEE')
+  }
+  return result.rows[0]
+}
 
 function assertHolder(req: AuthedRequest, assigneeId: string | null) {
   if (!assigneeId) return
@@ -529,8 +575,12 @@ function assertCanAddUpdate(
 router.post('/:ticketId/assign', authorize('All tickets', 'a'), async (req: AuthedRequest, res) => {
   try {
     const body = z
-      .object({ assigneeId: z.string().uuid(), reason: z.string().optional() })
+      .object({
+        assigneeId: z.string().uuid(),
+        reason: z.string().optional(),
+      })
       .parse(req.body)
+
     const ticket = await query(
       `SELECT t.*, d.road_id FROM tickets t JOIN devices d ON d.id = t.device_id
        WHERE t.public_id = $1 OR t.id::text = $1`,
@@ -543,21 +593,57 @@ router.post('/:ticketId/assign', authorize('All tickets', 'a'), async (req: Auth
     /* Assign: road scope only — Control room must assign tickets they did not raise. */
     assertRoadAccess(req.user!, t.road_id)
 
-    await query(`UPDATE tickets SET assignee_id = $2, status = 'Under repair', updated_at = NOW() WHERE id = $1`, [
-      t.id,
-      body.assigneeId,
-    ])
-    await query(
-      `INSERT INTO ticket_assignments (ticket_id, from_user_id, to_user_id, reason)
-       VALUES ($1,$2,$3,$4)`,
-      [t.id, t.assignee_id, body.assigneeId, body.reason || 'Reassigned'],
+    const assignee = await assertEligibleAssignee(body.assigneeId)
+    const isFirstAssign = !t.assignee_id
+    const reason =
+      (body.reason || '').trim() || (isFirstAssign ? 'Assigned' : 'Reassigned')
+
+    if (t.assignee_id === body.assigneeId) {
+      const assignmentTrail = await loadAssignmentTrail(t.id)
+      return ok(
+        res,
+        {
+          id: t.public_id,
+          assigneeId: body.assigneeId,
+          assigneeName: assignee.full_name,
+          assignmentTrail,
+        },
+        'Already assigned',
+      )
+    }
+
+    await withTransaction(async (client) => {
+      await client.query(
+        `UPDATE tickets SET assignee_id = $2, status = 'Under repair', updated_at = NOW() WHERE id = $1`,
+        [t.id, body.assigneeId],
+      )
+      await client.query(
+        `INSERT INTO ticket_assignments (ticket_id, from_user_id, to_user_id, reason)
+         VALUES ($1,$2,$3,$4)`,
+        [t.id, t.assignee_id, body.assigneeId, reason],
+      )
+      await client.query(
+        `INSERT INTO ticket_events (ticket_id, event_type, title, body, status_label, actor_user_id)
+         VALUES ($1,'assigned','Assigned',$2,'Still open',$3)`,
+        [
+          t.id,
+          isFirstAssign ? 'Ticket assigned' : 'Ticket reassigned',
+          req.user!.id,
+        ],
+      )
+    })
+
+    const assignmentTrail = await loadAssignmentTrail(t.id)
+    return ok(
+      res,
+      {
+        id: t.public_id,
+        assigneeId: body.assigneeId,
+        assigneeName: assignee.full_name,
+        assignmentTrail,
+      },
+      'Ticket assigned',
     )
-    await query(
-      `INSERT INTO ticket_events (ticket_id, event_type, title, body, status_label, actor_user_id)
-       VALUES ($1,'assigned','Assigned','Ticket reassigned','Still open',$2)`,
-      [t.id, req.user!.id],
-    )
-    return ok(res, { id: t.public_id }, 'Ticket assigned')
   } catch (error) {
     return handleApiError(res, error)
   }

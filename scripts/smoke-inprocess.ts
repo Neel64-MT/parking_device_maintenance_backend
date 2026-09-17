@@ -30,6 +30,22 @@ function assert(cond: unknown, msg: string) {
   if (!cond) throw new Error(msg)
 }
 
+/** Remove smoke-created users so Users list / lookups stay clean. */
+async function deleteSmokeUsers(ids: string[]) {
+  const list = ids.filter(Boolean)
+  if (!list.length) return
+  await query(`UPDATE tickets SET raised_by_user_id = NULL WHERE raised_by_user_id = ANY($1::uuid[])`, [list])
+  await query(`UPDATE tickets SET assignee_id = NULL WHERE assignee_id = ANY($1::uuid[])`, [list])
+  await query(`UPDATE ticket_events SET actor_user_id = NULL WHERE actor_user_id = ANY($1::uuid[])`, [list])
+  await query(`UPDATE ticket_assignments SET from_user_id = NULL WHERE from_user_id = ANY($1::uuid[])`, [list])
+  await query(`UPDATE ticket_assignments SET to_user_id = NULL WHERE to_user_id = ANY($1::uuid[])`, [list])
+  await query(
+    `UPDATE device_sync_runs SET triggered_by_user_id = NULL WHERE triggered_by_user_id = ANY($1::uuid[])`,
+    [list],
+  )
+  await query(`DELETE FROM users WHERE id = ANY($1::uuid[])`, [list])
+}
+
 async function main() {
   const health = await call('/api/health')
   assert(health.status === 200 && health.body.success, 'health failed')
@@ -55,6 +71,16 @@ async function main() {
   const anyRoad = await query<{ id: string }>(`SELECT id FROM roads ORDER BY name LIMIT 1`)
   const fixtureRoadId = science.rows[0]?.id || anyRoad.rows[0]?.id
   assert(fixtureRoadId, 'need at least one road for smoke fixtures')
+  // Align field roles with DEFAULT_ROLE_PERMS (DB may have drifted Device list create)
+  await query(
+    `UPDATE role_permissions rp
+     SET can_create = FALSE
+     FROM roles r
+     WHERE rp.role_id = r.id
+       AND r.name IN ('Technician', 'Engineer')
+       AND rp.screen = 'Device list'
+       AND rp.can_create = TRUE`,
+  )
   await query(
     `INSERT INTO devices (public_id, qr_code, road_id, slot_number, model, installed_on, install_status, latitude, longitude)
      SELECT 'PD-0428', 'QR-PD0428', $1, 'S2-114', 'Flap barrier — 4 wheeler', '2026-04-02', 'Working', '23.079200', '72.497500'
@@ -657,6 +683,7 @@ async function main() {
     `user create failed: ${createUser.status} ${JSON.stringify(createUser.body).slice(0, 200)}`,
   )
   console.log('OK POST /api/users')
+  const smokeTechId = createUser.body.data.id as string
 
   const newLogin = await call('/api/auth/login', {
     method: 'POST',
@@ -664,6 +691,9 @@ async function main() {
   })
   assert(newLogin.status === 200 && newLogin.body.data?.token, 'new user login failed')
   console.log('OK new user login')
+
+  await deleteSmokeUsers([smokeTechId])
+  console.log('OK smoke tech removed')
 
   const logout = await call('/api/auth/logout', {
     method: 'POST',
@@ -730,6 +760,8 @@ async function main() {
   assert(afterApprove.status === 200 && afterApprove.body.data?.token, 'login after approve failed')
   console.log('OK login after approval')
 
+  await deleteSmokeUsers([pendingUser.id])
+
   // Project manager can approve pending signup
   const signup2Suffix = String(Date.now()).slice(-8)
   const signup2Mobile = `96${signup2Suffix}`.slice(0, 10)
@@ -780,6 +812,8 @@ async function main() {
   })
   assert(techPatchUser.status === 403, 'tech must not edit users')
   console.log('OK tech forbidden from user approve/edit')
+
+  await deleteSmokeUsers([pending2.id])
 
   // Ticket visibility: non-privileged user cannot open unrelated tickets
   const adminTickets = await call('/api/tickets?limit=100', { headers: pmAuthApprove })
@@ -908,7 +942,38 @@ async function main() {
     assignOpen.status === 200,
     `control room assign must succeed: ${assignOpen.status} ${JSON.stringify(assignOpen.body)}`,
   )
+  assert(assignOpen.body.data?.assigneeId === techAssignee.id, 'CR assign response assigneeId')
+  assert(Array.isArray(assignOpen.body.data?.assignmentTrail), 'CR assign returns assignmentTrail')
+  const crTrailLen = assignOpen.body.data.assignmentTrail.length as number
+  // Detail is visibility-scoped (assignee/raiser); CR assign uses road access only — verify trail as Admin
+  const detail1078 = await call('/api/tickets/TK-1078', { headers: adminAuth })
+  assert(
+    detail1078.status === 200 &&
+      detail1078.body.data?.assigneeId === techAssignee.id &&
+      Array.isArray(detail1078.body.data?.assignmentTrail) &&
+      detail1078.body.data.assignmentTrail.length === crTrailLen,
+    'detail trail after CR assign',
+  )
+  const sameCr = await call('/api/tickets/TK-1078/assign', {
+    method: 'POST',
+    headers: crAuth,
+    body: JSON.stringify({ assigneeId: techAssignee.id }),
+  })
+  assert(
+    sameCr.status === 200 &&
+      sameCr.body.message === 'Already assigned' &&
+      sameCr.body.data?.assignmentTrail?.length === crTrailLen,
+    'CR same assignee idempotent',
+  )
   console.log('OK control room assign without ownership')
+
+  const techLookup = await call('/api/lookups/technicians', { headers: crAuth })
+  assert(techLookup.status === 200, 'technicians lookup for roles')
+  const lookupRoles = new Set(
+    (techLookup.body.data || []).map((u: { role: string }) => u.role),
+  )
+  assert(lookupRoles.has('Technician'), 'lookup includes Technician')
+  console.log('OK technicians lookup roles')
 
   // Technician scan any road; update tickets they hold on any road (field-work bypass)
   const makarba = await query<{ id: string }>(`SELECT id FROM roads WHERE name = 'Makarba' LIMIT 1`)
@@ -1101,6 +1166,38 @@ async function main() {
   if (prevSyncToken === undefined) delete process.env.DEVICE_SYNC_API_TOKEN
   else process.env.DEVICE_SYNC_API_TOKEN = prevSyncToken
   console.log('OK device-sync authz + single-flight + status')
+
+  // Phase 33 — QR token → slot-mac proxy (validation / authz; live SmartPark optional)
+  const slotMacUnauth = await call('/api/devices/slot-mac', {
+    method: 'POST',
+    body: JSON.stringify({ qrToken: 'smoke-token' }),
+  })
+  assert(slotMacUnauth.status === 401, 'slot-mac without auth must be 401')
+
+  const slotMacEmpty = await call('/api/devices/slot-mac', {
+    method: 'POST',
+    headers: adminSyncAuth,
+    body: JSON.stringify({}),
+  })
+  assert(
+    slotMacEmpty.status === 400 && slotMacEmpty.body.code === 'VALIDATION_ERROR',
+    `slot-mac empty body must be 400: ${JSON.stringify(slotMacEmpty.body).slice(0, 200)}`,
+  )
+
+  const prevSlotToken = process.env.DEVICE_SYNC_API_TOKEN
+  process.env.DEVICE_SYNC_API_TOKEN = ''
+  const slotMacNoCfg = await call('/api/devices/slot-mac', {
+    method: 'POST',
+    headers: adminSyncAuth,
+    body: JSON.stringify({ qrToken: 'smoke-token' }),
+  })
+  assert(
+    slotMacNoCfg.status === 503 && slotMacNoCfg.body.code === 'DEVICE_SYNC_NOT_CONFIGURED',
+    'slot-mac without DEVICE_SYNC_API_TOKEN must be 503',
+  )
+  if (prevSlotToken === undefined) delete process.env.DEVICE_SYNC_API_TOKEN
+  else process.env.DEVICE_SYNC_API_TOKEN = prevSlotToken
+  console.log('OK slot-mac validation + authz')
 
   console.log('\nAll smoke checks passed')
   server.close()
