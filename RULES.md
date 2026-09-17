@@ -9,7 +9,8 @@
 - Store secrets only in environment variables (`.env` / `.env.local`).
 - Never return passwords, password hashes, JWT secrets, raw reset tokens, or stack traces to clients.
 - Soft-inactivate users; never hard-delete (ticket history must remain readable).
-- Soft-deactivate issue sub-categories that have been used on tickets; hard-delete only when unused.
+- Soft-deactivate issue categories/sub-categories that have been used on tickets; hard-delete only when unused (`Issue master` `d`: Admin, Project manager, Technician, Engineer). Category delete: `DELETE /api/issues/categories/:id` — tickets/events on category or its subs → `409 IN_USE`.
+- Soft-deactivate parts used on ticket visits; hard-delete unused via `DELETE /api/parts/:id` (same Issue master `d`). Used → `409 IN_USE`.
 - Derive device operational status from open tickets after go-live (do not trust client status for runtime).
 - Device status cards (Working / Under repair / Not working) must filter the Device List via `GET /api/devices?status=…` with those exact labels — do not redirect to tickets or invent a second list API. Filter at SQL (`derived_status`); keep pagination/auth. Tile counts stay unfiltered by `status` so cards remain meaningful while the list is filtered.
 - One open ticket per device / Slot Id (`status <> 'Closed'`). Backend enforces in app code and via partial unique index `idx_tickets_one_open_per_device` on `tickets(device_id) WHERE status <> 'Closed'`. Concurrent duplicate raises must map to `409` / `OPEN_TICKET_EXISTS`. Closed ticket within 7 days reopens the same ticket (reject new raise).
@@ -23,7 +24,8 @@
 - Default list `limit` is **10**; allowed limits are only **10, 25, 50, 100**; reuse [`src/lib/pagination.ts`](src/lib/pagination.ts).
 - Pagination `total` / `totalPages` must reflect only authorized (+ filtered) rows.
 - Parts master `amount` is authoritative for visit pricing; ticket update/close `cost` is labour-only; compute `eventCost = labour + SUM(selected part amounts)` server-side (dedupe IDs; reject unknown/inactive parts).
-- Parts create/patch use Issue master `c`/`e`; do not invent a new permission screen name.
+- Parts create/patch use Issue master `c`/`e` (or Technician/Engineer); hard-delete uses Issue master `d`; do not invent a new permission screen name.
+- Image zoom/crop are frontend-only; do not change upload APIs for crop/zoom.
 - Add Update (`POST /api/tickets/:id/updates`) requires `assignee_id`; reject unassigned with `409` / `TICKET_NOT_ASSIGNED` / `Ticket not assigned`. Do not auto-claim on update.
 - Add Update is allowed only for **Admin** or the **current assignee**. Reject others (including PM/raiser/user B after QR scan) with `403` / `NOT_ASSIGNED_USER` / `This ticket is assigned to another user` and `details.assignedTo`. Enforce server-side — do not rely on frontend hiding the button.
 - `visitedBy` is required on Add Update; return structured Zod/`VALIDATION_ERROR` JSON (`details[].field = "visitedBy"`), never HTML. Eligible users: Active Technician or Engineer.
