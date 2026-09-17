@@ -265,7 +265,26 @@ CTE with open-ticket LATERAL + derived status `CASE` (mirrors `deriveDeviceStatu
 | `parts.amount` | `NUMERIC(12,2)` NOT NULL; list/lookups return as number |
 | `ticket_event_parts` | `(event_id, part_id)` PK; stores snapshot `amount` at event time |
 
-CRUD: `POST/PATCH /api/parts` (Issue master `c`/`e`). List: `GET /api/parts` and `GET /api/lookups/parts` (Update ticket `v`).
+CRUD: `POST/PATCH /api/parts` (Issue master `c`/`e`, or Technician/Engineer). Hard-delete unused: `DELETE /api/parts/:id` (Issue master `d` — Admin, PM, Technician, Engineer). Used parts → `409 IN_USE` (deactivate via `PATCH active: false`). List: `GET /api/parts` and `GET /api/lookups/parts` (Update ticket `v`).
+
+Image zoom/crop are frontend-only; `POST /api/uploads` is unchanged.
+
+---
+
+# Design — Issue Category & Subcategory (Phase 37)
+
+## Master
+
+| Endpoint | Notes |
+|----------|-------|
+| `GET /api/issues` | Nested categories + subs (`Issue master` `v`) |
+| `POST /api/issues/categories` | `{ name }` trimmed `min(2)`/`max(120)` — `c` |
+| `PATCH /api/issues/categories/:id` | `{ name?, active? }` — `e`; soft-deactivate via `active: false` |
+| `DELETE /api/issues/categories/:id` | Hard-delete unused — `d`; tickets/events on category or its subs → `409 IN_USE`; unused subs CASCADE |
+| `POST /api/issues/subcategories` | `{ categoryId, name, severity }`; parent must exist and be active (`404` / `400 CATEGORY_INACTIVE`) — `c` |
+| `DELETE /api/issues/subcategories/:id` | Hard-delete unused — `d`; used on tickets → `409 IN_USE` |
+
+Raise picker stays `GET /api/lookups/issue-categories` (active only).
 
 ## Visit cost
 

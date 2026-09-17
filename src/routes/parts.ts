@@ -99,4 +99,26 @@ router.patch('/:id', authorizePartUpdate, async (req, res) => {
   }
 })
 
+/** Hard-delete unused parts. Issue master `d`. Referenced in ticket_event_parts → 409 IN_USE. */
+router.delete('/:id', authorize('Issue master', 'd'), async (req, res) => {
+  try {
+    const usage = await query(
+      `SELECT COUNT(*)::int AS n FROM ticket_event_parts WHERE part_id = $1`,
+      [req.params.id],
+    )
+    if (usage.rows[0].n > 0) {
+      throw new ApiError(
+        409,
+        'Part has been used on ticket visits — deactivate instead',
+        'IN_USE',
+      )
+    }
+    const result = await query(`DELETE FROM parts WHERE id = $1 RETURNING id`, [req.params.id])
+    if (!result.rowCount) throw new ApiError(404, 'Part not found', 'NOT_FOUND')
+    return ok(res, null, 'Part deleted')
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
 export default router
