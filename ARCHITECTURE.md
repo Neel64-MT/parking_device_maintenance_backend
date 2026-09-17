@@ -76,7 +76,7 @@ No Nest, Prisma, or Next.js file-based routing. Express routers live in `src/rou
 ## Key Domains
 
 - **Auth / Users / Roles** — Email or mobile + password login, forgot/reset password, permission matrix, road assignments
-- **Masters** — Roads, issue categories/subs, parts (with `amount`; CRUD via `/api/parts` + Issue master flags)
+- **Masters** — Roads, issue categories/subs (hard-delete unused category/sub via `/api/issues`; used → `409 IN_USE`), parts (with `amount`; CRUD + hard-delete unused via `/api/parts` and Issue master flags including `d` for Tech/Engineer/PM/Admin)
 - **Devices** — Inventory, QR scan, derived operational status from open tickets
 - **Tickets** — Lifecycle (`Open` → assign/`Under repair` → `Waiting for spare` optional → `Closed`), events, visit cost = labour + parts master, photos
 - **Reports** — Dashboard aggregates, work report by period

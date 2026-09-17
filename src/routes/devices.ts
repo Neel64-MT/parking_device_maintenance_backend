@@ -535,7 +535,6 @@ router.post('/slot-mac', authorize('Scan QR', 'v'), async (req: AuthedRequest, r
   }
 })
 
-/** Manual create/edit — Slot Id is never accepted (sync-owned only). */
 const createSchema = z.object({
   roadId: z.string().uuid(),
   slotNumber: z.string().min(1),
@@ -549,49 +548,24 @@ const createSchema = z.object({
   installStatus: z.enum(['Working', 'Under installation', 'Not working']).default('Working'),
   photoUrl: z.string().optional(),
   remarks: z.string().optional(),
-  /** MAC → slot_identifier (editable when Device Sync is unavailable). */
-  slotIdentifier: z.string().optional(),
-  /** Printed QR on the machine body. */
-  qrNumber: z.string().min(1).optional(),
 })
-
-async function releaseQrFromOthers(qr: string, keepDeviceId: string) {
-  await query(
-    `UPDATE devices
-     SET qr_code = 'UNLINKED-' || public_id,
-         updated_at = NOW()
-     WHERE qr_code = $1 AND id <> $2`,
-    [qr, keepDeviceId],
-  )
-}
-
-function normalizeMac(value: string | undefined): string | null | undefined {
-  if (value === undefined) return undefined
-  const trimmed = value.trim()
-  return trimmed ? trimmed : null
-}
 
 router.post('/', authorize('Add device', 'c'), async (req: AuthedRequest, res) => {
   try {
     const body = createSchema.parse(req.body)
     assertRoadAccess(req.user!, body.roadId)
     const publicId = await nextPublicId('PD', 4)
-    const qr = body.qrNumber?.trim() || qrFromDeviceId(publicId)
-    const mac = normalizeMac(body.slotIdentifier)
-    if (body.qrNumber?.trim()) {
-      await releaseQrFromOthers(qr, '00000000-0000-0000-0000-000000000000')
-    }
+    const qr = qrFromDeviceId(publicId)
     const result = await query(
       `INSERT INTO devices (
-        public_id, qr_code, road_id, slot_number, slot_identifier, side_of_road, landmark,
+        public_id, qr_code, road_id, slot_number, side_of_road, landmark,
         latitude, longitude, model, installed_on, commissioned_on, install_status, photo_url, remarks
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
       [
         publicId,
         qr,
         body.roadId,
         body.slotNumber,
-        mac ?? null,
         body.sideOfRoad || null,
         body.landmark || null,
         body.latitude || null,
@@ -812,12 +786,7 @@ router.patch('/:deviceId', authorize('Device list', 'e'), async (req: AuthedRequ
     )
     if (!existing.rowCount) throw new ApiError(404, 'Device not found', 'NOT_FOUND')
     assertRoadAccess(req.user!, existing.rows[0].road_id)
-    if (body.roadId) assertRoadAccess(req.user!, body.roadId)
     const id = existing.rows[0].id
-    const mac = normalizeMac(body.slotIdentifier)
-    const qr = body.qrNumber?.trim()
-    if (qr) await releaseQrFromOthers(qr, id)
-    // slot_id is never updated — Slot Id is not editable via this API
     const result = await query(
       `UPDATE devices SET
          road_id = COALESCE($2, road_id),
@@ -832,8 +801,6 @@ router.patch('/:deviceId', authorize('Device list', 'e'), async (req: AuthedRequ
          install_status = COALESCE($11, install_status),
          photo_url = COALESCE($12, photo_url),
          remarks = COALESCE($13, remarks),
-         slot_identifier = CASE WHEN $14::boolean THEN $15 ELSE slot_identifier END,
-         qr_code = COALESCE($16, qr_code),
          updated_at = NOW()
        WHERE id = $1 RETURNING *`,
       [
@@ -850,9 +817,6 @@ router.patch('/:deviceId', authorize('Device list', 'e'), async (req: AuthedRequ
         body.installStatus ?? null,
         body.photoUrl ?? null,
         body.remarks ?? null,
-        mac !== undefined,
-        mac ?? null,
-        qr || null,
       ],
     )
     return ok(res, deviceWritePayload(result.rows[0]), 'Device updated')

@@ -15,7 +15,6 @@ import { nextPublicId } from '../lib/ids.js'
 import { deviceDisplayId, deviceLookupWhere } from '../lib/device-ref.js'
 import { limitSchema, pageSchema, paginationMeta, sqlOffset } from '../lib/pagination.js'
 import { insertEventParts, resolvePartsCost, visitEventCost } from '../lib/parts-cost.js'
-import { assertValidVisitedBy } from '../lib/visited-by.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -296,16 +295,6 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
     if (!device.rowCount) throw new ApiError(404, 'Device not found', 'NOT_FOUND')
     assertRoadAccessUnlessFieldWork(req.user!, device.rows[0].road_id)
 
-    const slotIdentifier = String(device.rows[0].slot_identifier || '').trim()
-    if (!slotIdentifier) {
-      throw new ApiError(
-        400,
-        'Cannot raise a ticket: this device has no Slot Identifier',
-        'SLOT_IDENTIFIER_REQUIRED',
-        { deviceId: deviceDisplayId(device.rows[0]) },
-      )
-    }
-
     const open = await query(
       `SELECT public_id, id, status FROM tickets
        WHERE device_id = $1 AND status <> 'Closed'
@@ -567,29 +556,20 @@ function assertHolder(req: AuthedRequest, assigneeId: string | null) {
   }
 }
 
-/** Reject Add Update when the ticket has no assignee. */
-function assertTicketAssigned(ticket: { assignee_id: string | null }) {
-  if (!ticket.assignee_id) {
-    throw new ApiError(409, 'Ticket not assigned', 'TICKET_NOT_ASSIGNED')
-  }
-}
-
 /**
- * Add Update: Admin or current assignee only.
- * Project manager, raiser, and other users (e.g. QR scan by user B) are rejected.
+ * Site updates: authorize('Update ticket','e') already ran.
+ * Allow Admin/PM, the current holder, or an unassigned ticket (claimer).
+ * Also allow any user who already has ticket access and Update-ticket edit —
+ * raisers with edit rights were blocked by assertHolder after assign.
  */
 function assertCanAddUpdate(
   req: AuthedRequest,
-  ticket: { assignee_id: string | null; assignee_name?: string | null },
+  ticket: { assignee_id: string | null; raised_by_user_id: string | null },
 ) {
-  if (req.user!.roleName === 'Admin') return
-  if (ticket.assignee_id === req.user!.id) return
-  throw new ApiError(
-    403,
-    'This ticket is assigned to another user',
-    'NOT_ASSIGNED_USER',
-    { assignedTo: ticket.assignee_name ?? null },
-  )
+  if (isTicketPrivilegedRole(req.user!)) return
+  if (!ticket.assignee_id || ticket.assignee_id === req.user!.id) return
+  if (ticket.raised_by_user_id === req.user!.id) return
+  throw new ApiError(403, 'Only the ticket holder can perform this action', 'NOT_HOLDER')
 }
 
 router.post('/:ticketId/assign', authorize('All tickets', 'a'), async (req: AuthedRequest, res) => {
@@ -687,17 +667,14 @@ const updateSchema = z.object({
   parts: z.array(z.string().uuid()).default([]),
   photos: z.array(z.string()).default([]),
   handoverToUserId: z.string().uuid().nullable().optional(),
-  visitedBy: z.string({ error: 'Visited By is required' }).uuid('Visited By is invalid'),
 })
 
 router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: AuthedRequest, res) => {
   try {
+    const body = updateSchema.parse(req.body)
     const ticketId = String(req.params.ticketId || '').trim()
     const ticket = await query(
-      `SELECT t.*, d.road_id, au.full_name AS assignee_name
-       FROM tickets t
-       JOIN devices d ON d.id = t.device_id
-       LEFT JOIN users au ON au.id = t.assignee_id
+      `SELECT t.*, d.road_id FROM tickets t JOIN devices d ON d.id = t.device_id
        WHERE t.public_id = $1 OR t.id::text = $1`,
       [ticketId],
     )
@@ -706,12 +683,8 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
     }
     const t = ticket.rows[0]
     if (t.status === 'Closed') throw new ApiError(409, 'Ticket is closed', 'CLOSED')
-    // Add Update auth is Admin-or-assignee (not list visibility); clear toast for user B / QR.
-    assertTicketAssigned(t)
+    assertTicketAccess(req.user!, t)
     assertCanAddUpdate(req, t)
-
-    const body = updateSchema.parse(req.body)
-    await assertValidVisitedBy(body.visitedBy)
 
     const { partsCost, snapshots } = await resolvePartsCost(body.parts)
     const eventCost = visitEventCost(body.cost, partsCost)
@@ -719,6 +692,7 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
     let newStatus = t.status
     if (body.updateType === 'Waiting for spare') newStatus = 'Waiting for spare'
     else if (body.updateType.includes('resolved')) newStatus = 'Under repair'
+    else if (!t.assignee_id) newStatus = 'Under repair'
     else newStatus = 'Under repair'
 
     const eventId = await withTransaction(async (client) => {
@@ -741,8 +715,8 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
       const inserted = await client.query(
         `INSERT INTO ticket_events (
            ticket_id, event_type, title, body, status_label, actor_user_id,
-           category_id, subcategory_id, cost, next_visit_at, not_fixed_reason, work_done, photos, parts, meta
-         ) VALUES ($1,$2,$3,$4,'Still open',$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+           category_id, subcategory_id, cost, next_visit_at, not_fixed_reason, work_done, photos, parts
+         ) VALUES ($1,$2,$3,$4,'Still open',$5,$6,$7,$8,$9,$10,$11,$12,$13)
          RETURNING id`,
         [
           t.id,
@@ -762,7 +736,6 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
           body.workDone || null,
           JSON.stringify(body.photos),
           JSON.stringify(snapshots),
-          JSON.stringify({ visitedBy: body.visitedBy }),
         ],
       )
       const id = inserted.rows[0].id as string
@@ -784,6 +757,8 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
            VALUES ($1,$2,$3,'Handover on update')`,
           [t.id, req.user!.id, body.handoverToUserId],
         )
+      } else if (!t.assignee_id) {
+        await client.query(`UPDATE tickets SET assignee_id = $2 WHERE id = $1`, [t.id, req.user!.id])
       }
 
       return id
@@ -799,7 +774,6 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
         partsCost,
         labourCost: body.cost,
         parts: snapshots,
-        visitedBy: body.visitedBy,
         resolvedReady: body.updateType.includes('resolved'),
       },
       'Update saved',
@@ -822,10 +796,7 @@ router.patch(
       const body = attachUpdatePhotosSchema.parse(req.body)
       const ticketId = String(req.params.ticketId || '').trim()
       const ticket = await query(
-        `SELECT t.*, d.road_id, au.full_name AS assignee_name
-         FROM tickets t
-         JOIN devices d ON d.id = t.device_id
-         LEFT JOIN users au ON au.id = t.assignee_id
+        `SELECT t.*, d.road_id FROM tickets t JOIN devices d ON d.id = t.device_id
          WHERE t.public_id = $1 OR t.id::text = $1`,
         [ticketId],
       )
@@ -834,7 +805,7 @@ router.patch(
       }
       const t = ticket.rows[0]
       if (t.status === 'Closed') throw new ApiError(409, 'Ticket is closed', 'CLOSED')
-      assertTicketAssigned(t)
+      assertTicketAccess(req.user!, t)
       assertCanAddUpdate(req, t)
 
       const event = await query(

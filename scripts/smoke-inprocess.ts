@@ -161,20 +161,6 @@ async function main() {
     console.log('OK', path)
   }
 
-  // Work report day shape for PM (city-wide)
-  const wrDay = await call('/api/reports/work?view=day&from=2026-08-01&to=2026-09-30', {
-    headers: auth,
-  })
-  assert(wrDay.status === 200 && wrDay.body.success, 'work report day shape')
-  assert(Array.isArray(wrDay.body.data?.people), 'work report people')
-  assert(typeof wrDay.body.data.daysInPeriod === 'number' && wrDay.body.data.daysInPeriod >= 1, 'daysInPeriod')
-  for (const p of wrDay.body.data.people) {
-    for (const key of ['name', 'role', 'roads', 'days', 'visits', 'worked', 'closed', 'open', 'load', 'tickets']) {
-      assert(key in p, `work report person missing ${key}`)
-    }
-  }
-  console.log('OK work report day shape')
-
   const scan = await call('/api/devices/scan?q=PD-0428', { headers: auth })
   assert(scan.status === 200 && scan.body.success, 'scan recheck failed')
   const scanData = scan.body.data as Record<string, unknown>
@@ -360,32 +346,6 @@ async function main() {
   )
   assert(createDevice.body.data?.slotId == null, 'manual create must not invent slotId')
   console.log('OK add/edit device Slot Id response shape')
-
-  const macQrPublicId = createDevice.body.data.publicId as string
-  const patchMacQr = await call(`/api/devices/${macQrPublicId}`, {
-    method: 'PATCH',
-    headers: auth,
-    body: JSON.stringify({
-      slotIdentifier: 'mtap-SMOKE-MAC-001',
-      qrNumber: `QR-SMOKE-${Date.now()}`,
-      slotId: 999999, // must be ignored — Slot Id not editable
-    }),
-  })
-  assert(patchMacQr.status === 200 && patchMacQr.body.success, 'PATCH MAC/QR failed')
-  assert(patchMacQr.body.data?.slotIdentifier === 'mtap-SMOKE-MAC-001', 'PATCH must update MAC')
-  assert(
-    typeof patchMacQr.body.data?.qrNumber === 'string' &&
-      patchMacQr.body.data.qrNumber.startsWith('QR-SMOKE-'),
-    'PATCH must update qrNumber',
-  )
-  assert(patchMacQr.body.data?.slotId == null, 'PATCH must not set slotId from body')
-  const afterMac = await query(
-    `SELECT slot_id, slot_identifier, qr_code FROM devices WHERE public_id = $1`,
-    [macQrPublicId],
-  )
-  assert(afterMac.rows[0]?.slot_id == null, 'DB slot_id must stay null after PATCH with slotId in body')
-  assert(afterMac.rows[0]?.slot_identifier === 'mtap-SMOKE-MAC-001', 'DB MAC mismatch')
-  console.log('OK device PATCH MAC/QR; Slot Id not editable')
 
   // Pagination: defaults, allowed limits, invalid, page nav (PM = city-wide)
   const tickDefault = await call('/api/tickets', { headers: auth })
@@ -920,14 +880,10 @@ async function main() {
   const cgRoad = await query<{ id: string }>(`SELECT id FROM roads WHERE name = 'CG Road' LIMIT 1`)
   assert(cgRoad.rows[0]?.id, 'need CG Road for attendant off-road raise')
   await query(
-    `INSERT INTO devices (public_id, qr_code, road_id, slot_number, slot_identifier, model, installed_on, install_status)
-     SELECT 'PD-SMOKE-CG', 'QR-PDSMOKECG', $1, 'CG-SMOKE', 'AA:BB:CC:SMOKE:CG', 'Flap barrier — 4 wheeler', '2026-04-01', 'Working'
+    `INSERT INTO devices (public_id, qr_code, road_id, slot_number, model, installed_on, install_status)
+     SELECT 'PD-SMOKE-CG', 'QR-PDSMOKECG', $1, 'CG-SMOKE', 'Flap barrier — 4 wheeler', '2026-04-01', 'Working'
      WHERE NOT EXISTS (SELECT 1 FROM devices WHERE public_id = 'PD-SMOKE-CG')`,
     [cgRoad.rows[0].id],
-  )
-  await query(
-    `UPDATE devices SET slot_identifier = COALESCE(NULLIF(TRIM(slot_identifier), ''), 'AA:BB:CC:SMOKE:CG')
-     WHERE public_id = 'PD-SMOKE-CG'`,
   )
   await query(
     `UPDATE tickets SET status = 'Closed', closed_at = NOW() - INTERVAL '8 days', updated_at = NOW()
@@ -1041,7 +997,6 @@ async function main() {
     body: JSON.stringify({
       updateType: 'Site visit — not resolved',
       workDone: 'Smoke tech update on held ticket off home road',
-      visitedBy: techAssignee.id,
     }),
   })
   assert(
@@ -1056,7 +1011,6 @@ async function main() {
     body: JSON.stringify({
       updateType: 'Site visit — not resolved',
       workDone: 'must fail',
-      visitedBy: techAssignee.id,
     }),
   })
   assert(
@@ -1082,38 +1036,10 @@ async function main() {
       updateType: 'Site visit — not resolved',
       workDone: 'Handover attempt',
       handoverToUserId: otherTech.id,
-      visitedBy: techAssignee.id,
     }),
   })
   assert(techHandover.status === 403, 'technician must not handover/reassign on update')
   console.log('OK tech cannot handover')
-
-  // User B (Jignesh) cannot update ticket assigned to Ramesh (TK-1042)
-  const techBLogin = await call('/api/auth/login', {
-    method: 'POST',
-    body: JSON.stringify({ identifier: '9428033471', password: 'Password123' }),
-  })
-  assert(techBLogin.status === 200 && techBLogin.body.data?.token, 'tech B login failed')
-  const techBAuth = { Authorization: `Bearer ${techBLogin.body.data.token as string}` }
-  const techBUpdate = await call('/api/tickets/TK-1042/updates', {
-    method: 'POST',
-    headers: techBAuth,
-    body: JSON.stringify({
-      updateType: 'Site visit — not resolved',
-      workDone: 'B should not update A ticket',
-      visitedBy: techAssignee.id,
-    }),
-  })
-  assert(
-    techBUpdate.status === 403 && techBUpdate.body.code === 'NOT_ASSIGNED_USER',
-    `tech B must get NOT_ASSIGNED_USER: ${JSON.stringify(techBUpdate.body)}`,
-  )
-  assert(
-    techBUpdate.body.error === 'This ticket is assigned to another user',
-    'tech B error message',
-  )
-  assert(techBUpdate.body.details?.assignedTo, 'details.assignedTo for toast')
-  console.log('OK tech B cannot update ticket assigned to A')
 
   // Control room has Dashboard v but is not Admin/PM — openTickets must respect visibility
   const crDash = await call('/api/dashboard', { headers: crAuth })
@@ -1167,13 +1093,9 @@ async function main() {
   )
   console.log('OK tech device history city-wide + ticket visibility scoped')
 
-  // Work report (Control room): ticket rows must respect visibility (day view has TK- ids)
-  const crWork = await call(
-    '/api/reports/work?view=day&from=2026-01-01&to=2026-12-31',
-    { headers: crAuth },
-  )
+  // Work report (Control room): ticket rows must respect visibility
+  const crWork = await call('/api/reports/work?view=month', { headers: crAuth })
   assert(crWork.status === 200 && crWork.body.success, 'control room work report failed')
-  assert(typeof crWork.body.data?.daysInPeriod === 'number', 'CR work daysInPeriod')
   const workTicketIds = (crWork.body.data.people || []).flatMap(
     (p: { tickets?: string[][] }) => (p.tickets || []).map((row) => row[0]),
   )
@@ -1194,43 +1116,15 @@ async function main() {
   const syncUnauth = await call('/api/device-sync', { method: 'POST', body: '{}' })
   assert(syncUnauth.status === 401, 'device-sync without auth must be 401')
 
-  const prevSyncToken = process.env.DEVICE_SYNC_API_TOKEN
-  process.env.DEVICE_SYNC_API_TOKEN = ''
-
-  // Technician / Engineer may start sync (Device list c); unconfigured → 503 after authz
   const syncTech = await call('/api/device-sync', {
     method: 'POST',
     headers: techAuth,
     body: '{}',
   })
-  assert(
-    syncTech.status === 503 && syncTech.body.code === 'DEVICE_SYNC_NOT_CONFIGURED',
-    `tech must be allowed to start device-sync (503 when unconfigured): ${syncTech.status}`,
-  )
+  assert(syncTech.status === 403, 'tech must not start device-sync')
 
-  const engSyncLogin = await call('/api/auth/login', {
-    method: 'POST',
-    body: JSON.stringify({ identifier: '9876501122', password: 'Password123' }),
-  })
-  assert(engSyncLogin.status === 200 && engSyncLogin.body.data?.token, 'engineer login for device-sync')
-  const engSyncAuth = { Authorization: `Bearer ${engSyncLogin.body.data.token as string}` }
-  const syncEng = await call('/api/device-sync', {
-    method: 'POST',
-    headers: engSyncAuth,
-    body: '{}',
-  })
-  assert(
-    syncEng.status === 503 && syncEng.body.code === 'DEVICE_SYNC_NOT_CONFIGURED',
-    `engineer must be allowed to start device-sync (503 when unconfigured): ${syncEng.status}`,
-  )
-
-  // Site attendant still cannot sync
-  const syncAttendant = await call('/api/device-sync', {
-    method: 'POST',
-    headers: attendantAuth,
-    body: '{}',
-  })
-  assert(syncAttendant.status === 403, 'site attendant must not start device-sync')
+  const prevSyncToken = process.env.DEVICE_SYNC_API_TOKEN
+  process.env.DEVICE_SYNC_API_TOKEN = ''
 
   const syncNoToken = await call('/api/device-sync', {
     method: 'POST',
