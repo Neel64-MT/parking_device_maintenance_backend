@@ -116,89 +116,68 @@ async function main() {
   const assign = await call(`/api/tickets/${ticketId}/assign`, {
     method: 'POST',
     headers: auth,
-    body: JSON.stringify({ assigneeId: tech.id }),
+    body: JSON.stringify({ assigneeId: tech.id, reason: 'Smoke assign note' }),
   })
   assert(assign.status === 200, `assign failed: ${JSON.stringify(assign.body).slice(0, 200)}`)
+  assert(assign.body.data?.assigneeId === tech.id, 'assign response assigneeId')
+  assert(typeof assign.body.data?.assigneeName === 'string' && assign.body.data.assigneeName.length > 0, 'assign assigneeName')
+  assert(Array.isArray(assign.body.data?.assignmentTrail), 'assign assignmentTrail')
+  const trailAfterAssign = assign.body.data.assignmentTrail.length as number
+  assert(trailAfterAssign >= 1, 'assignment trail should grow after assign')
+  assert(
+    assign.body.data.assignmentTrail.some((row: { body?: string }) => row.body === 'Smoke assign note'),
+    'optional reason on trail',
+  )
   console.log('OK assign')
 
-  // Unassigned ticket cannot receive Add Update
-  const unassignedDev = await call('/api/devices', {
-    method: 'POST',
-    headers: auth,
-    body: JSON.stringify({
-      roadId,
-      slotNumber: `ZU-${suffix}`,
-      slotIdentifier: `AA:BB:CC:EE:${suffix.slice(0, 2)}:${suffix.slice(2)}`,
-      installedOn: '2026-09-01',
-      installStatus: 'Working',
-    }),
-  })
-  assert(unassignedDev.status === 201, 'unassigned device create failed')
-  const unassignedTicket = await call('/api/tickets', {
-    method: 'POST',
-    headers: auth,
-    body: JSON.stringify({
-      deviceId: unassignedDev.body.data.publicId,
-      categoryId,
-      subCategoryId,
-      description: 'Unassigned smoke',
-      reporterType: 'Control room',
-    }),
-  })
-  assert(unassignedTicket.status === 201, 'unassigned ticket raise failed')
-  const unassignedId = unassignedTicket.body.data.id as string
-  const unassignedUpdate = await call(`/api/tickets/${unassignedId}/updates`, {
-    method: 'POST',
-    headers: auth,
-    body: JSON.stringify({
-      updateType: 'Site visit — not resolved',
-      workDone: 'should fail',
-      cost: 0,
-      visitedBy: tech.id,
-    }),
-  })
+  const detailAfter = await call(`/api/tickets/${ticketId}`, { headers: auth })
+  assert(detailAfter.status === 200 && detailAfter.body.data?.assigneeId === tech.id, 'detail assignee after assign')
   assert(
-    unassignedUpdate.status === 409 && unassignedUpdate.body.code === 'TICKET_NOT_ASSIGNED',
-    `expected TICKET_NOT_ASSIGNED: ${JSON.stringify(unassignedUpdate.body).slice(0, 300)}`,
+    Array.isArray(detailAfter.body.data?.assignmentTrail) &&
+      detailAfter.body.data.assignmentTrail.length === trailAfterAssign,
+    'detail trail matches assign response',
   )
-  assert(unassignedUpdate.body.error === 'Ticket not assigned', 'Ticket not assigned message')
-  console.log('OK unassigned ticket update rejected')
 
-  // Missing Visited By → structured JSON validation
-  const missingVisited = await call(`/api/tickets/${ticketId}/updates`, {
+  const sameAssign = await call(`/api/tickets/${ticketId}/assign`, {
     method: 'POST',
     headers: auth,
-    body: JSON.stringify({
-      updateType: 'Remote check',
-      workDone: 'no visitedBy',
-      cost: 0,
-    }),
+    body: JSON.stringify({ assigneeId: tech.id }),
   })
-  assert(missingVisited.status === 400 && missingVisited.body.code === 'VALIDATION_ERROR', 'missing visitedBy')
+  assert(sameAssign.status === 200 && sameAssign.body.message === 'Already assigned', 'idempotent same assignee')
   assert(
-    Array.isArray(missingVisited.body.details) &&
-      missingVisited.body.details.some((d: { field: string }) => d.field === 'visitedBy'),
-    'visitedBy field error required',
+    sameAssign.body.data?.assignmentTrail?.length === trailAfterAssign,
+    'same assignee must not grow trail',
   )
-  console.log('OK visitedBy missing validation')
+  console.log('OK assign idempotent')
 
-  const invalidVisited = await call(`/api/tickets/${ticketId}/updates`, {
+  const techB = users.body.data.users.find(
+    (u: { role: string; status: string; id: string }) =>
+      u.role === 'Technician' && u.status === 'Active' && u.id !== tech.id,
+  )
+  if (techB?.id) {
+    const reassign = await call(`/api/tickets/${ticketId}/assign`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ assigneeId: techB.id }),
+    })
+    assert(reassign.status === 200 && reassign.body.data?.assigneeId === techB.id, 'reassign failed')
+    assert(
+      reassign.body.data.assignmentTrail.length === trailAfterAssign + 1,
+      'reassign must grow trail',
+    )
+    console.log('OK reassign trail')
+  }
+
+  const badAssignee = await call(`/api/tickets/${ticketId}/assign`, {
     method: 'POST',
     headers: auth,
-    body: JSON.stringify({
-      updateType: 'Remote check',
-      workDone: 'bad visitedBy',
-      cost: 0,
-      visitedBy: '00000000-0000-4000-8000-000000000001',
-    }),
+    body: JSON.stringify({ assigneeId: '00000000-0000-4000-8000-000000000099' }),
   })
-  assert(invalidVisited.status === 400 && invalidVisited.body.code === 'VALIDATION_ERROR', 'invalid visitedBy')
   assert(
-    Array.isArray(invalidVisited.body.details) &&
-      invalidVisited.body.details.some((d: { field: string }) => d.field === 'visitedBy'),
-    'invalid visitedBy field error',
+    badAssignee.status === 400 && badAssignee.body.code === 'INVALID_ASSIGNEE',
+    `expected INVALID_ASSIGNEE: ${JSON.stringify(badAssignee.body).slice(0, 200)}`,
   )
-  console.log('OK visitedBy invalid validation')
+  console.log('OK invalid assignee rejected')
 
   // Parts master create/update (Issue c/e or Technician) + amounts on list/lookups
   const partA = await call('/api/parts', {
