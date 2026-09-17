@@ -193,6 +193,8 @@ POST .../updates (other visit) → Under repair
 POST .../close → Closed
 ```
 
+Assign (`POST /api/tickets/:id/assign`): `{ assigneeId, reason? }` → Active Technician / Engineer / Control room / Project manager only (`400 INVALID_ASSIGNEE`). Same assignee → `200 Already assigned` (no trail growth). Else transactional `assignee_id` + `ticket_assignments` + `ticket_events`; response `{ id, assigneeId, assigneeName, assignmentTrail }`. Detail `assignmentTrail` uses the same shape. Hand-to options: `GET /api/lookups/technicians` (includes Engineer).
+
 Stored values: `Open` | `Under repair` | `Waiting for spare` | `Closed`. Do not write `New`.
 
 Migration `007_ticket_status_open.sql` rewrites leftover `New` → `Open`.

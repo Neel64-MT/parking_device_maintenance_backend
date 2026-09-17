@@ -41,10 +41,10 @@ type ScanRow = Record<string, unknown> & {
   open_ticket_id?: string | null
   open_ticket_status?: string | null
   assignee_id?: string | null
-  open_ticket_raised_at?: Date | string | null
+  open_ticket_raised_at?: string | Date | null
   issue_name?: string | null
   severity?: string | null
-  tickets_6m: number
+  tickets_6m?: number
   id: string
 }
 
@@ -69,34 +69,30 @@ function buildScanPayload(
     )
     openTicketAge = days === 1 ? '1 day' : `${days} days`
   }
-  const deviceName = row.model
-    ? String(row.model)
-    : `Parking device ${row.public_id}`
+  const deviceName = row.model ? String(row.model) : `Parking device ${row.public_id}`
   const statusDate = row.open_ticket_raised_at
     ? new Date(row.open_ticket_raised_at).toISOString().slice(0, 10)
     : row.installed_on
   const openTicketId = row.open_ticket_id || null
+  const spSlotLabel = extras?.slotLabel?.trim() || null
   return {
-    // Canonical scan fields (Phase 17)
     deviceId: deviceDisplayId(row),
     deviceName,
     locationSite: row.road_name,
     slot: row.slot_number,
     slotId: row.slot_id != null && row.slot_id !== '' ? Number(row.slot_id) : null,
-    slotLabel: extras?.slotLabel ?? row.slot_number ?? null,
+    slotLabel: spSlotLabel || row.slot_number || null,
     slotIdentifier: row.slot_identifier || null,
     currentStatus: status,
     statusDate,
-    ticketsLast6Months: row.tickets_6m,
+    ticketsLast6Months: row.tickets_6m ?? 0,
     openTicketId,
     openTicketAge,
     openTicketIssue: openTicketId ? row.issue_name || 'Open' : null,
     latitude: lat,
     longitude: lng,
-    // SmartPark get-slot-mac extras (Phase 33)
     macId: extras?.macId ?? null,
     bleMac: extras?.bleMac ?? null,
-    // Legacy shape (ScanQr / older clients)
     id: deviceDisplayId(row),
     location: `${row.road_name} · Slot ${row.slot_number}`,
     qr: row.qr_code,
@@ -109,11 +105,9 @@ function buildScanPayload(
       { label: 'Installed', value: row.installed_on },
       {
         label: 'Open ticket',
-        value: openTicketId
-          ? `${openTicketId} — ${row.issue_name || 'Open'}`
-          : 'None',
+        value: openTicketId ? `${openTicketId} — ${row.issue_name || 'Open'}` : 'None',
       },
-      { label: 'Tickets in 6 months', value: String(row.tickets_6m) },
+      { label: 'Tickets in 6 months', value: String(row.tickets_6m ?? 0) },
       { label: 'Road / slot', value: `${row.road_name} · ${row.slot_number}` },
       { label: 'Latitude', value: lat || '—' },
       { label: 'Longitude', value: lng || '—' },
@@ -124,15 +118,13 @@ function buildScanPayload(
 }
 
 async function loadScanRowByWhere(
-  user: AuthUser,
   whereSql: string,
-  whereParams: unknown[],
-): Promise<ScanRow> {
-  const params: unknown[] = [...whereParams]
+  params: unknown[],
+  user: AuthUser,
+): Promise<ScanRow | null> {
   const visibility = appendTicketVisibilitySql(user, params)
   const visFilter = visibility ? `AND ${visibility}` : ''
-
-  const result = await query(
+  const result = await query<ScanRow>(
     `SELECT d.*, r.name AS road_name,
        ot.public_id AS open_ticket_id, ot.status AS open_ticket_status,
        ot.assignee_id, ot.raised_at AS open_ticket_raised_at,
@@ -153,8 +145,7 @@ async function loadScanRowByWhere(
      LIMIT 1`,
     params,
   )
-  if (!result.rowCount) throw new ApiError(404, 'No device matches that code', 'NOT_FOUND')
-  return result.rows[0] as ScanRow
+  return result.rows[0] || null
 }
 
 /** Create/PATCH response: prefer Slot Id for `id`, keep `publicId` for legacy. */
@@ -442,17 +433,18 @@ router.get('/scan', authorize('Scan QR', 'v'), async (req: AuthedRequest, res) =
     const q = String(req.query.q || '').trim().toUpperCase()
     if (!q) throw new ApiError(400, 'Query is required', 'VALIDATION_ERROR')
 
+    const params: unknown[] = [q]
     const row = await loadScanRowByWhere(
-      req.user!,
       `UPPER(TRIM(d.public_id)) = $1
           OR UPPER(TRIM(d.qr_code)) = $1
           OR UPPER(TRIM(d.slot_number)) = $1
           OR CAST(d.slot_id AS TEXT) = $1`,
-      [q],
+      params,
+      req.user!,
     )
+    if (!row) throw new ApiError(404, 'No device matches that code', 'NOT_FOUND')
     assertRoadAccessUnlessFieldWork(req.user!, row.road_id)
     const data = buildScanPayload(row)
-    // Update path: device found but no open ticket to update
     return ok(res, data, data.openTicketId ? undefined : 'No tickets available')
   } catch (error) {
     return handleApiError(res, error)
@@ -472,7 +464,6 @@ const slotMacSchema = z
 /**
  * QR sticker token → SmartPark get-slot-mac → local device by mac_id → scan payload.
  * Body: `{ "qr_token": "..." }` (camelCase `qrToken` also accepted).
- * Match: SmartPark `mac_id` ↔ `devices.slot_identifier`.
  */
 router.post('/slot-mac', authorize('Scan QR', 'v'), async (req: AuthedRequest, res) => {
   try {
@@ -487,51 +478,56 @@ router.post('/slot-mac', authorize('Scan QR', 'v'), async (req: AuthedRequest, r
       )
     }
 
-    let slotMac
+    let slotMac: Awaited<ReturnType<typeof fetchSlotMacByQrToken>>
     try {
       slotMac = await fetchSlotMacByQrToken(qrToken)
     } catch (err) {
       if (err instanceof DeviceSyncClientError) {
-        if (err.statusCode === 404) {
-          throw new ApiError(404, 'Slot MAC not found for this QR token', 'SLOT_MAC_NOT_FOUND')
+        if (err.statusCode === 404 || /success=false/i.test(err.message)) {
+          throw new ApiError(404, 'No device available at the given Slot', 'NO_DEVICE_AT_SLOT')
         }
-        throw new ApiError(
-          502,
-          'Could not resolve Slot MAC from SmartPark',
-          'SLOT_MAC_UPSTREAM_ERROR',
-        )
+        throw new ApiError(502, 'SmartPark get-slot-mac failed', 'SLOT_MAC_UPSTREAM_ERROR')
       }
       throw err
     }
 
-    if (!slotMac.macId?.trim()) {
-      throw new ApiError(404, 'Slot MAC not found for this QR token', 'SLOT_MAC_NOT_FOUND')
-    }
-
-    let row: ScanRow
-    try {
-      row = await loadScanRowByWhere(
-        req.user!,
-        `LOWER(TRIM(d.slot_identifier)) = LOWER(TRIM($1))`,
-        [slotMac.macId],
+    // SmartPark can return success with null mac_id (slot known, hardware MAC not bound)
+    if (!slotMac.macId) {
+      throw new ApiError(
+        404,
+        'No device available at the given Slot',
+        'NO_DEVICE_AT_SLOT',
+        {
+          macId: null,
+          bleMac: slotMac.bleMac,
+          slotLabel: slotMac.slotLabel,
+        },
       )
-    } catch (err) {
-      if (err instanceof ApiError && err.code === 'NOT_FOUND') {
-        throw new ApiError(
-          404,
-          'Device not found locally — run Device Sync or set Slot Identifier',
-          'NOT_FOUND',
-          { macId: slotMac.macId, bleMac: slotMac.bleMac, slotLabel: slotMac.slotLabel },
-        )
-      }
-      throw err
     }
 
+    const params: unknown[] = [slotMac.macId]
+    const row = await loadScanRowByWhere(
+      `LOWER(TRIM(d.slot_identifier)) = LOWER(TRIM($1))`,
+      params,
+      req.user!,
+    )
+    if (!row) {
+      throw new ApiError(
+        404,
+        'No device available at the given Slot',
+        'NO_DEVICE_AT_SLOT',
+        {
+          macId: slotMac.macId,
+          bleMac: slotMac.bleMac,
+          slotLabel: slotMac.slotLabel,
+        },
+      )
+    }
     assertRoadAccessUnlessFieldWork(req.user!, row.road_id)
     const data = buildScanPayload(row, {
       macId: slotMac.macId,
       bleMac: slotMac.bleMac,
-      slotLabel: slotMac.slotLabel ?? row.slot_number ?? null,
+      slotLabel: slotMac.slotLabel,
     })
     return ok(res, data, data.openTicketId ? undefined : 'No tickets available')
   } catch (error) {
