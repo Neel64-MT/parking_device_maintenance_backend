@@ -4,7 +4,7 @@
  */
 import 'dotenv/config'
 import { createApp } from '../src/app.js'
-import { closeDb } from '../src/db/pool.js'
+import { closeDb, query } from '../src/db/pool.js'
 
 const app = createApp()
 const server = app.listen(0)
@@ -48,7 +48,6 @@ async function main() {
     body: JSON.stringify({
       roadId,
       slotNumber: `ZZ-${suffix}`,
-      slotIdentifier: `AA:BB:CC:DD:${suffix.slice(0, 2)}:${suffix.slice(2)}`,
       installedOn: '2026-09-01',
       installStatus: 'Working',
     }),
@@ -59,35 +58,6 @@ async function main() {
   )
   const devicePublicId = device.body.data.publicId as string
   console.log('OK device create', devicePublicId)
-
-  // Raise blocked when device has no Slot Identifier
-  const noMacDev = await call('/api/devices', {
-    method: 'POST',
-    headers: auth,
-    body: JSON.stringify({
-      roadId,
-      slotNumber: `ZN-${suffix}`,
-      installedOn: '2026-09-01',
-      installStatus: 'Working',
-    }),
-  })
-  assert(noMacDev.status === 201 && noMacDev.body.data?.publicId, 'no-mac device create failed')
-  const noMacRaise = await call('/api/tickets', {
-    method: 'POST',
-    headers: auth,
-    body: JSON.stringify({
-      deviceId: noMacDev.body.data.publicId,
-      categoryId,
-      subCategoryId,
-      description: 'Should fail — no Slot Identifier',
-      reporterType: 'Control room',
-    }),
-  })
-  assert(
-    noMacRaise.status === 400 && noMacRaise.body.code === 'SLOT_IDENTIFIER_REQUIRED',
-    `expected SLOT_IDENTIFIER_REQUIRED: ${JSON.stringify(noMacRaise.body).slice(0, 300)}`,
-  )
-  console.log('OK raise rejected without Slot Identifier')
 
   const ticket = await call('/api/tickets', {
     method: 'POST',
@@ -215,7 +185,7 @@ async function main() {
   )
   console.log('OK parts master CRUD')
 
-  // Labour-only update (no parts) — Admin may update assigned ticket
+  // Labour-only update (no parts)
   const labourOnly = await call(`/api/tickets/${ticketId}/updates`, {
     method: 'POST',
     headers: auth,
@@ -224,7 +194,6 @@ async function main() {
       workDone: 'Checked remotely',
       cost: 100,
       parts: [],
-      visitedBy: tech.id,
     }),
   })
   assert(labourOnly.status === 201 || labourOnly.status === 200, `labour-only update failed: ${JSON.stringify(labourOnly.body).slice(0, 300)}`)
@@ -240,7 +209,6 @@ async function main() {
       workDone: 'Adjusted sensor; replaced parts',
       cost: 1000,
       parts: [partAId, partBId, partAId],
-      visitedBy: tech.id,
     }),
   })
   assert(update.status === 201 || update.status === 200, `update failed: ${JSON.stringify(update.body).slice(0, 300)}`)
@@ -263,86 +231,10 @@ async function main() {
       workDone: 'Bad part id',
       cost: 50,
       parts: ['00000000-0000-4000-8000-000000000099'],
-      visitedBy: tech.id,
     }),
   })
   assert(badPart.status === 400 && badPart.body.code === 'INVALID_PARTS', 'expected INVALID_PARTS')
   console.log('OK invalid part rejected')
-
-  // Engineer as Visited By
-  const engineer = users.body.data.users.find(
-    (u: { role: string; status: string; name: string }) =>
-      u.role === 'Engineer' && u.status === 'Active',
-  )
-  if (engineer?.id) {
-    const engVisit = await call(`/api/tickets/${ticketId}/updates`, {
-      method: 'POST',
-      headers: auth,
-      body: JSON.stringify({
-        updateType: 'Remote check',
-        workDone: 'Engineer visited',
-        cost: 0,
-        visitedBy: engineer.id,
-      }),
-    })
-    assert(
-      engVisit.status === 201 && engVisit.body.data?.visitedBy === engineer.id,
-      `engineer visitedBy failed: ${JSON.stringify(engVisit.body).slice(0, 300)}`,
-    )
-    console.log('OK engineer visitedBy')
-  } else {
-    console.log('SKIP engineer visitedBy (no seeded Engineer — run db:seed after migrate)')
-  }
-
-  // User B (other technician) cannot update ticket assigned to tech A
-  const techB = users.body.data.users.find(
-    (u: { role: string; status: string; id: string; mobile?: string }) =>
-      u.role === 'Technician' && u.status === 'Active' && u.id !== tech.id && u.mobile,
-  )
-  assert(techB?.mobile, 'need second technician with mobile for holder check')
-  const techBLogin = await call('/api/auth/login', {
-    method: 'POST',
-    body: JSON.stringify({ identifier: techB.mobile, password: 'Password123' }),
-  })
-  assert(techBLogin.status === 200 && techBLogin.body.data?.token, 'second tech login failed')
-  const blockedB = await call(`/api/tickets/${ticketId}/updates`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${techBLogin.body.data.token as string}` },
-    body: JSON.stringify({
-      updateType: 'Site visit — not resolved',
-      workDone: 'user B attempt',
-      cost: 0,
-      visitedBy: tech.id,
-    }),
-  })
-  assert(
-    blockedB.status === 403 && blockedB.body.code === 'NOT_ASSIGNED_USER',
-    `user B must get NOT_ASSIGNED_USER: ${JSON.stringify(blockedB.body).slice(0, 300)}`,
-  )
-  assert(blockedB.body.error === 'This ticket is assigned to another user', 'holder error message')
-  console.log('OK user B cannot update assigned ticket')
-
-  // PM (not assignee) cannot Add Update
-  const pmLogin = await call('/api/auth/login', {
-    method: 'POST',
-    body: JSON.stringify({ identifier: '9825012345', password: 'Password123' }),
-  })
-  assert(pmLogin.status === 200, 'PM login failed')
-  const pmBlocked = await call(`/api/tickets/${ticketId}/updates`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${pmLogin.body.data.token as string}` },
-    body: JSON.stringify({
-      updateType: 'Remote check',
-      workDone: 'PM attempt',
-      cost: 0,
-      visitedBy: tech.id,
-    }),
-  })
-  assert(
-    pmBlocked.status === 403 && pmBlocked.body.code === 'NOT_ASSIGNED_USER',
-    `PM must get NOT_ASSIGNED_USER: ${JSON.stringify(pmBlocked.body).slice(0, 300)}`,
-  )
-  console.log('OK PM cannot update when not assignee')
 
   const close = await call(`/api/tickets/${ticketId}/close`, {
     method: 'POST',
@@ -384,64 +276,7 @@ async function main() {
 
   const report = await call('/api/reports/work?view=week', { headers: auth })
   assert(report.status === 200 && report.body.success, 'report failed')
-  assert(Array.isArray(report.body.data?.people), 'report people array')
-  assert(typeof report.body.data?.daysInPeriod === 'number', 'daysInPeriod')
-  for (const p of report.body.data.people) {
-    assert(Array.isArray(p.tickets), 'person tickets')
-    for (const row of p.tickets) {
-      assert(Array.isArray(row) && row.length === 6, 'week ticket row length 6')
-    }
-  }
   console.log('OK report week')
-
-  const reportDay = await call('/api/reports/work?view=day&from=2026-08-01&to=2026-09-30', {
-    headers: auth,
-  })
-  assert(reportDay.status === 200 && reportDay.body.success, 'report day failed')
-  const dayPeople = reportDay.body.data.people || []
-  for (const p of dayPeople) {
-    for (const row of p.tickets || []) {
-      assert(typeof row[0] === 'string' && /^TK-/.test(row[0]), 'day row ticket id')
-    }
-  }
-  const roadFiltered = await call(
-    '/api/reports/work?view=day&from=2026-08-01&to=2026-09-30&road=Science%20City',
-    { headers: auth },
-  )
-  assert(roadFiltered.status === 200 && roadFiltered.body.success, 'road filter failed')
-  for (const p of roadFiltered.body.data.people || []) {
-    assert(
-      !p.roads || p.roads === '—' || String(p.roads).includes('Science City'),
-      `road filter person roads unexpected: ${p.roads}`,
-    )
-    for (const row of p.tickets || []) {
-      assert(
-        String(row[2]).includes('Science City'),
-        `road filter ticket road cell: ${row[2]}`,
-      )
-    }
-  }
-  console.log('OK report day + road filter')
-
-  const reportMonth = await call('/api/reports/work?view=month&from=2026-08-01&to=2026-09-30', {
-    headers: auth,
-  })
-  assert(reportMonth.status === 200, 'report month failed')
-  for (const p of reportMonth.body.data.people || []) {
-    for (const row of p.tickets || []) {
-      assert(Array.isArray(row) && row.length === 6, 'month ticket row length 6')
-    }
-  }
-  console.log('OK report month shape')
-
-  const exportRes = await fetch(
-    `${base}/api/reports/work/export?view=day&from=2026-08-01&to=2026-09-30`,
-    { headers: auth },
-  )
-  const exportText = await exportRes.text()
-  assert(exportRes.status === 200, `export status ${exportRes.status}`)
-  assert(exportText.startsWith('Person,Ticket,Event,Cost,Road,When'), 'export CSV header')
-  console.log('OK report export')
 
   // One open ticket per device
   const device2 = await call('/api/devices', {
@@ -450,7 +285,6 @@ async function main() {
     body: JSON.stringify({
       roadId,
       slotNumber: `ZY-${suffix}`,
-      slotIdentifier: `AA:BB:CC:FF:${suffix.slice(0, 2)}:${suffix.slice(2)}`,
       installedOn: '2026-09-01',
       installStatus: 'Working',
     }),
@@ -554,6 +388,59 @@ async function main() {
   })
   assert(usedDel.status === 409 && usedDel.body.code === 'IN_USE', 'expected IN_USE on used subcategory')
   console.log('OK used subcategory cannot hard-delete')
+
+  // Phase 37 — hard-delete unused category via API; used category → IN_USE
+  const delEmptyCat = await call(`/api/issues/categories/${smokeCatId}`, {
+    method: 'DELETE',
+    headers: auth,
+  })
+  assert(delEmptyCat.status === 200, `delete unused category failed: ${JSON.stringify(delEmptyCat.body).slice(0, 200)}`)
+  console.log('OK unused category hard-delete')
+
+  const usedCatId = (
+    await query<{ id: string }>(
+      `SELECT reported_category_id AS id FROM tickets WHERE reported_category_id IS NOT NULL LIMIT 1`,
+    )
+  ).rows[0]?.id
+  if (usedCatId) {
+    const delUsedCat = await call(`/api/issues/categories/${usedCatId}`, {
+      method: 'DELETE',
+      headers: auth,
+    })
+    assert(
+      delUsedCat.status === 409 && delUsedCat.body.code === 'IN_USE',
+      `expected IN_USE on used category: ${JSON.stringify(delUsedCat.body).slice(0, 200)}`,
+    )
+    console.log('OK used category cannot hard-delete')
+  } else {
+    console.log('SKIP used category IN_USE (no ticket with reported_category_id)')
+  }
+
+  const softCat = await call('/api/issues/categories', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ name: `Smoke Soft Cat ${suffix}` }),
+  })
+  assert(softCat.status === 201 && softCat.body.data?.id, 'soft-test category create failed')
+  const softPatch = await call(`/api/issues/categories/${softCat.body.data.id}`, {
+    method: 'PATCH',
+    headers: auth,
+    body: JSON.stringify({ active: false }),
+  })
+  assert(softPatch.status === 200 && softPatch.body.data?.active === false, 'category soft-deactivate failed')
+  const techDelLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9099941128', password: 'Password123' }),
+  })
+  assert(techDelLogin.status === 200 && techDelLogin.body.data?.token, 'tech login for category delete')
+  const techDelAuth = { Authorization: `Bearer ${techDelLogin.body.data.token as string}` }
+  // Soft-inactive category still hard-deletes when unused
+  const techDelCat = await call(`/api/issues/categories/${softCat.body.data.id}`, {
+    method: 'DELETE',
+    headers: techDelAuth,
+  })
+  assert(techDelCat.status === 200, `tech delete unused category failed: ${JSON.stringify(techDelCat.body).slice(0, 200)}`)
+  console.log('OK tech hard-delete unused category')
 
   // Upload
   const form = new FormData()

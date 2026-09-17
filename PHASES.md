@@ -58,7 +58,7 @@
 
 **Tests:**
 - `npm run test:smoke` — password login (mobile + email), validation 400, unauthorized 401, core GET APIs, Admin user create, logout revoke
-- `npm run test:smoke:writes` — device/ticket lifecycle, road create, one-open-ticket rule, issue subcategory delete/IN_USE, uploads, user patch, dashboard/report
+- `npm run test:smoke:writes` — device/ticket lifecycle, road create, one-open-ticket rule, issue category/subcategory delete/IN_USE, uploads, user patch, dashboard/report
 
 ## Phase 10 — Postgres cutover + API verification
 
@@ -353,3 +353,39 @@
 **Testing:** assign trail growth; reassign; idempotent; invalid assignee; CR assign; tech 403
 
 **Done when:** smoke passes; FRONTEND CHANGE REQUIRED — Detail Save → assign API; Hand to → technicians lookup
+
+## Phase 36 — Part & Issue Master hard delete
+
+**Status:** Complete
+
+**Objective:** Hard-delete unused Parts and Issue subcategories from Technician onward; keep soft-deactivate for in-use records.
+
+**APIs:**
+- `DELETE /api/parts/:id` — Issue master `d`; unused → delete; used (`ticket_event_parts`) → `409 IN_USE`
+- `DELETE /api/issues/subcategories/:id` — same `d` (existing); Tech/Engineer/PM now allowed
+- Soft: `PATCH /api/parts/:id { active: false }`; `POST …/subcategories/:id/deactivate` unchanged
+
+**Database:** `015_issue_master_delete_field_roles.sql` — Issue master `can_delete` for Technician, Engineer, Project manager
+
+**Files:** `src/routes/parts.ts`, `src/lib/permissions.ts`, migration `015`, smoke, docs
+
+**Testing:** unused part/sub delete; used → IN_USE; tech hard-delete; soft-deactivate still works
+
+**Done when:** smoke passes; FRONTEND CHANGE REQUIRED — PartMaster Delete → `DELETE /api/parts/:id`; IssueMaster wire delete/deactivate; image zoom/crop stay FE-only
+
+## Phase 37 — Issue Category gap-close
+
+**Status:** Complete
+
+**Objective:** Hard-delete unused issue categories (matching subcategory/parts pattern); harden create validation; no schema migration.
+
+**APIs:**
+- `DELETE /api/issues/categories/:id` — Issue master `d`; unused → delete (subs CASCADE); tickets/events on category or its subs → `409 IN_USE`
+- Soft: `PATCH /api/issues/categories/:id { active: false }` unchanged
+- Validation: category/sub names trim `min(2)`/`max(120)`; sub create requires existing active parent (`404` / `400 CATEGORY_INACTIVE`)
+
+**Files:** `src/routes/issues.ts`, `scripts/smoke-writes.ts`, docs
+
+**Testing:** unused category delete; used → IN_USE; soft deactivate; tech hard-delete unused; API cleanup (no raw SQL)
+
+**Done when:** smoke passes; FRONTEND CHANGE REQUIRED — `createIssueCategory`, `createIssueSubcategory`, `deleteIssueCategory` in `issues.js` + IssueMaster create/delete UI

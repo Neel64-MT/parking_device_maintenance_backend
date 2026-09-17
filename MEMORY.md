@@ -21,16 +21,22 @@
 - Phase 29 — Device Sync Slot Id only required; MAC/QR optional; update existing row when MAC/QR change for Slot Id
 - Phase 30 — Add Update: require assignee; Admin or assignee only (`NOT_ASSIGNED_USER`); required `visitedBy` (Technician|Engineer); Engineer role
 - Phase 31 — Work report API gap-close: road filter fix, Engineer actors, real days, view-shaped tickets, filtered export
+- Phase 35 — Ticket assign harden: transactional, eligible assignee, idempotent, trail response; technicians lookup includes Engineer
+- Phase 36 — Part/Issue hard delete: `DELETE /api/parts/:id` + Issue master `d` for Technician/Engineer/PM; used → `409 IN_USE` (deactivate)
+- Phase 37 — Issue category gap-close: `DELETE /api/issues/categories/:id` + IN_USE; name max 120; sub create parent active check
 
 ## Currently Working On
 
-- (idle — Phase 31 complete)
+- (idle — Phase 37 complete)
 
 ## Pending
 
 ### FRONTEND CHANGE REQUIRED (do not implement until authorized)
 
 - Feature screens still on mocks / partial wiring
+- PartMaster: Delete → `DELETE /api/parts/:id`; on `409 IN_USE` toast deactivate instead; Tech/Engineer/PM/Admin may delete unused
+- IssueMaster: wire live APIs; add `createIssueCategory` / `createIssueSubcategory` / `deleteIssueCategory`; Delete unused category/sub → `DELETE …/categories|subcategories/:id`; used → deactivate
+- Image zoom/crop: FE-only (no backend upload change)
 - Wire Scan QR to `GET /api/devices/scan?q=`; if `openTicketId` → ticket detail / update; else raise; on raise `409 OPEN_TICKET_EXISTS` redirect via `details.openTicketId`
 - Wire Sync Device to `POST /api/device-sync`; poll `GET /api/device-sync/latest` or `/:id` for status (Device list done)
 - Device list road filter: reads `roads` via `GET /api/lookups/roads` (done); Road master / TicketList still on mocks
@@ -55,7 +61,9 @@
 - Engineer role: Technician-like permissions; eligible Visited By; field-work road bypass like Technician
 - Work report: Technician+Engineer actors; road filter on `rd.name`; view-shaped tickets; export filtered like `/work`
 - Visit cost: `eventCost = body.cost (labour) + SUM(parts.amount)`; master amount authoritative; dedupe part IDs per event
-- Parts CRUD reuses Issue master `c`/`e` (no new permission screen); list/lookups need Update ticket `v`
+- Parts CRUD reuses Issue master `c`/`e` (+ Technician/Engineer create/update exception); hard-delete uses Issue master `d` (Admin, PM, Technician, Engineer); list/lookups need Update ticket `v`
+- Unused Part/Issue category/sub hard-delete; used → `409 IN_USE` then soft-deactivate; historical visit JSONB / ticket issue FKs untouched
+- Image zoom/crop are FE-only; `POST /api/uploads` unchanged
 - Ticket visibility privileged roles: only `Admin` and `Project manager`
 - Other roles: `assignee_id = me OR raised_by_user_id = me` in SQL + `assertTicketAccess`
 - Same helper scopes dashboard ticket metrics, device ticket overlays/history, and work report rows

@@ -1,12 +1,38 @@
-import { Router } from 'express'
+import { Router, type NextFunction, type Response } from 'express'
 import { z } from 'zod'
 import { ApiError, handleApiError } from '../lib/api-error.js'
 import { created, ok } from '../lib/respond.js'
 import { query } from '../db/pool.js'
-import { authorize, requireAuth } from '../middleware/auth.js'
+import {
+  authorize,
+  hasPermission,
+  requireAuth,
+  type AuthedRequest,
+} from '../middleware/auth.js'
 
 const router = Router()
 router.use(requireAuth)
+
+const categoryNameSchema = z.string().trim().min(2).max(120)
+const subcategoryNameSchema = z.string().trim().min(2).max(120)
+
+/** Issue master edit, or Technician / Engineer (field staff correcting wording/severity). */
+function authorizeIssueSubUpdate(req: AuthedRequest, res: Response, next: NextFunction) {
+  try {
+    const user = req.user
+    if (!user) throw new ApiError(401, 'Unauthorized', 'UNAUTHORIZED')
+    if (
+      hasPermission(user, 'Issue master', 'e') ||
+      user.roleName === 'Technician' ||
+      user.roleName === 'Engineer'
+    ) {
+      return next()
+    }
+    throw new ApiError(403, 'Forbidden', 'FORBIDDEN')
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+}
 
 router.get('/', authorize('Issue master', 'v'), async (_req, res) => {
   try {
@@ -45,29 +71,30 @@ router.get('/', authorize('Issue master', 'v'), async (_req, res) => {
   }
 })
 
-router.post(
-  '/categories',
-  authorize('Issue master', 'c'),
-  async (req, res) => {
-    try {
-      const body = z.object({ name: z.string().min(2) }).parse(req.body)
-      const max = await query<{ m: number }>(`SELECT COALESCE(MAX(sort_order),0) AS m FROM issue_categories`)
-      const result = await query(
-        `INSERT INTO issue_categories (name, sort_order) VALUES ($1,$2) RETURNING *`,
-        [body.name, max.rows[0].m + 1],
-      )
-      return created(res, result.rows[0], 'Category created')
-    } catch (error) {
-      return handleApiError(res, error)
-    }
-  },
-)
+router.post('/categories', authorize('Issue master', 'c'), async (req, res) => {
+  try {
+    const body = z.object({ name: categoryNameSchema }).parse(req.body)
+    const max = await query<{ m: number }>(
+      `SELECT COALESCE(MAX(sort_order),0) AS m FROM issue_categories`,
+    )
+    const result = await query(
+      `INSERT INTO issue_categories (name, sort_order) VALUES ($1,$2) RETURNING *`,
+      [body.name, max.rows[0].m + 1],
+    )
+    return created(res, result.rows[0], 'Category created')
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
 
 router.patch('/categories/:id', authorize('Issue master', 'e'), async (req, res) => {
   try {
     const body = z
-      .object({ name: z.string().min(2).optional(), active: z.boolean().optional() })
-      .refine((d) => Object.keys(d).length > 0)
+      .object({
+        name: categoryNameSchema.optional(),
+        active: z.boolean().optional(),
+      })
+      .refine((d) => Object.keys(d).length > 0, { message: 'No fields to update' })
       .parse(req.body)
     const result = await query(
       `UPDATE issue_categories SET
@@ -84,15 +111,70 @@ router.patch('/categories/:id', authorize('Issue master', 'e'), async (req, res)
   }
 })
 
+/**
+ * Hard-delete unused category (Issue master d). Cascades unused subs via FK.
+ * If tickets/events reference the category or any of its subs → 409 IN_USE.
+ */
+router.delete('/categories/:id', authorize('Issue master', 'd'), async (req, res) => {
+  try {
+    const existing = await query(`SELECT id FROM issue_categories WHERE id = $1`, [req.params.id])
+    if (!existing.rowCount) throw new ApiError(404, 'Category not found', 'NOT_FOUND')
+
+    const usage = await query<{ n: number }>(
+      `SELECT (
+         (SELECT COUNT(*)::int FROM tickets
+          WHERE reported_category_id = $1 OR found_category_id = $1)
+         +
+         (SELECT COUNT(*)::int FROM tickets t
+          JOIN issue_subcategories s ON s.id IN (t.reported_subcategory_id, t.found_subcategory_id)
+          WHERE s.category_id = $1)
+         +
+         (SELECT COUNT(*)::int FROM ticket_events
+          WHERE category_id = $1)
+         +
+         (SELECT COUNT(*)::int FROM ticket_events e
+          JOIN issue_subcategories s ON s.id = e.subcategory_id
+          WHERE s.category_id = $1)
+       )::int AS n`,
+      [req.params.id],
+    )
+    if (usage.rows[0].n > 0) {
+      throw new ApiError(
+        409,
+        'Category has been used on tickets — deactivate instead',
+        'IN_USE',
+      )
+    }
+
+    const result = await query(`DELETE FROM issue_categories WHERE id = $1 RETURNING id`, [
+      req.params.id,
+    ])
+    if (!result.rowCount) throw new ApiError(404, 'Category not found', 'NOT_FOUND')
+    return ok(res, null, 'Category deleted')
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
 router.post('/subcategories', authorize('Issue master', 'c'), async (req, res) => {
   try {
     const body = z
       .object({
         categoryId: z.string().uuid(),
-        name: z.string().min(2),
+        name: subcategoryNameSchema,
         severity: z.enum(['Critical', 'Major', 'Minor']),
       })
       .parse(req.body)
+
+    const parent = await query<{ id: string; active: boolean }>(
+      `SELECT id, active FROM issue_categories WHERE id = $1`,
+      [body.categoryId],
+    )
+    if (!parent.rowCount) throw new ApiError(404, 'Category not found', 'NOT_FOUND')
+    if (!parent.rows[0].active) {
+      throw new ApiError(400, 'Category is inactive', 'CATEGORY_INACTIVE')
+    }
+
     const result = await query(
       `INSERT INTO issue_subcategories (category_id, name, severity)
        VALUES ($1,$2,$3) RETURNING *`,
@@ -104,15 +186,15 @@ router.post('/subcategories', authorize('Issue master', 'c'), async (req, res) =
   }
 })
 
-router.patch('/subcategories/:id', authorize('Issue master', 'e'), async (req, res) => {
+router.patch('/subcategories/:id', authorizeIssueSubUpdate, async (req, res) => {
   try {
     const body = z
       .object({
-        name: z.string().min(2).optional(),
+        name: subcategoryNameSchema.optional(),
         severity: z.enum(['Critical', 'Major', 'Minor']).optional(),
         active: z.boolean().optional(),
       })
-      .refine((d) => Object.keys(d).length > 0)
+      .refine((d) => Object.keys(d).length > 0, { message: 'No fields to update' })
       .parse(req.body)
     const result = await query(
       `UPDATE issue_subcategories SET
