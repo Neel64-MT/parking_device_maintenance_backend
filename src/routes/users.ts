@@ -12,6 +12,13 @@ import {
   omitPasswordHash,
   passwordSchema,
 } from '../lib/auth.js'
+import { assertCanAssignRole } from '../lib/role-hierarchy.js'
+
+async function resolveRoleName(roleId: string): Promise<string> {
+  const result = await query<{ name: string }>(`SELECT name FROM roles WHERE id = $1`, [roleId])
+  if (!result.rowCount) throw new ApiError(404, 'Role not found', 'NOT_FOUND')
+  return result.rows[0].name
+}
 
 const router = Router()
 router.use(requireAuth)
@@ -108,9 +115,12 @@ function emailOrNull(email?: string) {
   return normalizeEmail(email)
 }
 
-router.post('/', authorize('Users', 'c'), async (req, res) => {
+router.post('/', authorize('Users', 'c'), async (req: AuthedRequest, res) => {
   try {
     const body = userBody.parse(req.body)
+    const targetRoleName = await resolveRoleName(body.roleId)
+    assertCanAssignRole(req.user!.roleName, targetRoleName)
+
     const mobile = normalizeMobile(body.mobile)
     const email = emailOrNull(body.email)
     const passwordHash = await hashPassword(body.password)
@@ -132,11 +142,16 @@ router.post('/', authorize('Users', 'c'), async (req, res) => {
   }
 })
 
-router.patch('/:id', authorize('Users', 'e'), async (req, res) => {
+router.patch('/:id', authorize('Users', 'e'), async (req: AuthedRequest, res) => {
   try {
     const body = userBody.partial().parse(req.body)
     const existing = await query('SELECT * FROM users WHERE id = $1', [req.params.id])
     if (!existing.rowCount) throw new ApiError(404, 'User not found', 'NOT_FOUND')
+
+    if (body.roleId) {
+      const targetRoleName = await resolveRoleName(body.roleId)
+      assertCanAssignRole(req.user!.roleName, targetRoleName)
+    }
 
     if (body.status === 'Inactive') {
       const adminCheck = await query(

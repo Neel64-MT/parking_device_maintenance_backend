@@ -13,12 +13,16 @@ import {
 const router = Router()
 router.use(requireAuth)
 
-/** Issue master create, or Technician (field staff adding missing spares). */
+/** Issue master create, or Technician / Engineer (field staff adding missing spares). */
 function authorizePartCreate(req: AuthedRequest, res: Response, next: NextFunction) {
   try {
     const user = req.user
     if (!user) throw new ApiError(401, 'Unauthorized', 'UNAUTHORIZED')
-    if (hasPermission(user, 'Issue master', 'c') || user.roleName === 'Technician') {
+    if (
+      hasPermission(user, 'Issue master', 'c') ||
+      user.roleName === 'Technician' ||
+      user.roleName === 'Engineer'
+    ) {
       return next()
     }
     throw new ApiError(403, 'Forbidden', 'FORBIDDEN')
@@ -27,12 +31,16 @@ function authorizePartCreate(req: AuthedRequest, res: Response, next: NextFuncti
   }
 }
 
-/** Issue master edit, or Technician (field staff correcting name/amount). */
+/** Issue master edit, or Technician / Engineer (field staff correcting name/amount). */
 function authorizePartUpdate(req: AuthedRequest, res: Response, next: NextFunction) {
   try {
     const user = req.user
     if (!user) throw new ApiError(401, 'Unauthorized', 'UNAUTHORIZED')
-    if (hasPermission(user, 'Issue master', 'e') || user.roleName === 'Technician') {
+    if (
+      hasPermission(user, 'Issue master', 'e') ||
+      user.roleName === 'Technician' ||
+      user.roleName === 'Engineer'
+    ) {
       return next()
     }
     throw new ApiError(403, 'Forbidden', 'FORBIDDEN')

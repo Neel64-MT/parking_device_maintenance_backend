@@ -389,7 +389,7 @@ async function main() {
   assert(usedDel.status === 409 && usedDel.body.code === 'IN_USE', 'expected IN_USE on used subcategory')
   console.log('OK used subcategory cannot hard-delete')
 
-  // Phase 37 — hard-delete unused category via API; used category → IN_USE
+  // Phase 38 — hard-delete unused category via API; used category → IN_USE
   const delEmptyCat = await call(`/api/issues/categories/${smokeCatId}`, {
     method: 'DELETE',
     headers: auth,
@@ -488,6 +488,242 @@ async function main() {
   })
   assert(patchUser.status === 200, `user patch failed: ${JSON.stringify(patchUser.body).slice(0, 200)}`)
   console.log('OK user patch')
+
+  // Phase 36 — role hierarchy on user create / role assign
+  const rolesRes = await call('/api/roles', { headers: auth })
+  assert(rolesRes.status === 200 && Array.isArray(rolesRes.body.data), 'roles list failed')
+  const roleIdByName = Object.fromEntries(
+    (rolesRes.body.data as Array<{ id: string; name: string }>).map((r) => [r.name, r.id]),
+  ) as Record<string, string>
+  assert(roleIdByName.Admin && roleIdByName['Project manager'] && roleIdByName.Technician, 'missing seeded roles')
+
+  const adminCreatesPm = await call('/api/users', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      fullName: `Smoke Hier PM ${suffix}`,
+      mobile: `91${suffix}001`,
+      email: `smoke.hier.pm.${suffix}@yopmail.com`,
+      password: 'Password123',
+      roleId: roleIdByName['Project manager'],
+      roadIds: [],
+    }),
+  })
+  assert(
+    adminCreatesPm.status === 201,
+    `admin create PM failed: ${JSON.stringify(adminCreatesPm.body).slice(0, 200)}`,
+  )
+  console.log('OK admin creates Project manager')
+
+  const pmLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9825012345', password: 'Password123' }),
+  })
+  assert(pmLogin.status === 200 && pmLogin.body.data?.token, 'PM login failed')
+  const pmAuth = { Authorization: `Bearer ${pmLogin.body.data.token as string}` }
+
+  const pmCreatesSame = await call('/api/users', {
+    method: 'POST',
+    headers: pmAuth,
+    body: JSON.stringify({
+      fullName: `Smoke Hier Same ${suffix}`,
+      mobile: `91${suffix}002`,
+      email: `smoke.hier.same.${suffix}@yopmail.com`,
+      password: 'Password123',
+      roleId: roleIdByName['Project manager'],
+      roadIds: [],
+    }),
+  })
+  assert(
+    pmCreatesSame.status === 201,
+    `PM create same role failed: ${JSON.stringify(pmCreatesSame.body).slice(0, 200)}`,
+  )
+
+  const pmCreatesTech = await call('/api/users', {
+    method: 'POST',
+    headers: pmAuth,
+    body: JSON.stringify({
+      fullName: `Smoke Hier Tech ${suffix}`,
+      mobile: `91${suffix}003`,
+      email: `smoke.hier.tech.${suffix}@yopmail.com`,
+      password: 'Password123',
+      roleId: roleIdByName.Technician,
+      roadIds: [],
+    }),
+  })
+  assert(
+    pmCreatesTech.status === 201,
+    `PM create Technician failed: ${JSON.stringify(pmCreatesTech.body).slice(0, 200)}`,
+  )
+  console.log('OK PM creates same and lower roles')
+
+  const pmCreatesAdmin = await call('/api/users', {
+    method: 'POST',
+    headers: pmAuth,
+    body: JSON.stringify({
+      fullName: `Smoke Hier Admin ${suffix}`,
+      mobile: `91${suffix}004`,
+      email: `smoke.hier.admin.${suffix}@yopmail.com`,
+      password: 'Password123',
+      roleId: roleIdByName.Admin,
+      roadIds: [],
+    }),
+  })
+  assert(
+    pmCreatesAdmin.status === 403 && pmCreatesAdmin.body.code === 'FORBIDDEN',
+    `expected PM create Admin 403: ${JSON.stringify(pmCreatesAdmin.body).slice(0, 200)}`,
+  )
+  console.log('OK PM cannot create Admin')
+
+  const pmPromoteAdmin = await call(`/api/users/${pmCreatesTech.body.data.id}`, {
+    method: 'PATCH',
+    headers: pmAuth,
+    body: JSON.stringify({ roleId: roleIdByName.Admin }),
+  })
+  assert(
+    pmPromoteAdmin.status === 403 && pmPromoteAdmin.body.code === 'FORBIDDEN',
+    `expected PM promote Admin 403: ${JSON.stringify(pmPromoteAdmin.body).slice(0, 200)}`,
+  )
+  console.log('OK PM cannot PATCH role to Admin')
+
+  // Phase 39 — Roles matrix hierarchy + upload gate
+  // PM seed is Roles view-only; temporarily grant `e` so hierarchy (not missing `e`) is what we test.
+  const pmRoleRow = (rolesRes.body.data as Array<{
+    id: string
+    name: string
+    permissions: Record<string, string>
+  }>).find((r) => r.name === 'Project manager')
+  assert(pmRoleRow?.permissions, 'Project manager role permissions missing')
+  const pmPermsWithRolesEdit = {
+    ...pmRoleRow.permissions,
+    'Roles & permissions': 'v.e...',
+  }
+  const grantPmRolesEdit = await call(`/api/roles/${roleIdByName['Project manager']}/permissions`, {
+    method: 'PATCH',
+    headers: auth,
+    body: JSON.stringify({ permissions: pmPermsWithRolesEdit }),
+  })
+  assert(
+    grantPmRolesEdit.status === 200,
+    `grant PM Roles e failed: ${JSON.stringify(grantPmRolesEdit.body).slice(0, 200)}`,
+  )
+  // Re-login so JWT session loads fresh permissions from DB
+  const pmLogin2 = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9825012345', password: 'Password123' }),
+  })
+  assert(pmLogin2.status === 200 && pmLogin2.body.data?.token, 'PM re-login after Roles e')
+  const pmAuth2 = { Authorization: `Bearer ${pmLogin2.body.data.token as string}` }
+
+  const techRoleRow = (rolesRes.body.data as Array<{
+    id: string
+    name: string
+    permissions: Record<string, string>
+  }>).find((r) => r.name === 'Technician')
+  assert(techRoleRow?.permissions, 'Technician role permissions missing')
+
+  const pmPatchAdminPerms = await call(`/api/roles/${roleIdByName.Admin}/permissions`, {
+    method: 'PATCH',
+    headers: pmAuth2,
+    body: JSON.stringify({ permissions: { Dashboard: 'v.....' } }),
+  })
+  assert(
+    pmPatchAdminPerms.status === 403 && pmPatchAdminPerms.body.code === 'FORBIDDEN',
+    `expected PM PATCH Admin perms 403: ${JSON.stringify(pmPatchAdminPerms.body).slice(0, 200)}`,
+  )
+
+  const pmPatchTechPerms = await call(`/api/roles/${roleIdByName.Technician}/permissions`, {
+    method: 'PATCH',
+    headers: pmAuth2,
+    body: JSON.stringify({ permissions: techRoleRow.permissions }),
+  })
+  assert(
+    pmPatchTechPerms.status === 200,
+    `PM PATCH Technician perms failed: ${JSON.stringify(pmPatchTechPerms.body).slice(0, 200)}`,
+  )
+
+  const restorePmRoles = await call(`/api/roles/${roleIdByName['Project manager']}/permissions`, {
+    method: 'PATCH',
+    headers: auth,
+    body: JSON.stringify({ permissions: pmRoleRow.permissions }),
+  })
+  assert(restorePmRoles.status === 200, 'restore PM Roles matrix failed')
+  console.log('OK Roles matrix hierarchy (PM cannot edit Admin; can edit Technician)')
+
+  const adminPatchAdminPerms = await call(`/api/roles/${roleIdByName.Admin}/permissions`, {
+    method: 'PATCH',
+    headers: auth,
+    body: JSON.stringify({ permissions: { Dashboard: '......' } }),
+  })
+  assert(
+    adminPatchAdminPerms.status === 403 && adminPatchAdminPerms.body.code === 'FORBIDDEN',
+    `expected Admin PATCH Admin perms 403: ${JSON.stringify(adminPatchAdminPerms.body).slice(0, 200)}`,
+  )
+
+  const techDefaults = (
+    rolesRes.body.data as Array<{ name: string; defaultPermissions?: Record<string, string> }>
+  ).find((r) => r.name === 'Technician')?.defaultPermissions
+  assert(techDefaults?.['Raise ticket'], 'Technician defaultPermissions missing from GET /api/roles')
+
+  const resetTech = await call(`/api/roles/${roleIdByName.Technician}/permissions/reset`, {
+    method: 'POST',
+    headers: auth,
+  })
+  assert(
+    resetTech.status === 200 && resetTech.body.data?.permissions?.['Raise ticket'] === 'vc....',
+    `reset Technician failed: ${JSON.stringify(resetTech.body).slice(0, 200)}`,
+  )
+  console.log('OK Admin locked + reset to defaults')
+
+  const amcLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9879060013', password: 'Password123' }),
+  })
+  assert(amcLogin.status === 200 && amcLogin.body.data?.token, 'AMC login for upload gate')
+  const amcAuth = { Authorization: `Bearer ${amcLogin.body.data.token as string}` }
+  const amcForm = new FormData()
+  amcForm.append('file', new Blob(['amc-photo'], { type: 'image/jpeg' }), 'amc.jpg')
+  const amcUpload = await fetch(`${base}/api/uploads`, {
+    method: 'POST',
+    headers: amcAuth,
+    body: amcForm,
+  })
+  const amcUploadBody = await amcUpload.json().catch(() => ({}))
+  assert(
+    amcUpload.status === 403 && amcUploadBody.code === 'FORBIDDEN',
+    `expected AMC upload 403: ${JSON.stringify(amcUploadBody).slice(0, 200)}`,
+  )
+  console.log('OK upload gated for view-only role')
+
+  const badRoleId = await call('/api/users', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      fullName: `Smoke Hier Bad ${suffix}`,
+      mobile: `91${suffix}005`,
+      email: `smoke.hier.bad.${suffix}@yopmail.com`,
+      password: 'Password123',
+      roleId: '00000000-0000-4000-8000-000000000099',
+      roadIds: [],
+    }),
+  })
+  assert(
+    badRoleId.status === 404 && badRoleId.body.code === 'NOT_FOUND',
+    `expected invalid roleId 404: ${JSON.stringify(badRoleId.body).slice(0, 200)}`,
+  )
+  console.log('OK invalid roleId 404')
+
+  // Soft-inactivate is preferred for real users; hard-delete smoke hier leftovers so Users UI stays clean
+  const smokeHierIds = [
+    adminCreatesPm.body.data?.id,
+    pmCreatesSame.body.data?.id,
+    pmCreatesTech.body.data?.id,
+  ].filter(Boolean) as string[]
+  if (smokeHierIds.length) {
+    await query(`DELETE FROM user_roads WHERE user_id = ANY($1::uuid[])`, [smokeHierIds])
+    await query(`DELETE FROM users WHERE id = ANY($1::uuid[])`, [smokeHierIds])
+  }
+  console.log('OK smoke hierarchy users cleaned up')
 
   console.log('\nDomain write checks passed')
   server.close()
