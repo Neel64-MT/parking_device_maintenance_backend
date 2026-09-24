@@ -1,4 +1,4 @@
--- Phase 37: Issue master hard-delete for Technician, Engineer, Project manager
+-- Phase 36: Issue master hard-delete for Technician, Engineer, Project manager
 -- (Admin already has can_delete). Soft-deactivate remains for in-use records.
 UPDATE role_permissions rp
 SET can_delete = TRUE
