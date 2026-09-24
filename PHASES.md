@@ -354,27 +354,7 @@
 
 **Done when:** smoke passes; FRONTEND CHANGE REQUIRED — Detail Save → assign API; Hand to → technicians lookup
 
-## Phase 36 — Hierarchical role-based user creation
-
-**Status:** Complete
-
-**Objective:** Enforce privilege hierarchy on user create and role assign so callers with Users `c`/`e` can only assign their own role or roles below them.
-
-**Hierarchy (highest → lowest):** Admin → Project manager → Control room → Engineer → Technician → Site attendant → AMC officer
-
-**APIs:**
-- `POST /api/users` — Users `c` + `assertCanAssignRole` (same/lower OK; higher → `403 FORBIDDEN`)
-- `PATCH /api/users/:id` with `roleId` — Users `e` + same check
-- Unknown `roleId` → `404 NOT_FOUND`
-- Signup unchanged (always Site attendant + Pending)
-
-**Files:** `src/lib/role-hierarchy.ts`, `src/routes/users.ts`, smoke, docs
-
-**Testing:** Admin→PM OK; PM→PM/Technician OK; PM→Admin create/PATCH 403; invalid roleId 404
-
-**Done when:** smoke passes; FRONTEND CHANGE REQUIRED — Users role dropdown filter to same-or-below
-
-## Phase 37 — Part & Issue Master hard delete
+## Phase 36 — Part & Issue Master hard delete
 
 **Status:** Complete
 
@@ -393,7 +373,7 @@
 
 **Done when:** smoke passes; FRONTEND CHANGE REQUIRED — PartMaster Delete → `DELETE /api/parts/:id`; IssueMaster wire delete/deactivate; image zoom/crop stay FE-only
 
-## Phase 38 — Issue Category gap-close
+## Phase 37 — Issue Category gap-close
 
 **Status:** Complete
 
@@ -409,50 +389,3 @@
 **Testing:** unused category delete; used → IN_USE; soft deactivate; tech hard-delete unused; API cleanup (no raw SQL)
 
 **Done when:** smoke passes; FRONTEND CHANGE REQUIRED — `createIssueCategory`, `createIssueSubcategory`, `deleteIssueCategory` in `issues.js` + IssueMaster create/delete UI
-
-## Permission authorization audit (post–Phase 38)
-
-**Status:** Complete (verify-only — option A)
-
-**Objective:** Confirm screen×flag permissions are enforced on APIs; do not rebuild RBAC.
-
-**Findings:** `authorize(screen, flag)` covers nearly all routes; permissions load fresh each request; Roles PATCH persists matrix; FE Roles Save still toast-only. Role hierarchy on user create already Phase 36. Optional later hardening (not done): gate `POST /api/uploads`; hierarchy on Roles matrix PATCH.
-
-**FRONTEND CHANGE REQUIRED:** Roles tab Save → `PATCH /api/roles/:id/permissions`; Create → `POST /api/roles`
-
-## Phase 39 — Permission hierarchy & API hole-close
-
-**Status:** Complete
-
-**Objective:** Tighten Roles matrix edit with the same privilege hierarchy as user create; close remaining FE route and upload gaps; align Engineer with Technician on Parts create/update.
-
-**Backend:**
-- `assertCanManageRolePermissions` in `role-hierarchy.ts` — PATCH `/api/roles/:id/permissions` same-or-below; custom role names → Admin only
-- `POST /api/uploads` — require Raise ticket `c` **or** Update ticket `e` **or** Update ticket `x` (ticket photo flows only)
-- Parts create/update — Technician **or** Engineer name bypass (parity with Issue subcategory edit)
-
-**Frontend:**
-- `canManageRolePermissions` + Roles matrix Save/checkboxes disabled for higher roles
-- `RequirePerm` on `/dashboard` (Dashboard `v`) and `/masters/parts` (Update ticket `v`)
-- Parts nav uses Update ticket `v` (+ Site attendant hide); PartMaster Engineer create/update parity
-
-**Files:** `role-hierarchy.ts`, `roles.ts`, `uploads.ts`, `parts.ts`, FE `users.js`, `Users.jsx`, `routes.jsx`, `nav.js`, `PartMaster.jsx`, docs
-
-**Testing:** Admin can PATCH any hierarchy role; actor cannot PATCH higher role (403); upload without ticket flags → 403; Admin upload still 201; Engineer parts create allowed when matrix lacks Issue master `c`
-
-## Phase 40 — Admin full access + reset defaults
-
-**Status:** Complete
-
-**Objective:** Admin always has full permissions and cannot be edited in the Roles matrix. Other seeded roles can reset to `DEFAULT_ROLE_PERMS`.
-
-**Backend:**
-- Admin matrix forced to `vceaxd` on every screen (`fullAccessPermissions`) at auth load and GET `/api/roles`
-- `PATCH /api/roles/:id/permissions` rejects Admin
-- `POST /api/roles/:id/permissions/reset` restores seeded defaults (hierarchy + Roles `e`); Admin / custom roles without defaults rejected
-- GET roles includes `defaultPermissions`, `permissionsLocked`, `canReset`
-- Migration `016_admin_full_permissions.sql`
-
-**Frontend:** Admin shows “Full access” (no Permissions UI). Other roles: Save + **Reset to defaults**.
-
-**Files:** `permissions.ts`, `roles.ts`, `auth.ts`, migration `016`, FE `Users.jsx` / `users.js` / `data/users.js`, smoke, docs

@@ -3,7 +3,6 @@ import { ApiError, handleApiError } from '../lib/api-error.js'
 import { denyToken, isTokenDenied, verifyAccessToken } from '../lib/auth.js'
 import { query } from '../db/pool.js'
 import type { PermissionFlag, RoadScope, ScreenName } from '../types/api.js'
-import { fullAccessPermissions } from '../lib/permissions.js'
 
 export type AuthUser = {
   id: string
@@ -93,10 +92,6 @@ export async function loadAuthUser(
     ].join('')
   }
 
-  // Admin always has full access — matrix UI is locked; ignore stale DB rows.
-  const effectivePermissions =
-    row.role_name === 'Admin' ? fullAccessPermissions() : permissions
-
   return {
     id: row.id,
     fullName: row.full_name,
@@ -109,7 +104,7 @@ export async function loadAuthUser(
     initials: initialsFromName(row.full_name),
     roadIds: roads.rows.map((r) => r.road_id),
     roadNames: roads.rows.map((r) => r.name),
-    permissions: effectivePermissions,
+    permissions,
     jti,
     tokenExp: exp,
   }
