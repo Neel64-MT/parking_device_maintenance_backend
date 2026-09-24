@@ -18,17 +18,26 @@ export const SCREENS: ScreenName[] = [
 
 export const PERM_FLAGS: PermissionFlag[] = ['v', 'c', 'e', 'a', 'x', 'd']
 
-/** Full matrix — Admin always has every flag on every screen. */
-export function fullAccessPermissions(): Record<string, string> {
-  return Object.fromEntries(SCREENS.map((screen) => [screen, 'vceaxd']))
-}
-
-/** Role permission codes — source of truth for seed and Reset to defaults. */
+/** Role permission codes from frontend users.js */
 export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_roads' | 'assigned_roads'; p: Record<string, string> }> = {
   Admin: {
-    note: 'Full control. At least one admin must always exist. Permissions are fixed and cannot be edited.',
+    note: 'Full control. At least one admin must always exist.',
     scope: 'all_roads',
-    p: fullAccessPermissions(),
+    p: {
+      Dashboard: 'v.....',
+      'Raise ticket': 'vc....',
+      'Update ticket': 'vce.x.',
+      'All tickets': 'vceaxd',
+      'Work report': 'v.....',
+      'Device list': 'vce..d',
+      'Add device': 'vc....',
+      'Device history': 'v.....',
+      'Scan QR': 'v.....',
+      'Issue master': 'vce..d',
+      'Road master': 'vce..d',
+      Users: 'vce..d',
+      'Roles & permissions': 'vce..d',
+    },
   },
   'Project manager': {
     note: 'City-wide ops; can manage users and approve signups; can hard-delete unused Issue/Part masters.',
@@ -144,14 +153,6 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
       'Roles & permissions': '......',
     },
   },
-}
-
-/** Seed / reset matrix for a known role name, or null for custom roles. */
-export function defaultPermissionsForRole(roleName: string): Record<string, string> | null {
-  if (roleName === 'Admin') return fullAccessPermissions()
-  const def = DEFAULT_ROLE_PERMS[roleName]
-  if (!def) return null
-  return { ...def.p }
 }
 
 export function codeToFlags(code: string) {

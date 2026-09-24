@@ -109,8 +109,6 @@ Approval remains `PATCH /api/users/:id` with `status: 'Active'` (and optional `r
 
 Project manager Users permission: `vce...` (view, create, edit). Roles & permissions stay view-only.
 
-Role hierarchy (Phase 36 / 39): Admin → Project manager → Control room → Engineer → Technician → Site attendant → AMC officer. Create/PATCH `roleId` must be same-or-below the actor; higher → `403 FORBIDDEN`. Roles matrix PATCH uses the same order (`assertCanManageRolePermissions`); custom role names → Admin only. Approve-without-role-change unchanged. Signup always Site attendant.
-
 No new signup-request table or approve endpoint.
 
 ---
@@ -273,7 +271,7 @@ Image zoom/crop are frontend-only; `POST /api/uploads` is unchanged.
 
 ---
 
-# Design — Issue Category & Subcategory (Phase 38)
+# Design — Issue Category & Subcategory (Phase 37)
 
 ## Master
 
