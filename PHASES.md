@@ -389,3 +389,21 @@
 **Testing:** unused category delete; used → IN_USE; soft deactivate; tech hard-delete unused; API cleanup (no raw SQL)
 
 **Done when:** smoke passes; FRONTEND CHANGE REQUIRED — `createIssueCategory`, `createIssueSubcategory`, `deleteIssueCategory` in `issues.js` + IssueMaster create/delete UI
+
+## Phase 41 — Multiple issues per ticket; Site attendant Sync & Issue Master
+
+**Status:** Complete
+
+**Objective:** Support multiple category/subcategory pairs per ticket on raise/update/close; grant Site attendant Device Sync and Issue Master CRUD via existing APIs.
+
+**APIs / schema:**
+- `ticket_issues` junction (`017_ticket_issues.sql`) — roles `reported` | `found`; scalars kept as primary
+- Raise/Update/Close accept `issues[]` of `{ categoryId, subCategoryId }` (legacy single pair still works)
+- Detail returns `issuesReported` / `issuesFound` arrays
+- Site attendant: Device list `vc....`, Issue master `vce..d` (`018_site_attendant_device_sync_issue_master.sql`)
+
+**Files:** migrations `017`/`018`, `src/lib/ticket-issues.ts`, `src/routes/tickets.ts`, `src/routes/issues.ts` (IN_USE), `src/lib/permissions.ts`, smoke, docs
+
+**Testing:** multi-issue raise + detail; attendant sync auth (503 unconfigured); attendant Issue master create/delete unused
+
+**Done when:** smoke passes; FRONTEND CHANGE REQUIRED — Raise/Update send `issues[]`; Sync button for Site attendant; IssueMaster CRUD for attendant

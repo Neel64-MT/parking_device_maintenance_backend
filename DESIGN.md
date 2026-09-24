@@ -286,6 +286,25 @@ Image zoom/crop are frontend-only; `POST /api/uploads` is unchanged.
 
 Raise picker stays `GET /api/lookups/issue-categories` (active only).
 
+---
+
+# Design — Multiple issues per ticket (Phase 41)
+
+## Storage
+
+| Table / column | Notes |
+|----------------|-------|
+| `ticket_issues` | `(ticket_id, role reported\|found, category_id, subcategory_id, sort_order)`; UNIQUE per ticket+role+sub |
+| `tickets.reported_*` / `found_*` | Primary (first) issue for backward compatibility |
+
+## API
+
+- Raise / Update / Close: `issues: [{ categoryId, subCategoryId }, …]` preferred; legacy single pair still accepted
+- Detail: `issuesReported` / `issuesFound` arrays `{ categoryId, subCategoryId, category, sub, severity }`
+- Update with `issues` **replaces** found list; omit leaves found unchanged
+
+Site attendant: Device list `vc....` (Sync); Issue master `vce..d`; Add device still denied.
+
 ## Visit cost
 
 ```text
