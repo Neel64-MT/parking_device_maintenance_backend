@@ -304,7 +304,7 @@ async function seed() {
   console.log('Seeding…')
 
   // Clear in dependency order
-  await query('TRUNCATE ticket_event_parts, ticket_assignments, ticket_events, tickets, devices, user_roads, password_reset_tokens, users, role_permissions, roles, issue_subcategories, issue_categories, parts, roads, token_denylist, id_counters RESTART IDENTITY CASCADE')
+  await query('TRUNCATE ticket_event_parts, ticket_assignments, ticket_events, ticket_issues, tickets, devices, user_roads, password_reset_tokens, users, role_permissions, roles, issue_subcategories, issue_categories, parts, roads, token_denylist, id_counters RESTART IDENTITY CASCADE')
 
   const roleIds: Record<string, string> = {}
   for (const [name, def] of Object.entries(DEFAULT_ROLE_PERMS)) {

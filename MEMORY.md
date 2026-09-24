@@ -24,10 +24,11 @@
 - Phase 35 — Ticket assign harden: transactional, eligible assignee, idempotent, trail response; technicians lookup includes Engineer
 - Phase 36 — Part/Issue hard delete: `DELETE /api/parts/:id` + Issue master `d` for Technician/Engineer/PM; used → `409 IN_USE` (deactivate)
 - Phase 37 — Issue category gap-close: `DELETE /api/issues/categories/:id` + IN_USE; name max 120; sub create parent active check
+- Phase 41 — Multi-issue tickets (`ticket_issues`); Site attendant Device Sync + Issue master CRUD
 
 ## Currently Working On
 
-- (idle — Phase 37 complete)
+- (idle — Phase 41 complete)
 
 ## Pending
 
@@ -35,7 +36,9 @@
 
 - Feature screens still on mocks / partial wiring
 - PartMaster: Delete → `DELETE /api/parts/:id`; on `409 IN_USE` toast deactivate instead; Tech/Engineer/PM/Admin may delete unused
-- IssueMaster: wire live APIs; add `createIssueCategory` / `createIssueSubcategory` / `deleteIssueCategory`; Delete unused category/sub → `DELETE …/categories|subcategories/:id`; used → deactivate
+- IssueMaster: wire live APIs; Site attendant now has `vce..d`; add `createIssueCategory` / `createIssueSubcategory` / `deleteIssueCategory`; Delete unused → `DELETE`; used → deactivate
+- Raise/Update/Close: send `issues: [{ categoryId, subCategoryId }, …]`; read `issuesReported` / `issuesFound` on detail (legacy single fields still accepted)
+- DeviceList Sync: Site attendant has Device list `c` — Sync button should show for attendant
 - Image zoom/crop: FE-only (no backend upload change)
 - Wire Scan QR to `GET /api/devices/scan?q=`; if `openTicketId` → ticket detail / update; else raise; on raise `409 OPEN_TICKET_EXISTS` redirect via `details.openTicketId`
 - Wire Sync Device to `POST /api/device-sync`; poll `GET /api/device-sync/latest` or `/:id` for status (Device list done)
@@ -70,7 +73,8 @@
 - Assign / reassign: Control room, Admin, or Project manager only; technicians cannot `/assign` or `handoverToUserId`
 - Assign stays road-only (`assertRoadAccess`) for Control room routing; list/detail/dashboard/reports stay visibility-scoped
 - Device list / export / history are city-wide (no `assigned_roads` filter); open-ticket overlays stay ticket-visibility scoped; create/PATCH keep `assertRoadAccess`; scan + raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician / Engineer)
-- Site attendant: city-wide scan/raise; Technician/Engineer: city-wide scan; Add Update = Admin or assignee only
+- Raise / Update / Close tickets accept `issues: [{ categoryId, subCategoryId }, …]` (legacy single `categoryId`/`subCategoryId` still works); persisted in `ticket_issues` with scalar primary for compat
+- Site attendant: city-wide scan/raise; Device Sync + Issue master CRUD; Technician/Engineer: city-wide scan; Add Update = Admin or assignee only
 - Scan details stay on `GET /api/devices/scan?q=` (no `/scan-details` alias); scan `openTicketId` is not ticket-visibility filtered
 - One open ticket per device means `status <> 'Closed'`; unassigned stored status is `Open` (not `New`); DB partial unique index `idx_tickets_one_open_per_device` (migration `012`); Slot Id uniqueness follows via unique `devices.slot_id`
 - List tab `new` = unassigned non-closed; list may show assigned+`Open` as `Under repair` without DB update
