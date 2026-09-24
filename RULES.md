@@ -105,7 +105,7 @@
 - Admin / Project manager: city-wide ticket visibility (road scope still `all_roads`).
 - Technician: no Work report cost visibility when matrix denies Work report. Cannot assign or reassign (`All tickets` has no `a`); cannot send `handoverToUserId`.
 - Technician / Engineer: Device list includes create (`vc....`) so they may run Device Sync; Add device stays denied.
-- Site attendant: scan + raise on **any** road (field-work bypass); list stays raiser-scoped; cannot assign/close; cannot Device Sync.
+- Site attendant: scan + raise on **any** road (field-work bypass); list stays raiser-scoped; cannot assign/close; may Device Sync (Device list `c`) and Issue master CRUD (`vce..d`); Add device stays denied.
 - Technician: scan any road; update/close only tickets they hold or raised (any road); cannot assign or reassign; list stays assignee/raiser-scoped.
 - Assign / reassign: Control room, Admin, or Project manager only (`assertCanAssignTickets`). Technicians cannot use `/assign` or `handoverToUserId`. Validate assignee eligibility; keep assign + trail insert transactional; same assignee must not duplicate trail rows.
 - Control room: raise/assign; cannot close; list/dashboard visibility is assignee/raiser only; assign uses road access so CR can route tickets they did not raise.

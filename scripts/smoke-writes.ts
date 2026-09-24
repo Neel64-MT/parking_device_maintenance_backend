@@ -489,6 +489,93 @@ async function main() {
   assert(patchUser.status === 200, `user patch failed: ${JSON.stringify(patchUser.body).slice(0, 200)}`)
   console.log('OK user patch')
 
+  // Phase 41 — multi-issue raise + Site attendant Device Sync / Issue master
+  const catsFull = await call('/api/lookups/issue-categories', { headers: auth })
+  assert(catsFull.status === 200 && catsFull.body.data?.length >= 1, 'categories for multi-issue')
+  const cat0 = catsFull.body.data[0]
+  const sub0 = cat0.subs[0]
+  const sub1 = cat0.subs[1] || cat0.subs[0]
+  assert(sub0?.id, 'need subcategory for multi-issue')
+
+  const multiDev = await call('/api/devices', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      roadId,
+      slotNumber: `MI-${suffix}`,
+      installedOn: '2026-09-01',
+      installStatus: 'Working',
+    }),
+  })
+  assert(
+    multiDev.status === 201 && multiDev.body.data?.publicId,
+    `multi-issue device create: ${multiDev.status} ${JSON.stringify(multiDev.body).slice(0, 300)}`,
+  )
+
+  const multiRaise = await call('/api/tickets', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      deviceId: multiDev.body.data.publicId,
+      issues: [
+        { categoryId: cat0.id, subCategoryId: sub0.id },
+        { categoryId: cat0.id, subCategoryId: sub1.id },
+      ],
+      description: 'Smoke multi-issue raise',
+      reporterType: 'Control room',
+    }),
+  })
+  assert(
+    multiRaise.status === 201 && Array.isArray(multiRaise.body.data?.issuesReported),
+    `multi-issue raise failed: ${JSON.stringify(multiRaise.body).slice(0, 300)}`,
+  )
+  assert(multiRaise.body.data.issuesReported.length >= 1, 'issuesReported length')
+  const multiId = multiRaise.body.data.id as string
+
+  const multiDetail = await call(`/api/tickets/${multiId}`, { headers: auth })
+  assert(multiDetail.status === 200, 'multi-issue detail')
+  assert(
+    Array.isArray(multiDetail.body.data?.issuesReported) &&
+      multiDetail.body.data.issuesReported.length >= 1,
+    'detail issuesReported',
+  )
+  console.log('OK multi-issue raise + detail')
+
+  const attendantLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9016374408', password: 'Password123' }),
+  })
+  assert(attendantLogin.status === 200 && attendantLogin.body.data?.token, 'site attendant login')
+  const attAuth = { Authorization: `Bearer ${attendantLogin.body.data.token as string}` }
+
+  const prevTok = process.env.DEVICE_SYNC_API_TOKEN
+  process.env.DEVICE_SYNC_API_TOKEN = ''
+  const attSync = await call('/api/device-sync', {
+    method: 'POST',
+    headers: attAuth,
+    body: '{}',
+  })
+  assert(
+    attSync.status === 503 && attSync.body.code === 'DEVICE_SYNC_NOT_CONFIGURED',
+    `attendant device-sync should pass auth (503 not configured): ${JSON.stringify(attSync.body).slice(0, 200)}`,
+  )
+  if (prevTok === undefined) delete process.env.DEVICE_SYNC_API_TOKEN
+  else process.env.DEVICE_SYNC_API_TOKEN = prevTok
+  console.log('OK site attendant device-sync authorized')
+
+  const attCat = await call('/api/issues/categories', {
+    method: 'POST',
+    headers: attAuth,
+    body: JSON.stringify({ name: `Att Smoke Cat ${suffix}` }),
+  })
+  assert(attCat.status === 201 && attCat.body.data?.id, `attendant create category: ${JSON.stringify(attCat.body).slice(0, 200)}`)
+  const attDel = await call(`/api/issues/categories/${attCat.body.data.id}`, {
+    method: 'DELETE',
+    headers: attAuth,
+  })
+  assert(attDel.status === 200, `attendant delete unused category: ${JSON.stringify(attDel.body).slice(0, 200)}`)
+  console.log('OK site attendant Issue master CRUD')
+
   console.log('\nDomain write checks passed')
   server.close()
   await closeDb()

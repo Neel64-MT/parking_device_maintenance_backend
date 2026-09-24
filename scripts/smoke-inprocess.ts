@@ -1116,15 +1116,35 @@ async function main() {
   const syncUnauth = await call('/api/device-sync', { method: 'POST', body: '{}' })
   assert(syncUnauth.status === 401, 'device-sync without auth must be 401')
 
+  const prevSyncToken = process.env.DEVICE_SYNC_API_TOKEN
+  process.env.DEVICE_SYNC_API_TOKEN = ''
+
   const syncTech = await call('/api/device-sync', {
     method: 'POST',
     headers: techAuth,
     body: '{}',
   })
-  assert(syncTech.status === 403, 'tech must not start device-sync')
+  // Technician has Device list c (migration 014) — authz passes; unconfigured → 503
+  assert(
+    syncTech.status === 503 && syncTech.body.code === 'DEVICE_SYNC_NOT_CONFIGURED',
+    `tech device-sync should be authorized (503): ${JSON.stringify(syncTech.body).slice(0, 200)}`,
+  )
 
-  const prevSyncToken = process.env.DEVICE_SYNC_API_TOKEN
-  process.env.DEVICE_SYNC_API_TOKEN = ''
+  const attSyncLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9016374408', password: 'Password123' }),
+  })
+  assert(attSyncLogin.status === 200 && attSyncLogin.body.data?.token, 'attendant login for sync')
+  const attSyncAuth = { Authorization: `Bearer ${attSyncLogin.body.data.token as string}` }
+  const syncAtt = await call('/api/device-sync', {
+    method: 'POST',
+    headers: attSyncAuth,
+    body: '{}',
+  })
+  assert(
+    syncAtt.status === 503 && syncAtt.body.code === 'DEVICE_SYNC_NOT_CONFIGURED',
+    `site attendant device-sync should be authorized (503): ${JSON.stringify(syncAtt.body).slice(0, 200)}`,
+  )
 
   const syncNoToken = await call('/api/device-sync', {
     method: 'POST',
