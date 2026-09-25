@@ -27,6 +27,9 @@
 - Phase 38 — Persistent new-ticket notifications + browser Web Push; role fan-out, unread/read APIs, VAPID subscriptions
 - Phase 40 — Multi-issue ticket contract parity: `issues[]` accepted on raise/update/close, `ticket_issues` persistence, detail arrays, and raised-event photo attachment
 - Frontend Phase 39 — NotificationBell, explicit browser permission/subscription UI, service-worker click relay, and shared Tickets/All Tickets unread badges consuming the Phase 38 APIs
+- Phase 38 — Persistent new-ticket notifications + browser Web Push; role fan-out, unread/read APIs, VAPID subscriptions
+- Phase 40 — Multi-issue ticket contract parity: `issues[]` accepted on raise/update/close, `ticket_issues` persistence, detail arrays, and raised-event photo attachment
+- Frontend Phase 39 — NotificationBell, explicit browser permission/subscription UI, service-worker click relay, and shared Tickets/All Tickets unread badges consuming the Phase 38 APIs
 
 ## Currently Working On
 

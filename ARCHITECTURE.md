@@ -71,6 +71,7 @@ backend/
 | Uploads | multer → local disk |
 | QR labels | `qrcode` PNG |
 | Browser push | `web-push` + VAPID; persistent notifications/subscriptions in PostgreSQL |
+| Browser push | `web-push` + VAPID; persistent notifications/subscriptions in PostgreSQL |
 
 No Nest, Prisma, or Next.js file-based routing. Express routers live in `src/routes/*.ts`.
 
