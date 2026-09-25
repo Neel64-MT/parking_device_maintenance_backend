@@ -22,16 +22,19 @@
 - Phase 30 — Add Update: require assignee; Admin or assignee only (`NOT_ASSIGNED_USER`); required `visitedBy` (Technician|Engineer); Engineer role
 - Phase 31 — Work report API gap-close: road filter fix, Engineer actors, real days, view-shaped tickets, filtered export
 - Phase 35 — Ticket assign harden: transactional, eligible assignee, idempotent, trail response; technicians lookup includes Engineer
-- Phase 36 — Role hierarchy user create: same-or-below assign; higher → `403 FORBIDDEN`; helper `role-hierarchy.ts`
-- Phase 37 — Part/Issue hard delete: `DELETE /api/parts/:id` + Issue master `d` for Technician/Engineer/PM; used → `409 IN_USE` (deactivate)
-- Phase 38 — Issue category gap-close: `DELETE /api/issues/categories/:id` + IN_USE; name max 120; sub create parent active check
-- Permission auth audit — screen×flag `authorize()` already enforces APIs; no RBAC rewrite; FE Roles Save wired in Phase 36; Phase 39 closed uploads gate + Roles-matrix hierarchy
-- Phase 39 — Roles matrix hierarchy (`assertCanManageRolePermissions`); uploads gated to Raise `c` / Update `e`|`x`; Parts create/update Engineer parity with Technician
-- Phase 40 — Admin full locked matrix; `POST …/permissions/reset`; GET roles returns `defaultPermissions`
+- Phase 36 — Part/Issue hard delete: `DELETE /api/parts/:id` + Issue master `d` for Technician/Engineer/PM; used → `409 IN_USE` (deactivate)
+- Phase 37 — Issue category gap-close: `DELETE /api/issues/categories/:id` + IN_USE; name max 120; sub create parent active check
+- Phase 38 — Persistent new-ticket notifications + browser Web Push; role fan-out, unread/read APIs, VAPID subscriptions
+- Phase 40 — Multi-issue ticket contract parity: `issues[]` accepted on raise/update/close, `ticket_issues` persistence, detail arrays, and raised-event photo attachment
+- Frontend Phase 39 — NotificationBell, explicit browser permission/subscription UI, service-worker click relay, and shared Tickets/All Tickets unread badges consuming the Phase 38 APIs
+- Phase 38 — Persistent new-ticket notifications + browser Web Push; role fan-out, unread/read APIs, VAPID subscriptions
+- Phase 40 — Multi-issue ticket contract parity: `issues[]` accepted on raise/update/close, `ticket_issues` persistence, detail arrays, and raised-event photo attachment
+- Frontend Phase 39 — NotificationBell, explicit browser permission/subscription UI, service-worker click relay, and shared Tickets/All Tickets unread badges consuming the Phase 38 APIs
 
 ## Currently Working On
 
-- (idle — permission auth audit closed; no rewrite)
+- (idle — Phase 37 complete)
+- (idle — backend Phase 38 and frontend Phase 39 notification integration complete)
 
 ## Pending
 
@@ -57,13 +60,19 @@
 - Hide technician reassign / handover; only Control room, Admin, Project manager assign
 - Scan QR: do not treat road-mismatch as expected for Site attendant / Technician (API allows any road for scan/raise)
 - Signup success copy: “Admin” → “Admin or Project manager” (optional; API already unlocks Approve for PM)
-- Users create/edit: filter role dropdown to same-or-below actor rank (Admin → … → AMC officer); show API error if higher role sent; backend remains authority
-- Roles & permissions tab: wire Save → `PATCH /api/roles/:id/permissions`; Create → `POST /api/roles`; load matrix from `GET /api/roles` (stop toast-only preview); PM stays view-only
 - Parts / update-ticket UI: PartChips send part UUIDs (not names); `cost` is labour-only — do not add master part prices into `cost`; show amounts from Parts/lookups APIs
 - Wire Edit/Add device Save to `PATCH`/`POST /api/devices` with `slotIdentifier`, `qrNumber`, `slotNumber`, `roadId`, etc.; keep Slot Id read-only and do not rely on writing `slotId`
+- Raise/Update/Close: send `issues: [{ categoryId, subCategoryId }, …]`; detail reads `issuesReported` / `issuesFound`; raised photos use the returned `eventId`
 
 ## Important Decisions
 
+- New-ticket notifications: persistent rows created only after successful ticket/event/assignment writes; failures are logged but never change the ticket response
+- Notification recipients: Active `Admin` / `Project manager` / `Control room` with `All tickets v`; no hardcoded user IDs and no new permission screen
+- Notification APIs scope every read/update to the authenticated recipient; browser permission stays in the browser, subscription keys stay server-side
+- Web Push uses `web-push` + VAPID and existing `setImmediate`; no WebSocket/SSE/queue. `404`/`410` deletes expired endpoints; `push_sent_at` prevents repeat sends
+- Control Room notification links preserve existing road/ownership access; notification fan-out does not widen ticket list authorization
+- Multi-issue tickets prefer `issues[]`; legacy single category/subcategory remains accepted; `ticket_issues` stores ordered reported/found rows while scalar fields retain the primary pair
+- Ticket raise returns `eventId` so the frontend can attach photos through the raised-event endpoint without changing ticket creation semantics
 - Add Update: require `assignee_id`; only Admin or assignee; `NOT_ASSIGNED_USER` for others (QR user B); no auto-claim; no `assertTicketAccess` on this path (clear toast)
 - `visitedBy` required on Add Update; Active Technician or Engineer; stored in `ticket_events.meta`
 - Engineer role: Technician-like permissions; eligible Visited By; field-work road bypass like Technician
@@ -98,7 +107,6 @@
 - Duplicate raise 409 includes both `ticketId` and `openTicketId`
 - Device lat/lng are TEXT strings; seed includes Ahmedabad-area dummies
 - PM Users permission: `vce...` (approve Pending via existing PATCH); Roles matrix remains view-only
-- Role hierarchy: Admin → Project manager → Control room → Engineer → Technician → Site attendant → AMC officer; create/PATCH roleId same-or-below only
 - No separate signup-request table
 - Control room is scoped like other non-privileged roles for viewing (per product requirement)
 - Ticket assign (Phase 35): transactional `POST …/assign`; eligible Active Technician/Engineer/CR/PM; idempotent same assignee; response `{ id, assigneeId, assigneeName, assignmentTrail }`; detail trail from `ticket_assignments`; lookups/technicians includes Engineer

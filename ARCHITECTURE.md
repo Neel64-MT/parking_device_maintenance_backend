@@ -70,15 +70,18 @@ backend/
 | Auth | JWT Bearer + email/mobile password |
 | Uploads | multer → local disk |
 | QR labels | `qrcode` PNG |
+| Browser push | `web-push` + VAPID; persistent notifications/subscriptions in PostgreSQL |
+| Browser push | `web-push` + VAPID; persistent notifications/subscriptions in PostgreSQL |
 
 No Nest, Prisma, or Next.js file-based routing. Express routers live in `src/routes/*.ts`.
 
 ## Key Domains
 
-- **Auth / Users / Roles** — Email or mobile + password login, forgot/reset password, permission matrix, road assignments; user create/role assign constrained by privilege hierarchy ([`src/lib/role-hierarchy.ts`](src/lib/role-hierarchy.ts))
+- **Auth / Users / Roles** — Email or mobile + password login, forgot/reset password, permission matrix, road assignments
 - **Masters** — Roads, issue categories/subs (hard-delete unused category/sub via `/api/issues`; used → `409 IN_USE`), parts (with `amount`; CRUD + hard-delete unused via `/api/parts` and Issue master flags including `d` for Tech/Engineer/PM/Admin)
 - **Devices** — Inventory, QR scan, derived operational status from open tickets
-- **Tickets** — Lifecycle (`Open` → assign/`Under repair` → `Waiting for spare` optional → `Closed`), events, visit cost = labour + parts master, photos; multiple issues via `ticket_issues` (reported/found) with scalar primary for compat
+- **Tickets** — Lifecycle (`Open` → assign/`Under repair` → `Waiting for spare` optional → `Closed`), events, visit cost = labour + parts master, photos
+- **Notifications** — Persistent per-user new-ticket alerts, unread/read state, VAPID browser subscriptions and non-blocking Web Push delivery
 - **Reports** — Dashboard aggregates, work report by period
 
 ## Password reset architecture
@@ -183,8 +186,6 @@ Admin or Project manager (Users v/c/e)
 
 Project manager Users permission: `vce...` (migration `006_pm_users_edit.sql`).
 
-Role hierarchy ([`src/lib/role-hierarchy.ts`](src/lib/role-hierarchy.ts)): Admin → Project manager → Control room → Engineer → Technician → Site attendant → AMC officer. `POST /api/users` and `PATCH` with `roleId` allow same-or-below only; higher → `403 FORBIDDEN`. Same order gates `PATCH /api/roles/:id/permissions` via `assertCanManageRolePermissions` (custom role names → Admin only). `POST /api/uploads` requires Raise ticket `c` or Update ticket `e`/`x`.
-
 ## Ticket statuses
 
 ```text
@@ -227,6 +228,7 @@ List/export row `status` and tiles use presentation helpers (DB unchanged):
 |-------|---------|
 | `daysOpen` | Whole days from `raised_at` to `closed_at` (or now if still open) |
 | `daysAfterClose` | Whole days since `closed_at`, or `null` if not closed |
+| `updates` | Count of `visit_open`, `visit_resolved`, `waiting_spare`, and `reclassified` events; raised/assigned/closed excluded; no actor-role filter |
 
 List-only. Ticket detail still uses a “Days open” header fact, not `daysAfterClose`.
 
@@ -344,3 +346,30 @@ APIs: `POST /api/device-sync`, `GET /api/device-sync/latest`, `GET /api/device-s
 Synced locations are written into the existing `roads` table (single source of truth). `GET /api/roads` and `GET /api/lookups/roads` are thin reads of that table — no separate sync-roads API.
 
 Field mapping (external → DB): `slot.id` → `slot_id` (**immutable** match key; **only required** sync field), `slot.slot_label` → `slot_number` (fallback `String(slotId)`), `mac_address` → `slot_identifier` (optional; null does not wipe existing), `qr_number` → `qr_code` (optional; placeholder `UNLINKED-SLOT-{slotId}` if empty), `parking_location` → `roads` / `road_id`. Same Slot Id + changed MAC/QR updates the existing row; duplicates prevented by unique `slot_id`. Ticket/device APIs expose Slot Id as `deviceId` when available (`deviceDisplayId`); `GET /api/devices/:deviceId` resolves by `public_id`, UUID, or Slot Id text (`deviceLookupWhere`). Device CSV “Device ID” prefers Slot Id the same way.
+
+## New-ticket notifications and browser push
+
+```text
+POST /api/tickets succeeds
+  → ticket + raised event + optional assignment are written
+  → notifications service resolves eligible Active recipients
+  → Admin / Project manager / Control room with All tickets v
+  → one `ticket.raised` row per recipient (unique event key)
+  → optional `/tickets/TK-xxxx` link uses existing road/ownership access
+  → setImmediate Web Push delivery when VAPID is configured
+       → send to every active browser subscription for that recipient
+       → 404/410 → delete expired subscription
+       → success → set notifications.push_sent_at
+```
+
+Notification persistence runs after ticket creation and is wrapped separately by the ticket route. A notification database or push failure is logged but never changes the successful `201 Ticket raised` response or rolls back the ticket. Failed ticket requests never enter notification creation.
+
+| Piece | Location |
+|-------|----------|
+| Migration | `src/db/migrations/019_notifications.sql` (`notifications`, `push_subscriptions`) |
+| Service | `src/lib/notifications.ts` |
+| Routes | `src/routes/notifications.ts` mounted at `/api/notifications` |
+| Ticket hook | `src/routes/tickets.ts` after raised event/assignment writes |
+| Config | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` |
+
+No WebSocket, SSE, service worker, external queue, or second permission system is introduced. Web Push reuses the existing in-process `setImmediate` background pattern. The frontend owns browser permission and must provide its own service worker; the backend only stores the resulting subscription and sends encrypted Web Push payloads. The sibling frontend Phase 39 integration now consumes these APIs, relays notification IDs for authenticated read-state updates, and renders the shared unread badges.
