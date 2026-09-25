@@ -35,6 +35,7 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 11. **Lookups** — Roads, technicians, parts (with amount), issue categories, road slots
 12. **Uploads** — Multipart photos for tickets/devices
 13. **Exports** — CSV for tickets, devices, roads, work report
+14. **Notifications** — Persistent new-ticket alerts, unread/read APIs, VAPID browser subscriptions, and non-blocking Web Push for eligible Admin / Project manager / Control room users
 
 ### QR scan & raise-ticket requirements
 
@@ -66,6 +67,13 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 - Synced locations upsert into `roads` (single source of truth). Existing `GET /api/roads` / `GET /api/lookups/roads` already return them — no sync-specific road API.
 
 **FRONTEND:** Device list road filter reads `GET /api/lookups/roads` (same `roads` table) and refetches after sync. **Still FRONTEND CHANGE REQUIRED:** Road master / TicketList mocks → `/api/roads` or lookups when authorized.
+
+### Multi-issue ticket contract
+
+- Raise, update, and close accept `issues: [{ categoryId, subCategoryId }, …]`; legacy single `categoryId` / `subCategoryId` remains accepted.
+- `ticket_issues` stores ordered `reported` and `found` issue rows; scalar ticket columns retain the primary pair for compatibility.
+- Ticket detail returns `issuesReported` / `issuesFound`; raise returns the raised `eventId` for the photo-attachment flow.
+- Issue master hard-delete usage checks include `ticket_issues`.
 
 ### Ticket status requirements
 
@@ -139,6 +147,19 @@ Canonical `tickets.status` values (exactly four; never `New`):
 
 **FRONTEND CHANGE REQUIRED:** Replace `REPORT` mock in WorkReport.jsx with `GET /api/reports/work`; Export → `/work/export`; Person options from lookups; gate page with Work report `v`.
 
+### New-ticket notification requirements
+
+- A successful `POST /api/tickets` creates one persistent `ticket.raised` notification for every Active user whose role is `Admin`, `Project manager`, or `Control room` and whose existing `All tickets` permission has `v`.
+- Notification failure must not change or roll back a successful ticket response. Failed ticket requests must not create notifications.
+- Stored content includes ticket reference, authorized detail link when applicable, road/slot/device, reported issue, raiser, and created time. It excludes description, photos, cost, email, and mobile.
+- `GET /api/notifications` lists only the authenticated user's rows; `/unread-count`, `/:id/read`, and `/read-all` enforce the same ownership boundary.
+- `GET /api/notifications/push-config` exposes VAPID availability/public key and whether the user has a stored subscription. Browser permission remains browser-controlled.
+- `PUT` / `DELETE /api/notifications/push-subscriptions` manage multiple browser/device subscriptions; duplicate endpoints update in place and expired `404`/`410` push endpoints are removed.
+- Web Push runs through the existing in-process `setImmediate` pattern. No WebSocket, SSE, service worker, or external queue is implemented by the backend.
+- Notification event uniqueness prevents duplicate rows on repeated processing. `push_sent_at` prevents a delivered notification from being sent again.
+
+**FRONTEND INTEGRATION COMPLETE:** the sibling frontend now owns the browser service worker, explicit permission action, VAPID `applicationServerKey` subscription, authenticated read-state relay, and shared unread badges on Tickets parent and All Tickets child. It uses the existing `/api/notifications` contract without adding a menu item or realtime transport.
+
 ### Signup approval requirements
 
 - `POST /api/auth/signup` creates `Pending` users.
@@ -171,6 +192,7 @@ PostgreSQL via discrete env vars: `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSW
 |--------|-----|
 | Dashboard | `GET /api/dashboard` |
 | Tickets | `/api/tickets*` |
+| Ticket notifications | `/api/notifications*` + service-worker Web Push |
 | Devices | `/api/devices*`, especially `GET /api/devices/scan?q=`; Sync Device → `POST /api/device-sync` + status poll |
 | Roads | `/api/roads*` |
 | Issue master | `/api/issues*` |

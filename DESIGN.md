@@ -429,3 +429,70 @@ QR fetch: `GET /qr-codes?status=all&page=N&per_page=50`. Page count from `data.p
 ## Roads after sync
 
 Device Sync upserts parking locations into `roads` (single source of truth). No separate sync-roads endpoint — `GET /api/roads` and `GET /api/lookups/roads` simply read that table.
+
+---
+
+# Design — New-ticket notifications and Web Push (Phase 38)
+
+## Storage
+
+| Table | Purpose |
+|-------|---------|
+| `notifications` | One persistent event per recipient, related ticket, read state, and accepted Web Push timestamp |
+| `push_subscriptions` | Multiple browser/device endpoints per user with `p256dh` / `auth` keys |
+
+`notifications` is unique on `(recipient_user_id, type, related_entity_type, related_entity_id)`. `push_subscriptions.endpoint` is unique, so registering the same browser endpoint updates keys instead of creating a duplicate.
+
+## Recipients and authorization
+
+- Event type: `ticket.raised`
+- Recipients: Active users whose current role is `Admin`, `Project manager`, or `Control room` and whose existing `All tickets` permission has `v`
+- API access: JWT + `authorize('All tickets', 'v')`
+- No individual user IDs and no new permission screen
+- Notification reads/updates always include `recipient_user_id = current user`; another user's notification returns `404`
+
+The notification link follows existing road scope / raiser / assignee access. It does not widen ticket list or detail authorization.
+
+## Ticket flow
+
+1. `POST /api/tickets` writes the ticket, raised event, and optional initial assignment.
+2. Only after those writes succeed, `createNewTicketNotifications(ticketId)` resolves the actual ticket/device/issue/raiser fields.
+3. Recipient rows are inserted in a notification-only transaction with `ON CONFLICT DO NOTHING`.
+4. The ticket route catches and logs notification errors independently; ticket creation still returns its original success response.
+5. Failed ticket creation never calls the notification service.
+
+## Notification content
+
+Stored `data` contains ticket reference/link, road/slot/device identity, reported category/subcategory/severity, raiser, and created time. It excludes description, photos, costs, email, and mobile.
+
+Browser payload:
+
+```json
+{
+  "notification": {
+    "title": "New ticket raised",
+    "body": "New ticket TK-1042 has been raised for Slot 42 on Science City.",
+    "tag": "notification.<uuid>",
+    "data": { "url": "/tickets/TK-1042" }
+  },
+  "data": {
+    "notificationId": "<uuid>",
+    "type": "ticket.raised",
+    "ticketId": "TK-1042"
+  }
+}
+```
+
+## Web Push lifecycle
+
+- `GET /api/notifications/push-config` returns `{ available, publicKey, registered }`. Browser permission remains browser-owned and is never stored.
+- `PUT /api/notifications/push-subscriptions` validates a public HTTPS endpoint and browser keys, then upserts by endpoint for the current user.
+- `DELETE /api/notifications/push-subscriptions/:id` removes only the current user's subscription.
+- Configured delivery uses `setImmediate` + `web-push`; there is no new queue or WebSocket/SSE system.
+- Push service `404` / `410` deletes the expired subscription. Other errors are logged without endpoint/key contents.
+- `push_sent_at` is set after at least one push is accepted, preventing a later delivery pass from sending that notification again.
+- Without VAPID configuration, persistent in-app notifications still work and push delivery is skipped.
+
+## Frontend
+
+**FRONTEND INTEGRATION COMPLETE:** the sibling frontend owns the service worker, explicit permission action, VAPID subscription, authenticated read-state relay, and the shared unread badges on the Tickets parent and All Tickets child. No new menu item or realtime transport was added.

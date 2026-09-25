@@ -5,6 +5,7 @@
 import 'dotenv/config'
 import { createApp } from '../src/app.js'
 import { closeDb, query } from '../src/db/pool.js'
+import { deliverNotificationPush } from '../src/lib/notifications.js'
 
 const app = createApp()
 const server = app.listen(0)
@@ -75,7 +76,220 @@ async function main() {
     `ticket raise failed: ${ticket.status} ${JSON.stringify(ticket.body).slice(0, 300)}`,
   )
   const ticketId = ticket.body.data.id as string
+  const ticketUuid = ticket.body.data.uuid as string
   console.log('OK ticket raise', ticketId)
+
+  // New-ticket notifications: role fan-out, read state, ownership, subscriptions, push cleanup.
+  const pmNotificationLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9825012345', password: 'Password123' }),
+  })
+  const crNotificationLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '7990011002', password: 'Password123' }),
+  })
+  const techNotificationLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9099941128', password: 'Password123' }),
+  })
+  assert(
+    pmNotificationLogin.status === 200 && crNotificationLogin.status === 200 && techNotificationLogin.status === 200,
+    'notification role logins failed',
+  )
+  const pmNotificationAuth = {
+    Authorization: `Bearer ${pmNotificationLogin.body.data.token as string}`,
+  }
+  const crNotificationAuth = {
+    Authorization: `Bearer ${crNotificationLogin.body.data.token as string}`,
+  }
+  const techNotificationAuth = {
+    Authorization: `Bearer ${techNotificationLogin.body.data.token as string}`,
+  }
+
+  const notificationsUnauth = await call('/api/notifications')
+  assert(notificationsUnauth.status === 401, 'notifications without auth must be 401')
+
+  const adminNotifications = await call('/api/notifications?limit=100', { headers: auth })
+  assert(adminNotifications.status === 200 && Array.isArray(adminNotifications.body.data), 'admin notifications list')
+  const adminNotification = adminNotifications.body.data.find(
+    (row: { data?: { ticketId?: string } }) => row.data?.ticketId === ticketId,
+  )
+  assert(adminNotification?.id, 'Admin must receive new-ticket notification')
+  assert(
+    adminNotification.data?.device?.road && adminNotification.data?.device?.slot,
+    'notification must include device location',
+  )
+  assert(
+    adminNotification.data?.issue?.category && adminNotification.data?.issue?.subCategory,
+    'notification must include issue information',
+  )
+  assert(
+    adminNotification.data?.raisedBy?.name === 'Admin User' && adminNotification.data?.createdAt,
+    'notification must include raiser and created time',
+  )
+  assert(adminNotification.data?.url === `/tickets/${ticketId}`, 'notification detail reference')
+
+  const pmNotifications = await call('/api/notifications?limit=100', { headers: pmNotificationAuth })
+  const crNotifications = await call('/api/notifications?limit=100', { headers: crNotificationAuth })
+  const techNotifications = await call('/api/notifications?limit=100', { headers: techNotificationAuth })
+  assert(
+    pmNotifications.body.data?.some((row: { data?: { ticketId?: string } }) => row.data?.ticketId === ticketId),
+    'Project manager must receive new-ticket notification',
+  )
+  assert(
+    crNotifications.body.data?.some((row: { data?: { ticketId?: string } }) => row.data?.ticketId === ticketId),
+    'Control room must receive new-ticket notification',
+  )
+  assert(
+    !techNotifications.body.data?.some((row: { data?: { ticketId?: string } }) => row.data?.ticketId === ticketId),
+    'Technician must not receive new-ticket notification',
+  )
+
+  const eligibleRecipients = await query<{ n: number }>(
+    `SELECT COUNT(DISTINCT u.id)::int AS n
+     FROM users u
+     JOIN roles r ON r.id = u.role_id
+     JOIN role_permissions rp ON rp.role_id = r.id
+     WHERE u.status = 'Active'
+       AND r.name IN ('Admin', 'Project manager', 'Control room')
+       AND rp.screen = 'All tickets' AND rp.can_view = TRUE`,
+  )
+  const notificationRecipients = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n
+     FROM notifications
+     WHERE related_entity_id = $1 AND type = 'ticket.raised'`,
+    [ticketUuid],
+  )
+  assert(
+    (eligibleRecipients.rows[0]?.n ?? 0) >= 3 &&
+      notificationRecipients.rows[0]?.n === eligibleRecipients.rows[0]?.n,
+    'all eligible target-role users must receive exactly one notification',
+  )
+
+  const adminUnreadBefore = await call('/api/notifications/unread-count', { headers: auth })
+  const crossUserRead = await call(
+    `/api/notifications/${adminNotification.id as string}/read`,
+    { method: 'PATCH', headers: pmNotificationAuth },
+  )
+  assert(crossUserRead.status === 404, 'user cannot mark another user notification read')
+  const adminRead = await call(`/api/notifications/${adminNotification.id as string}/read`, {
+    method: 'PATCH',
+    headers: auth,
+  })
+  assert(adminRead.status === 200 && adminRead.body.data?.isRead, 'mark notification read')
+  const adminUnreadAfter = await call('/api/notifications/unread-count', { headers: auth })
+  assert(
+    adminUnreadAfter.body.data?.count === adminUnreadBefore.body.data?.count - 1,
+    'unread count must decrease after mark read',
+  )
+  const readAll = await call('/api/notifications/read-all', { method: 'PATCH', headers: auth })
+  const adminUnreadCleared = await call('/api/notifications/unread-count', { headers: auth })
+  assert(readAll.status === 200 && adminUnreadCleared.body.data?.count === 0, 'mark all notifications read')
+  console.log('OK notification fan-out + read APIs')
+
+  const pushConfig = await call('/api/notifications/push-config', { headers: pmNotificationAuth })
+  assert(
+    pushConfig.status === 200 && typeof pushConfig.body.data?.available === 'boolean',
+    'push config availability',
+  )
+  const invalidSubscription = await call('/api/notifications/push-subscriptions', {
+    method: 'PUT',
+    headers: pmNotificationAuth,
+    body: JSON.stringify({
+      endpoint: 'http://127.0.0.1/internal-push',
+      keys: { p256dh: 'smoke-p256dh-key', auth: 'smoke-auth-key' },
+    }),
+  })
+  assert(
+    invalidSubscription.status === 400 && invalidSubscription.body.code === 'VALIDATION_ERROR',
+    'private/non-HTTPS push endpoint must be rejected',
+  )
+  const expiredEndpoint = `https://push.example.test/expired-${suffix}`
+  const okEndpoint = `https://push.example.test/ok-${suffix}`
+  const expiredSubscription = await call('/api/notifications/push-subscriptions', {
+    method: 'PUT',
+    headers: pmNotificationAuth,
+    body: JSON.stringify({
+      endpoint: expiredEndpoint,
+      keys: { p256dh: 'smoke-p256dh-key', auth: 'smoke-auth-key' },
+    }),
+  })
+  assert(expiredSubscription.status === 200 && expiredSubscription.body.data?.id, 'push subscription register')
+  const updatedSubscription = await call('/api/notifications/push-subscriptions', {
+    method: 'PUT',
+    headers: pmNotificationAuth,
+    body: JSON.stringify({
+      endpoint: expiredEndpoint,
+      keys: { p256dh: 'smoke-p256dh-key-updated', auth: 'smoke-auth-key-updated' },
+    }),
+  })
+  assert(updatedSubscription.body.data?.id === expiredSubscription.body.data?.id, 'push subscription upsert')
+  const duplicateSubscriptions = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM push_subscriptions WHERE endpoint = $1`,
+    [expiredEndpoint],
+  )
+  assert(duplicateSubscriptions.rows[0]?.n === 1, 'duplicate push endpoint must update in place')
+  const foreignRemove = await call(
+    `/api/notifications/push-subscriptions/${expiredSubscription.body.data.id as string}`,
+    { method: 'DELETE', headers: auth },
+  )
+  assert(foreignRemove.status === 404, 'user cannot remove another user push subscription')
+
+  const pmNotification = pmNotifications.body.data.find(
+    (row: { data?: { ticketId?: string } }) => row.data?.ticketId === ticketId,
+  )
+  assert(pmNotification?.id, 'PM notification id for push delivery test')
+  await deliverNotificationPush([pmNotification.id as string], async () => {
+    throw Object.assign(new Error('expired subscription'), { statusCode: 410 })
+  })
+  const expiredAfterSend = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM push_subscriptions WHERE endpoint = $1`,
+    [expiredEndpoint],
+  )
+  assert(expiredAfterSend.rows[0]?.n === 0, '410 push response must remove expired subscription')
+
+  const okSubscription = await call('/api/notifications/push-subscriptions', {
+    method: 'PUT',
+    headers: pmNotificationAuth,
+    body: JSON.stringify({
+      endpoint: okEndpoint,
+      keys: { p256dh: 'smoke-p256dh-key', auth: 'smoke-auth-key' },
+    }),
+  })
+  assert(okSubscription.status === 200, 'push subscription re-register')
+  let successfulPushes = 0
+  await deliverNotificationPush([pmNotification.id as string], async (subscription, payload) => {
+    successfulPushes += 1
+    assert(subscription.endpoint === okEndpoint, 'push subscription passed to sender')
+    const body = JSON.parse(payload) as {
+      notification?: { title?: string; body?: string }
+      data?: { notificationId?: string; ticketId?: string }
+    }
+    assert(body.notification?.title === 'New ticket raised', 'push title')
+    assert(body.notification?.body?.includes(ticketId), 'push ticket reference')
+    assert(
+      body.data?.notificationId === pmNotification.id && body.data?.ticketId === ticketId,
+      'push payload identity',
+    )
+    return { statusCode: 201, body: '', headers: {} }
+  })
+  assert(successfulPushes === 1, 'push delivery should run once')
+  await deliverNotificationPush([pmNotification.id as string], async () => {
+    successfulPushes += 1
+    return { statusCode: 201, body: '', headers: {} }
+  })
+  assert(successfulPushes === 1, 'sent notification must not be delivered twice')
+  const sentState = await query<{ push_sent_at: Date | string | null }>(
+    `SELECT push_sent_at FROM notifications WHERE id = $1`,
+    [pmNotification.id],
+  )
+  assert(sentState.rows[0]?.push_sent_at, 'push sent timestamp')
+  const removeOkSubscription = await call(
+    `/api/notifications/push-subscriptions/${okSubscription.body.data.id as string}`,
+    { method: 'DELETE', headers: pmNotificationAuth },
+  )
+  assert(removeOkSubscription.status === 200, 'push subscription remove')
+  console.log('OK push subscription lifecycle + delivery cleanup')
 
   const users = await call('/api/users', { headers: auth })
   const tech = users.body.data.users.find(
@@ -303,6 +517,12 @@ async function main() {
     }),
   })
   assert(t1.status === 201, 'first ticket failed')
+  const failedRaiseNotificationCount = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n
+     FROM notifications
+     WHERE related_entity_id = $1 AND type = 'ticket.raised'`,
+    [t1.body.data.uuid],
+  )
   const [raceA, raceB] = await Promise.all([
     call('/api/tickets', {
       method: 'POST',
@@ -354,7 +574,17 @@ async function main() {
     dup.body.details?.openTicketId && dup.body.details?.ticketId,
     'OPEN_TICKET_EXISTS must include openTicketId and ticketId',
   )
-  console.log('OK one-open-ticket rule')
+  const countAfterFailedRaises = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n
+     FROM notifications
+     WHERE related_entity_id = $1 AND type = 'ticket.raised'`,
+    [t1.body.data.uuid],
+  )
+  assert(
+    countAfterFailedRaises.rows[0]?.n === failedRaiseNotificationCount.rows[0]?.n,
+    'failed raises must not create notifications',
+  )
+  console.log('OK one-open-ticket rule + failed raises create no notifications')
 
   // Issues: create unused subcategory, hard-delete OK; used subcategory → deactivate-only
   const catCreate = await call('/api/issues/categories', {

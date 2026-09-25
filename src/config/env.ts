@@ -38,6 +38,9 @@ const envSchema = z
     MAIL_FROM: z.string().optional(),
     UPLOAD_DIR: z.string().default('uploads'),
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+    VAPID_PUBLIC_KEY: z.string().optional(),
+    VAPID_PRIVATE_KEY: z.string().optional(),
+    VAPID_SUBJECT: z.string().optional(),
     DEVICE_SYNC_BASE_URL: z
       .string()
       .default('https://v2smartpark.mtapps.in/api/v1/engineer/device-binding'),
@@ -62,6 +65,14 @@ const envSchema = z
         path: ['DB_HOST'],
       })
     }
+    const vapidValues = [data.VAPID_PUBLIC_KEY, data.VAPID_PRIVATE_KEY, data.VAPID_SUBJECT]
+    if (vapidValues.some(Boolean) && !vapidValues.every(Boolean)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Set VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, and VAPID_SUBJECT together',
+        path: ['VAPID_PUBLIC_KEY'],
+      })
+    }
   })
 
 const raw = {
@@ -77,6 +88,9 @@ const raw = {
   SMTP_USER: unquote(process.env.SMTP_USER),
   SMTP_PASS: unquote(process.env.SMTP_PASS),
   MAIL_FROM: unquote(process.env.MAIL_FROM),
+  VAPID_PUBLIC_KEY: unquote(process.env.VAPID_PUBLIC_KEY),
+  VAPID_PRIVATE_KEY: unquote(process.env.VAPID_PRIVATE_KEY),
+  VAPID_SUBJECT: unquote(process.env.VAPID_SUBJECT),
   DEVICE_SYNC_BASE_URL: unquote(process.env.DEVICE_SYNC_BASE_URL),
   DEVICE_SYNC_API_TOKEN: unquote(process.env.DEVICE_SYNC_API_TOKEN),
   SMARTPARK_API_BASE_URL: unquote(process.env.SMARTPARK_API_BASE_URL),
