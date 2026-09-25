@@ -75,8 +75,8 @@ No Nest, Prisma, or Next.js file-based routing. Express routers live in `src/rou
 
 ## Key Domains
 
-- **Auth / Users / Roles** — Email or mobile + password login, forgot/reset password, permission matrix, road assignments
-- **Masters** — Roads, issue categories/subs (hard-delete unused via `/api/issues`; used → `409 IN_USE`; Site attendant may CRUD), parts (with `amount`; CRUD + hard-delete unused via `/api/parts` and Issue master flags including `d`)
+- **Auth / Users / Roles** — Email or mobile + password login, forgot/reset password, permission matrix, road assignments; user create/role assign constrained by privilege hierarchy ([`src/lib/role-hierarchy.ts`](src/lib/role-hierarchy.ts))
+- **Masters** — Roads, issue categories/subs (hard-delete unused category/sub via `/api/issues`; used → `409 IN_USE`), parts (with `amount`; CRUD + hard-delete unused via `/api/parts` and Issue master flags including `d` for Tech/Engineer/PM/Admin)
 - **Devices** — Inventory, QR scan, derived operational status from open tickets
 - **Tickets** — Lifecycle (`Open` → assign/`Under repair` → `Waiting for spare` optional → `Closed`), events, visit cost = labour + parts master, photos; multiple issues via `ticket_issues` (reported/found) with scalar primary for compat
 - **Reports** — Dashboard aggregates, work report by period
@@ -182,6 +182,8 @@ Admin or Project manager (Users v/c/e)
 ```
 
 Project manager Users permission: `vce...` (migration `006_pm_users_edit.sql`).
+
+Role hierarchy ([`src/lib/role-hierarchy.ts`](src/lib/role-hierarchy.ts)): Admin → Project manager → Control room → Engineer → Technician → Site attendant → AMC officer. `POST /api/users` and `PATCH` with `roleId` allow same-or-below only; higher → `403 FORBIDDEN`. Same order gates `PATCH /api/roles/:id/permissions` via `assertCanManageRolePermissions` (custom role names → Admin only). `POST /api/uploads` requires Raise ticket `c` or Update ticket `e`/`x`.
 
 ## Ticket statuses
 

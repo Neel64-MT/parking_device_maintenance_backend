@@ -41,6 +41,7 @@
 - Backend authorization is mandatory; frontend filtering is not a security boundary.
 - Assign may use road scope only (Control room routing); ticket list/detail/dashboard/reports stay visibility-scoped. Device **list / export / history** are city-wide for any role with Device list/history view (no `assigned_roads` filter). Create/PATCH still use `assertRoadAccess`. Scan and ticket raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician / Engineer bypass).
 - Signup approval/update requires `authorize('Users', 'e')` (Admin or Project manager with Users edit).
+- User create (`Users` `c`) and role assign via PATCH `roleId` (`Users` `e`) must be same-or-below the actor’s rank in [`src/lib/role-hierarchy.ts`](src/lib/role-hierarchy.ts): Admin → Project manager → Control room → Engineer → Technician → Site attendant → AMC officer. Higher → `403` / `FORBIDDEN`. Do not trust client role claims.
 - Reuse existing authorization mechanisms; avoid duplicate Admin/PM code paths.
 - Keep the sibling `frontend/` directory **read-only** — document needed UI wiring as FRONTEND CHANGE REQUIRED.
 - Update `MEMORY.md` / `PHASES.md` after each meaningful phase.
@@ -110,8 +111,12 @@
 - Assign / reassign: Control room, Admin, or Project manager only (`assertCanAssignTickets`). Technicians cannot use `/assign` or `handoverToUserId`. Validate assignee eligibility; keep assign + trail insert transactional; same assignee must not duplicate trail rows.
 - Control room: raise/assign; cannot close; list/dashboard visibility is assignee/raiser only; assign uses road access so CR can route tickets they did not raise.
 - AMC officer: view only.
-- Project manager: Users `vce...` — can approve Pending signups and edit users; Roles matrix remains view-only.
+- Project manager: Users `vce...` — can approve Pending signups and edit users; Roles matrix remains view-only; cannot assign Admin (hierarchy).
+- Do not add a second permission system or duplicate role checks across dashboard/tickets/devices/reports. Role privilege order for user create **and** Roles matrix PATCH lives only in `role-hierarchy.ts` (`assertCanAssignRole` / `assertCanManageRolePermissions`).
+- Roles matrix PATCH (`Roles & permissions` `e`) may only change same-or-below roles; custom role names → Admin only. Higher → `403 FORBIDDEN`.
+- Admin permissions are always full (`vceaxd` every screen) and cannot be PATCH/reset. Other seeded roles may `POST /api/roles/:id/permissions/reset` to `DEFAULT_ROLE_PERMS`.
+- `POST /api/uploads` requires Raise ticket `c` or Update ticket `e` or Update ticket `x` (ticket photo flows). Auth alone is not enough.
+- Parts create/update: Issue master `c`/`e` **or** Technician **or** Engineer (same field-staff bypass as Issue subcategory edit).
 - At least one Admin must always remain active.
 - Cost fields on work report: omit for roles without Work report view.
 - Work report actors are Technician and Engineer only; filter road by `roads.name` (`rd`), never the roles alias; export must use the same filters as `/work`; keep view-shaped `tickets` tuples for FE table headers.
-- Do not add a second permission system or duplicate role checks across dashboard/tickets/devices/reports.

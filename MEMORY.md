@@ -22,13 +22,16 @@
 - Phase 30 — Add Update: require assignee; Admin or assignee only (`NOT_ASSIGNED_USER`); required `visitedBy` (Technician|Engineer); Engineer role
 - Phase 31 — Work report API gap-close: road filter fix, Engineer actors, real days, view-shaped tickets, filtered export
 - Phase 35 — Ticket assign harden: transactional, eligible assignee, idempotent, trail response; technicians lookup includes Engineer
-- Phase 36 — Part/Issue hard delete: `DELETE /api/parts/:id` + Issue master `d` for Technician/Engineer/PM; used → `409 IN_USE` (deactivate)
-- Phase 37 — Issue category gap-close: `DELETE /api/issues/categories/:id` + IN_USE; name max 120; sub create parent active check
-- Phase 41 — Multi-issue tickets (`ticket_issues`); Site attendant Device Sync + Issue master CRUD
+- Phase 36 — Role hierarchy user create: same-or-below assign; higher → `403 FORBIDDEN`; helper `role-hierarchy.ts`
+- Phase 37 — Part/Issue hard delete: `DELETE /api/parts/:id` + Issue master `d` for Technician/Engineer/PM; used → `409 IN_USE` (deactivate)
+- Phase 38 — Issue category gap-close: `DELETE /api/issues/categories/:id` + IN_USE; name max 120; sub create parent active check
+- Permission auth audit — screen×flag `authorize()` already enforces APIs; no RBAC rewrite; FE Roles Save wired in Phase 36; Phase 39 closed uploads gate + Roles-matrix hierarchy
+- Phase 39 — Roles matrix hierarchy (`assertCanManageRolePermissions`); uploads gated to Raise `c` / Update `e`|`x`; Parts create/update Engineer parity with Technician
+- Phase 40 — Admin full locked matrix; `POST …/permissions/reset`; GET roles returns `defaultPermissions`
 
 ## Currently Working On
 
-- (idle — Phase 41 complete)
+- (idle — permission auth audit closed; no rewrite)
 
 ## Pending
 
@@ -54,6 +57,8 @@
 - Hide technician reassign / handover; only Control room, Admin, Project manager assign
 - Scan QR: do not treat road-mismatch as expected for Site attendant / Technician (API allows any road for scan/raise)
 - Signup success copy: “Admin” → “Admin or Project manager” (optional; API already unlocks Approve for PM)
+- Users create/edit: filter role dropdown to same-or-below actor rank (Admin → … → AMC officer); show API error if higher role sent; backend remains authority
+- Roles & permissions tab: wire Save → `PATCH /api/roles/:id/permissions`; Create → `POST /api/roles`; load matrix from `GET /api/roles` (stop toast-only preview); PM stays view-only
 - Parts / update-ticket UI: PartChips send part UUIDs (not names); `cost` is labour-only — do not add master part prices into `cost`; show amounts from Parts/lookups APIs
 - Wire Edit/Add device Save to `PATCH`/`POST /api/devices` with `slotIdentifier`, `qrNumber`, `slotNumber`, `roadId`, etc.; keep Slot Id read-only and do not rely on writing `slotId`
 
@@ -93,6 +98,7 @@
 - Duplicate raise 409 includes both `ticketId` and `openTicketId`
 - Device lat/lng are TEXT strings; seed includes Ahmedabad-area dummies
 - PM Users permission: `vce...` (approve Pending via existing PATCH); Roles matrix remains view-only
+- Role hierarchy: Admin → Project manager → Control room → Engineer → Technician → Site attendant → AMC officer; create/PATCH roleId same-or-below only
 - No separate signup-request table
 - Control room is scoped like other non-privileged roles for viewing (per product requirement)
 - Ticket assign (Phase 35): transactional `POST …/assign`; eligible Active Technician/Engineer/CR/PM; idempotent same assignee; response `{ id, assigneeId, assigneeName, assignmentTrail }`; detail trail from `ticket_assignments`; lookups/technicians includes Engineer
