@@ -23,6 +23,7 @@ import {
   replaceTicketIssues,
   resolveIssuePairs,
 } from '../lib/ticket-issues.js'
+import { createNewTicketNotifications } from '../lib/notifications.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -172,12 +173,16 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
     const limit = filters.limit
     const offset = sqlOffset(filters.page, limit)
     pageParams.push(limit, offset)
+    // Count only activity emitted by Update Ticket. Reclassification is part of that flow.
     const result = await query(
       `SELECT t.*, d.public_id AS device_public_id, d.slot_id, d.slot_number, r.name AS road_name,
               ru.full_name AS raised_by_name, au.full_name AS assignee_name,
               rc.name AS reported_cat, rs.name AS reported_sub,
               fc.name AS found_cat, fs.name AS found_sub,
-              (SELECT COUNT(*)::int FROM ticket_events e WHERE e.ticket_id = t.id) AS updates
+              (SELECT COUNT(*)::int FROM ticket_events e
+                WHERE e.ticket_id = t.id
+                  AND e.event_type IN ('visit_open', 'visit_resolved', 'waiting_spare', 'reclassified')
+               ) AS updates
        ${ticketListJoins}
        ${pageWhereSql}
        ORDER BY t.raised_at DESC
@@ -411,6 +416,14 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
         }
       }
       throw err
+    }
+
+    // The ticket is fully created before notification persistence is attempted.
+    // Notification failures are logged but must never turn a successful raise into an error.
+    try {
+      await createNewTicketNotifications(ticketUuid)
+    } catch (notificationError) {
+      console.error(`[notifications] failed after ticket ${publicId} was raised:`, notificationError)
     }
 
     return created(

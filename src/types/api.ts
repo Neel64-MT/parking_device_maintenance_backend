@@ -34,3 +34,29 @@ export type ScreenName =
   | 'Roles & permissions'
 
 export type RoadScope = 'all_roads' | 'assigned_roads'
+
+export interface AppNotification {
+  id: string
+  type: string
+  title: string
+  message: string
+  relatedEntityType: string
+  relatedEntityId: string
+  data: Record<string, unknown>
+  pushSentAt: Date | string | null
+  readAt: Date | string | null
+  isRead: boolean
+  createdAt: Date | string
+}
+
+export interface PushConfig {
+  available: boolean
+  publicKey: string | null
+  registered: boolean
+}
+
+export interface PushSubscriptionSummary {
+  id: string
+  createdAt: Date | string
+  updatedAt: Date | string
+}

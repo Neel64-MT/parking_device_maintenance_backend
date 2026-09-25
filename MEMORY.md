@@ -24,10 +24,14 @@
 - Phase 35 — Ticket assign harden: transactional, eligible assignee, idempotent, trail response; technicians lookup includes Engineer
 - Phase 36 — Part/Issue hard delete: `DELETE /api/parts/:id` + Issue master `d` for Technician/Engineer/PM; used → `409 IN_USE` (deactivate)
 - Phase 37 — Issue category gap-close: `DELETE /api/issues/categories/:id` + IN_USE; name max 120; sub create parent active check
+- Phase 38 — Persistent new-ticket notifications + browser Web Push; role fan-out, unread/read APIs, VAPID subscriptions
+- Phase 40 — Multi-issue ticket contract parity: `issues[]` accepted on raise/update/close, `ticket_issues` persistence, detail arrays, and raised-event photo attachment
+- Frontend Phase 39 — NotificationBell, explicit browser permission/subscription UI, service-worker click relay, and shared Tickets/All Tickets unread badges consuming the Phase 38 APIs
 
 ## Currently Working On
 
 - (idle — Phase 37 complete)
+- (idle — backend Phase 38 and frontend Phase 39 notification integration complete)
 
 ## Pending
 
@@ -55,9 +59,17 @@
 - Signup success copy: “Admin” → “Admin or Project manager” (optional; API already unlocks Approve for PM)
 - Parts / update-ticket UI: PartChips send part UUIDs (not names); `cost` is labour-only — do not add master part prices into `cost`; show amounts from Parts/lookups APIs
 - Wire Edit/Add device Save to `PATCH`/`POST /api/devices` with `slotIdentifier`, `qrNumber`, `slotNumber`, `roadId`, etc.; keep Slot Id read-only and do not rely on writing `slotId`
+- Raise/Update/Close: send `issues: [{ categoryId, subCategoryId }, …]`; detail reads `issuesReported` / `issuesFound`; raised photos use the returned `eventId`
 
 ## Important Decisions
 
+- New-ticket notifications: persistent rows created only after successful ticket/event/assignment writes; failures are logged but never change the ticket response
+- Notification recipients: Active `Admin` / `Project manager` / `Control room` with `All tickets v`; no hardcoded user IDs and no new permission screen
+- Notification APIs scope every read/update to the authenticated recipient; browser permission stays in the browser, subscription keys stay server-side
+- Web Push uses `web-push` + VAPID and existing `setImmediate`; no WebSocket/SSE/queue. `404`/`410` deletes expired endpoints; `push_sent_at` prevents repeat sends
+- Control Room notification links preserve existing road/ownership access; notification fan-out does not widen ticket list authorization
+- Multi-issue tickets prefer `issues[]`; legacy single category/subcategory remains accepted; `ticket_issues` stores ordered reported/found rows while scalar fields retain the primary pair
+- Ticket raise returns `eventId` so the frontend can attach photos through the raised-event endpoint without changing ticket creation semantics
 - Add Update: require `assignee_id`; only Admin or assignee; `NOT_ASSIGNED_USER` for others (QR user B); no auto-claim; no `assertTicketAccess` on this path (clear toast)
 - `visitedBy` required on Add Update; Active Technician or Engineer; stored in `ticket_events.meta`
 - Engineer role: Technician-like permissions; eligible Visited By; field-work road bypass like Technician

@@ -389,3 +389,45 @@
 **Testing:** unused category delete; used → IN_USE; soft deactivate; tech hard-delete unused; API cleanup (no raw SQL)
 
 **Done when:** smoke passes; FRONTEND CHANGE REQUIRED — `createIssueCategory`, `createIssueSubcategory`, `deleteIssueCategory` in `issues.js` + IssueMaster create/delete UI
+
+## Phase 38 — New-ticket notifications and browser Web Push
+
+**Status:** Complete
+
+**Objective:** Persist and deliver a new-ticket alert to eligible Admin, Project manager, and Control room users without affecting ticket creation success.
+
+**APIs:**
+- `GET /api/notifications`, `/unread-count`, `/push-config`
+- `PATCH /api/notifications/:id/read`, `/read-all`
+- `PUT/DELETE /api/notifications/push-subscriptions[/:id]`
+
+**Database:** `019_notifications.sql` — `notifications` + `push_subscriptions`; unique recipient/event and browser endpoint keys.
+
+**Recipient rule:** Active `Admin` / `Project manager` / `Control room` users with existing `All tickets v`; no hardcoded user IDs.
+
+**Delivery:** `web-push` + VAPID; `setImmediate` background send; `404`/`410` removes expired subscriptions; notification failure is logged and cannot fail the ticket response.
+
+**Files:** `src/lib/notifications.ts`, `src/routes/notifications.ts`, `src/routes/tickets.ts`, `src/app.ts`, env/config, seed, types, smoke, docs.
+
+**Testing:** role fan-out; unrelated role excluded; failed raises excluded; content/reference; read/unread and ownership; subscription upsert/removal; successful push; expired subscription cleanup; sent-state duplicate prevention.
+
+**Done when:** build + write smoke pass; frontend notification integration is complete in the sibling frontend (service worker, explicit browser permission/subscription UI, authenticated read-state relay, and shared Tickets/All Tickets badges).
+
+## Phase 40 — Multi-issue ticket contract parity
+
+**Status:** Complete
+
+**Objective:** Align the backend with the frontend's multi-select issue contract without changing legacy single-issue clients.
+
+**APIs / storage:**
+- Raise / Update / Close accept `issues[]`; legacy `categoryId` + `subCategoryId` remains supported
+- `ticket_issues` stores ordered `reported` / `found` rows with scalar primary compatibility
+- Ticket detail returns `issuesReported` / `issuesFound`; raise returns `eventId`
+- `PATCH /api/tickets/:ticketId/raised/:eventId/photos` supports post-raise photo attachment
+- Issue master delete checks include `ticket_issues`
+
+**Files:** `017_ticket_issues.sql`, `src/lib/ticket-issues.ts`, `src/routes/tickets.ts`, `src/routes/issues.ts`, seed, smoke, docs.
+
+**Testing:** multi-issue raise/detail response, legacy payload compatibility, `eventId`, issue persistence, update/close issue replacement, and notification integration regression.
+
+**Done when:** build and isolated smoke suites pass; no frontend source changes required beyond the already-integrated multi-select UI.

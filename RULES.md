@@ -6,6 +6,13 @@
 - Keep business logic in **services**; routes/controllers stay thin.
 - Validate **body, params, and query** with Zod on every endpoint.
 - Enforce **authorization server-side** via `authorize(screen, flag)` plus road scope, ticket holder checks, and ticket visibility (assignee/raiser for non-Admin/non-PM).
+- New-ticket notification recipients are Active `Admin` / `Project manager` / `Control room` users with existing `All tickets v`; never hardcode user IDs or add a second permission system.
+- Create notifications only after the ticket, raised event, and optional assignment writes succeed. Notification persistence/delivery failure must never change a successful ticket response; failed ticket requests create none.
+- Notification list/read/update APIs always scope by authenticated `recipient_user_id`. Browser permission stays in the browser; backend stores only Push API subscriptions.
+- Reuse `web-push` + VAPID and the existing `setImmediate` background pattern. Do not add WebSocket/SSE, a queue library, or duplicate realtime infrastructure.
+- Push `404` / `410` removes the expired subscription. Other push errors are logged without endpoint/key contents and do not fail ticket creation.
+- Ticket raise/update/close prefer `issues[]`; keep the legacy single category/subcategory pair accepted. `ticket_issues` stores ordered reported/found rows while scalar fields retain the primary pair.
+- Multi-issue raise returns `eventId`; raised photos attach through `PATCH /api/tickets/:ticketId/raised/:eventId/photos`.
 - Store secrets only in environment variables (`.env` / `.env.local`).
 - Never return passwords, password hashes, JWT secrets, raw reset tokens, or stack traces to clients.
 - Soft-inactivate users; never hard-delete (ticket history must remain readable).
@@ -27,6 +34,7 @@
 - Parts create/patch use Issue master `c`/`e` (or Technician/Engineer); hard-delete uses Issue master `d`; do not invent a new permission screen name.
 - Image zoom/crop are frontend-only; do not change upload APIs for crop/zoom.
 - Add Update (`POST /api/tickets/:id/updates`) requires `assignee_id`; reject unassigned with `409` / `TICKET_NOT_ASSIGNED` / `Ticket not assigned`. Do not auto-claim on update.
+- Ticket list `updates` counts only Update Ticket flow events (`visit_open`, `visit_resolved`, `waiting_spare`, `reclassified`); exclude raised, assigned, and closed events and do not filter by actor role.
 - Add Update is allowed only for **Admin** or the **current assignee**. Reject others (including PM/raiser/user B after QR scan) with `403` / `NOT_ASSIGNED_USER` / `This ticket is assigned to another user` and `details.assignedTo`. Enforce server-side — do not rely on frontend hiding the button.
 - `visitedBy` is required on Add Update; return structured Zod/`VALIDATION_ERROR` JSON (`details[].field = "visitedBy"`), never HTML. Eligible users: Active Technician or Engineer.
 - API validation and business errors must return the existing JSON envelope via `handleApiError` — never framework HTML pages for handled routes.
@@ -42,7 +50,7 @@
 - Assign may use road scope only (Control room routing); ticket list/detail/dashboard/reports stay visibility-scoped. Device **list / export / history** are city-wide for any role with Device list/history view (no `assigned_roads` filter). Create/PATCH still use `assertRoadAccess`. Scan and ticket raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician / Engineer bypass).
 - Signup approval/update requires `authorize('Users', 'e')` (Admin or Project manager with Users edit).
 - Reuse existing authorization mechanisms; avoid duplicate Admin/PM code paths.
-- Keep the sibling `frontend/` directory **read-only** — document needed UI wiring as FRONTEND CHANGE REQUIRED.
+- Keep the sibling `frontend/` directory **read-only by default**; the explicitly authorized Phase 39 notification integration is the current exception. Document any remaining UI wiring as FRONTEND CHANGE REQUIRED.
 - Update `MEMORY.md` / `PHASES.md` after each meaningful phase.
 - Forgot-password: only **Admin** / **Project manager** receive a reset email. Other Active roles get `403` / `FORGOT_PASSWORD_ROLE_DENIED` with an explicit message. Unknown / Pending / Inactive emails still get the generic 200 (no account enumeration for missing users).
 - Reset-password must also reject non–Admin/PM users (`FORGOT_PASSWORD_ROLE_DENIED`) without marking the token used.
@@ -75,7 +83,7 @@
 
 ## What to avoid
 
-- Do not modify the frontend source.
+- Do not modify the frontend source unless explicitly authorized; the Phase 39 notification integration is explicitly authorized and consumes the existing API contract.
 - Do not bypass Zod validation or authorization middleware.
 - Do not expose secrets or internal DB details in responses.
 - Do not add unnecessary libraries or deep abstractions.
@@ -108,7 +116,8 @@
 - Site attendant: scan + raise on **any** road (field-work bypass); list stays raiser-scoped; cannot assign/close; may Device Sync (Device list `c`) and Issue master CRUD (`vce..d`); Add device stays denied.
 - Technician: scan any road; update/close only tickets they hold or raised (any road); cannot assign or reassign; list stays assignee/raiser-scoped.
 - Assign / reassign: Control room, Admin, or Project manager only (`assertCanAssignTickets`). Technicians cannot use `/assign` or `handoverToUserId`. Validate assignee eligibility; keep assign + trail insert transactional; same assignee must not duplicate trail rows.
-- Control room: raise/assign; cannot close; list/dashboard visibility is assignee/raiser only; assign uses road access so CR can route tickets they did not raise.
+- Control room: raise/assign; cannot close; list/dashboard visibility is assignee/raiser only; assign uses road access so CR can route tickets they did not raise. Receives persistent/browser new-ticket notifications as an alert; fan-out does not widen list authorization.
+- Admin / Project manager / Control room: receive `ticket.raised` notifications only while Active and retaining `All tickets v`; all other roles receive none for this event.
 - AMC officer: view only.
 - Project manager: Users `vce...` — can approve Pending signups and edit users; Roles matrix remains view-only.
 - At least one Admin must always remain active.
