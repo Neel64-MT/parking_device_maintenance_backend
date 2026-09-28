@@ -132,7 +132,7 @@ Canonical `tickets.status` values (exactly four; never `New`):
 
 ### Add Update restrictions (Phase 30)
 
-- Unassigned tickets (`assignee_id` null) cannot receive `POST /api/tickets/:id/updates` → `409` / `TICKET_NOT_ASSIGNED` / `error: "Ticket not assigned"`.
+- Unassigned tickets (`assignee_id` null) cannot receive `POST /api/tickets/:id/updates` → `409` / `TICKET_NOT_ASSIGNED` / `error: "Ticket not assigned"`. This applies to **every** role, including Admin/PM — a ticket must be assigned before it can be worked. The updater is never silently made the assignee.
 - Only **Admin** or the **current assignee** may Add Update. User B (QR scan or otherwise) on a ticket assigned to A → `403` / `NOT_ASSIGNED_USER` / `error: "This ticket is assigned to another user"` with `details.assignedTo` (assignee display name). Project manager and raiser do **not** bypass unless they are the assignee. List visibility is not applied on this path so the toast message is not replaced by a generic road Forbidden.
 - `visitedBy` is required (UUID). Missing/invalid → `400` / `VALIDATION_ERROR` with `details[].field = "visitedBy"`. Must be an Active **Technician** or **Engineer**. Stored in `ticket_events.meta.visitedBy`.
 - **Engineer** role exists (Technician-like permissions); lookups `/api/lookups/technicians` include Engineers.
@@ -161,6 +161,23 @@ Canonical `tickets.status` values (exactly four; never `New`):
 - Notification event uniqueness prevents duplicate rows on repeated processing. `push_sent_at` prevents a delivered notification from being sent again.
 
 **FRONTEND INTEGRATION COMPLETE:** the sibling frontend now owns the browser service worker, explicit permission action, VAPID `applicationServerKey` subscription, authenticated read-state relay, and shared unread badges on Tickets parent and All Tickets child. It uses the existing `/api/notifications` contract without adding a menu item or realtime transport.
+
+### Assignment notification requirements
+
+- Whenever `tickets.assignee_id` actually changes, the **newly assigned user** receives a persistent notification. Types follow the existing ticket-event wording: `ticket.assigned` (first assign, and raise with `assigneeId`) and `ticket.reassigned` (reassign, and update `handoverToUserId`).
+- Only the new assignee is notified. The previous assignee is **not** notified on reassignment.
+- If the assignee does not change, no notification is created. `POST /api/tickets/:id/assign` already short-circuits on an unchanged assignee, and the existing unique key `(recipient_user_id, type, related_entity_type, related_entity_id)` prevents duplicate rows.
+- Messages: `Ticket TK-XXXX has been assigned to you.` / `Ticket TK-XXXX has been reassigned to you.`
+- Stored `data` carries `ticketId`, `reference`, `url`, `canOpen: true`, `device` (id/road/slot), `issue` (reported category/subcategory/severity), and `assignedBy`. Read state and timestamps come from the notification row itself.
+- Notifications are created in the backend after the owning transaction commits. A notification failure is logged and must not roll back or fail the assignment, reassignment, or update.
+- Recipient must be Active and hold a role in `NOTIFICATION_DELIVERY_ROLES` (`Admin`, `Project manager`, `Control room`, `Technician`, `Engineer`). `ticket.raised` fan-out stays limited to the first three — field roles are added for delivery only, so an assignee is never un-alertable.
+
+### Ticket-open read behavior
+
+- `POST /api/notifications/ticket/:ticketId/read` marks every unread notification the **caller** holds for that ticket as read and returns `{ updated }`.
+- Only the authenticated user's rows are affected. A user can never mark another user's notification read; the per-id route still returns `404` for someone else's notification.
+- `updated: 0` means nothing was unread, so no row is rewritten. The unread badge reflects the change on the next `/unread-count` poll.
+- This makes opening a ticket directly (not only via the bell) clear its unread notification, while leaving every other ticket's notifications untouched.
 
 ### Signup approval requirements
 

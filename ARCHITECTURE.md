@@ -373,3 +373,46 @@ Notification persistence runs after ticket creation and is wrapped separately by
 | Config | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` |
 
 No WebSocket, SSE, service worker, external queue, or second permission system is introduced. Web Push reuses the existing in-process `setImmediate` background pattern. The frontend owns browser permission and must provide its own service worker; the backend only stores the resulting subscription and sends encrypted Web Push payloads. The sibling frontend Phase 39 integration now consumes these APIs, relays notification IDs for authenticated read-state updates, and renders the shared unread badges.
+
+## Assignment notifications and ticket-scoped read state
+
+```text
+Ticket assignment changes (after the assignment transaction commits)
+  → createTicketAssignmentNotification(ticketId, toUserId, kind)
+  → kind 'assigned'   → type `ticket.assigned`
+  → kind 'reassigned' → type `ticket.reassigned`
+  → recipient = the NEW assignee only (previous assignee is not notified)
+  → ON CONFLICT DO NOTHING → assigning the same user again is a no-op
+  → setImmediate Web Push delivery (same path as `ticket.raised`)
+
+User opens /tickets/:ticketId
+  → POST /api/notifications/ticket/:ticketId/read
+  → markTicketNotificationsRead(userId, ticketId)
+  → UPDATE only rows WHERE recipient_user_id = current user AND read_at IS NULL
+  → returns { updated }; 0 means nothing unread, so no row is rewritten
+```
+
+Assignment notifications are raised from the same three call sites that change `tickets.assignee_id`, each after its own transaction commits and wrapped in its own try/catch, so a notification failure is logged but never rolls back or fails the assignment:
+
+| Assignment path | `src/routes/tickets.ts` | Notification kind |
+|---|---|---|
+| Raise with `assigneeId` | after the raise transaction | `assigned` |
+| `POST /:ticketId/assign` | after the assign transaction | `assigned` / `reassigned` |
+| Update `handoverToUserId` | after the update transaction | `reassigned` |
+
+`POST /:ticketId/assign` already returns early when the assignee is unchanged, so a no-op assign produces no notification.
+
+### Role classification
+
+Two separate role lists exist, because the two events have different business rules:
+
+| List | Roles | Used by |
+|---|---|---|
+| `NEW_TICKET_NOTIFICATION_ROLES` | Admin, Project manager, Control room | `ticket.raised` **fan-out** (unchanged) |
+| `NOTIFICATION_DELIVERY_ROLES` | the above **+ Technician, Engineer** | Web Push delivery + frontend bell eligibility |
+
+Field roles are added to the delivery list because they are the only other roles that `assertEligibleAssignee` can assign a ticket to, so an assignee is never un-alertable. They still do **not** receive `ticket.raised` alerts. `Site attendant` and `AMC officer` are excluded from both, because they are never eligible assignees.
+
+### No silent auto-claim
+
+An unassigned ticket is rejected for Add Update with `409 / TICKET_NOT_ASSIGNED` for **every** role, including Admin/PM, so a ticket must be routed by an assigner before it can be worked. The previous auto-claim (silently setting `assignee_id` to the updater) was removed.

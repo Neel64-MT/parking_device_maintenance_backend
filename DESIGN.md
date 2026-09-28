@@ -445,13 +445,31 @@ Device Sync upserts parking locations into `roads` (single source of truth). No 
 
 ## Recipients and authorization
 
-- Event type: `ticket.raised`
+Two event families share one table but have different recipient rules.
+
+### `ticket.raised` (unchanged)
+
 - Recipients: Active users whose current role is `Admin`, `Project manager`, or `Control room` and whose existing `All tickets` permission has `v`
+- The notification link follows existing road scope / raiser / assignee access (`canOpen` may be `false` when the recipient cannot open the ticket). It does not widen ticket list or detail authorization.
+
+### `ticket.assigned` / `ticket.reassigned` (new)
+
+- Recipient: **only the newly assigned user**; the previous assignee is never notified
+- The recipient is the assignee, so assignee-scoped ticket access always applies: `canOpen` is always `true` and `url` always points at `/tickets/TK-xxxx`
+- The recipient must be Active and hold a role in `NOTIFICATION_DELIVERY_ROLES`; otherwise nothing is written and this is not an error
+
+| Constant | Roles | Applies to |
+|---|---|---|
+| `NEW_TICKET_NOTIFICATION_ROLES` | Admin, Project manager, Control room | `ticket.raised` fan-out |
+| `NOTIFICATION_DELIVERY_ROLES` | the above + Technician, Engineer | Web Push delivery, bell eligibility |
+
+Technician/Engineer are included in delivery because they are the only other roles `assertEligibleAssignee` can assign to. They never receive `ticket.raised`.
+
+### Shared authorization rules
+
 - API access: JWT + `authorize('All tickets', 'v')`
 - No individual user IDs and no new permission screen
 - Notification reads/updates always include `recipient_user_id = current user`; another user's notification returns `404`
-
-The notification link follows existing road scope / raiser / assignee access. It does not widen ticket list or detail authorization.
 
 ## Ticket flow
 
@@ -460,6 +478,36 @@ The notification link follows existing road scope / raiser / assignee access. It
 3. Recipient rows are inserted in a notification-only transaction with `ON CONFLICT DO NOTHING`.
 4. The ticket route catches and logs notification errors independently; ticket creation still returns its original success response.
 5. Failed ticket creation never calls the notification service.
+
+## Assignment flow
+
+Notifications are created from the business layer at every point where `tickets.assignee_id` actually changes, always after the owning transaction commits:
+
+1. The assignment transaction updates `tickets`, writes the `ticket_assignments` trail, and writes the `ticket_events` row.
+2. After it commits, the route calls `createTicketAssignmentNotification({ ticketId, toUserId, kind, assignedByUserId })` inside its own try/catch.
+3. The service inserts one row with `ON CONFLICT DO NOTHING` and schedules background push.
+4. A notification failure is logged and never rolls back or fails the assignment.
+
+Idempotency comes from the existing unique key: assigning the same user again (or replaying the same event) cannot create a second row, and `POST /:ticketId/assign` returns early when the assignee is unchanged.
+
+## Ticket-scoped read state
+
+`POST /api/notifications/ticket/:ticketId/read` → `markTicketNotificationsRead(userId, ticketId)`:
+
+```sql
+UPDATE notifications
+   SET read_at = NOW()
+ WHERE recipient_user_id = $1
+   AND related_entity_type = 'ticket'
+   AND related_entity_id = $2
+   AND read_at IS NULL
+RETURNING id
+```
+
+- Scoped to the caller, so a user can never mark another user's row.
+- Returns `{ updated }`; `0` means there was nothing unread and no row was rewritten.
+- `RETURNING` is required because the PGlite pool derives `rowCount` from returned rows.
+- The route is registered **before** `PATCH /:id/read` so the literal `ticket` segment is not captured by the `:id` param.
 
 ## Notification content
 

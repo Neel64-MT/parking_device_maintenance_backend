@@ -413,6 +413,31 @@
 
 **Done when:** build + write smoke pass; frontend notification integration is complete in the sibling frontend (service worker, explicit browser permission/subscription UI, authenticated read-state relay, and shared Tickets/All Tickets badges).
 
+## Phase 42 — Assignment notifications, ticket-open read, and no silent auto-claim
+
+**Status:** Complete
+
+**Objective:** Alert the person a ticket was assigned to, clear the unread notification when a ticket is opened, and stop Add Update from silently claiming unassigned tickets.
+
+**New behavior:**
+- `ticket.assigned` — first assign, and raise with `assigneeId`
+- `ticket.reassigned` — reassign, and update `handoverToUserId`
+- Recipient is the **new assignee only**; the previous assignee is never notified
+- No notification when the assignee is unchanged (assign route early-returns; the existing unique key also dedupes)
+- `POST /api/notifications/ticket/:ticketId/read` marks the caller's unread rows for that ticket, returning `{ updated }` (`0` = nothing unread, no row rewritten)
+- Unassigned tickets reject Add Update with `409 TICKET_NOT_ASSIGNED` for every role including Admin/PM; the silent auto-claim was removed
+
+**Role classification (two lists, deliberately separate):**
+- `NEW_TICKET_NOTIFICATION_ROLES` = Admin / Project manager / Control room → `ticket.raised` fan-out (unchanged)
+- `NOTIFICATION_DELIVERY_ROLES` = the above + Technician / Engineer → Web Push delivery and frontend bell eligibility
+- Rationale: Technician/Engineer are the only other roles `assertEligibleAssignee` can assign to, so an assignee is never un-alertable, while field staff still receive no new-ticket alerts. Site attendant / AMC officer are in neither list.
+
+**Files:** `src/lib/notifications.ts`, `src/routes/notifications.ts`, `src/routes/tickets.ts`, `frontend/src/services/notifications.js`, `frontend/src/services/users.js`, `frontend/src/hooks/useTicketNotifications.js`, `scripts/smoke-writes.ts`, docs.
+
+**Testing:** A open-ticket marks read; B no unread → no write; C ticket A opened leaves ticket B unread and drops the count by one; D cross-user read refused (404 per-id, ticket route scoped); E assign notifies; F reassign notifies the new assignee only; G same assignee → no duplicate; H notification insert failure still completes the assignment; plus `409 TICKET_NOT_ASSIGNED` and no auto-claim.
+
+**Done when:** `npm run build` (backend + frontend) and `npm run test:smoke:writes` pass. Note: `npm run test:smoke` has a pre-existing unrelated failure in the device-sync authorization assertion (expects `503`, gets `403`).
+
 ## Phase 40 — Multi-issue ticket contract parity
 
 **Status:** Complete
