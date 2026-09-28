@@ -26,15 +26,12 @@
 - Phase 37 — Issue category gap-close: `DELETE /api/issues/categories/:id` + IN_USE; name max 120; sub create parent active check
 - Phase 38 — Persistent new-ticket notifications + browser Web Push; role fan-out, unread/read APIs, VAPID subscriptions
 - Phase 40 — Multi-issue ticket contract parity: `issues[]` accepted on raise/update/close, `ticket_issues` persistence, detail arrays, and raised-event photo attachment
-- Frontend Phase 39 — NotificationBell, explicit browser permission/subscription UI, service-worker click relay, and shared Tickets/All Tickets unread badges consuming the Phase 38 APIs
-- Phase 38 — Persistent new-ticket notifications + browser Web Push; role fan-out, unread/read APIs, VAPID subscriptions
-- Phase 40 — Multi-issue ticket contract parity: `issues[]` accepted on raise/update/close, `ticket_issues` persistence, detail arrays, and raised-event photo attachment
+- Phase 42 — Assignment/reassignment notifications (`ticket.assigned` / `ticket.reassigned`), ticket-open mark-as-read, and removal of the silent auto-claim on Add Update
 - Frontend Phase 39 — NotificationBell, explicit browser permission/subscription UI, service-worker click relay, and shared Tickets/All Tickets unread badges consuming the Phase 38 APIs
 
 ## Currently Working On
 
-- (idle — Phase 37 complete)
-- (idle — backend Phase 38 and frontend Phase 39 notification integration complete)
+- (idle — backend Phase 38 + 42 and frontend Phase 39 notification integration complete)
 
 ## Pending
 
@@ -73,7 +70,12 @@
 - Control Room notification links preserve existing road/ownership access; notification fan-out does not widen ticket list authorization
 - Multi-issue tickets prefer `issues[]`; legacy single category/subcategory remains accepted; `ticket_issues` stores ordered reported/found rows while scalar fields retain the primary pair
 - Ticket raise returns `eventId` so the frontend can attach photos through the raised-event endpoint without changing ticket creation semantics
-- Add Update: require `assignee_id`; only Admin or assignee; `NOT_ASSIGNED_USER` for others (QR user B); no auto-claim; no `assertTicketAccess` on this path (clear toast)
+- Add Update: require `assignee_id` for **every** role incl. Admin/PM → `409 TICKET_NOT_ASSIGNED`; only Admin or assignee; `NOT_ASSIGNED_USER` for others (QR user B); the silent auto-claim (updater becomes assignee) was removed; no `assertTicketAccess` on this path (clear toast)
+- Assignment notifications: only the new assignee is notified — `ticket.assigned` on first assign / raise-with-assignee, `ticket.reassigned` on reassign / update handover. Triggered in the backend after the owning transaction commits, wrapped in its own try/catch so a notification failure never fails the assignment. No notification when the assignee is unchanged (early return + existing unique key)
+- Two separate role lists, deliberately not merged: `NEW_TICKET_NOTIFICATION_ROLES` (Admin/PM/CR) governs `ticket.raised` fan-out; `NOTIFICATION_DELIVERY_ROLES` (those + Technician/Engineer) governs Web Push delivery and frontend bell eligibility — an assignee must never be un-alertable, but field staff still get no new-ticket alerts. Site attendant / AMC officer are in neither (never eligible assignees)
+- Assignment notifications always set `canOpen: true` (recipient is the assignee, so assignee-scoped access applies) — unlike `ticket.raised`, where the link may be suppressed for road-scoped recipients
+- Ticket-open read: `POST /api/notifications/ticket/:ticketId/read` marks the caller's unread rows for that ticket and returns `{ updated }`; `0` means nothing unread so no row is rewritten. Scoped by `recipient_user_id` so users cannot mark others' notifications. Registered before `PATCH /:id/read` so the literal `ticket` segment is not captured by `:id`
+- Notification `UPDATE`s must use `RETURNING` — the PGlite pool derives `rowCount` from returned rows, so a bare `UPDATE` always reports 0 on that driver
 - `visitedBy` required on Add Update; Active Technician or Engineer; stored in `ticket_events.meta`
 - Engineer role: Technician-like permissions; eligible Visited By; field-work road bypass like Technician
 - Work report: Technician+Engineer actors; road filter on `rd.name`; view-shaped tickets; export filtered like `/work`

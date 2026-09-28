@@ -7,6 +7,7 @@ import {
   listNotifications,
   markAllNotificationsRead,
   markNotificationRead,
+  markTicketNotificationsRead,
   registerPushSubscription,
   removePushSubscription,
 } from '../lib/notifications.js'
@@ -130,6 +131,24 @@ router.delete(
     try {
       const id = z.string().uuid().parse(req.params.id)
       return ok(res, await removePushSubscription(req.user!.id, id), 'Push subscription removed')
+    } catch (error) {
+      return handleApiError(res, error)
+    }
+  },
+)
+
+/**
+ * Mark-as-read for a whole ticket. Registered before `/:id/read` so the literal
+ * `ticket` segment is not swallowed by the `:id` param route.
+ */
+router.post(
+  '/ticket/:ticketId/read',
+  authorize('All tickets', 'v'),
+  async (req: AuthedRequest, res) => {
+    try {
+      const ticketId = z.string().min(1).parse(req.params.ticketId)
+      const updated = await markTicketNotificationsRead(req.user!.id, ticketId)
+      return ok(res, { updated }, 'Ticket notifications marked as read')
     } catch (error) {
       return handleApiError(res, error)
     }

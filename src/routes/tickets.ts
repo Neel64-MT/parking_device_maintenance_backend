@@ -23,7 +23,10 @@ import {
   replaceTicketIssues,
   resolveIssuePairs,
 } from '../lib/ticket-issues.js'
-import { createNewTicketNotifications } from '../lib/notifications.js'
+import {
+  createNewTicketNotifications,
+  createTicketAssignmentNotification,
+} from '../lib/notifications.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -422,9 +425,27 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
     // The ticket is fully created before notification persistence is attempted.
     // Notification failures are logged but must never turn a successful raise into an error.
     try {
-      await createNewTicketNotifications(ticketUuid)
+      await createNewTicketNotifications(ticketUuid, raisedEventId)
     } catch (notificationError) {
       console.error(`[notifications] failed after ticket ${publicId} was raised:`, notificationError)
+    }
+
+    // A ticket raised already-assigned must also tell its new holder.
+    if (body.assigneeId) {
+      try {
+        await createTicketAssignmentNotification({
+          ticketId: ticketUuid,
+          toUserId: body.assigneeId,
+          kind: 'assigned',
+          assignedByUserId: req.user!.id,
+          eventId: raisedEventId,
+        })
+      } catch (notificationError) {
+        console.error(
+          `[notifications] failed after assignment at raise of ${publicId}:`,
+          notificationError,
+        )
+      }
     }
 
     return created(
@@ -612,17 +633,29 @@ function assertHolder(req: AuthedRequest, assigneeId: string | null) {
 }
 
 /**
+ * Add Update requires a ticket that is already assigned (Phase 30 / DESIGN step 3).
+ * An unassigned ticket must be routed by an assigner first — this applies to every
+ * role including Admin/PM. There is deliberately NO auto-claim here: silently
+ * assigning the ticket to whoever posted the first update hides the routing step
+ * and hides it from the control room.
+ */
+function assertTicketAssigned(ticket: { assignee_id: string | null }) {
+  if (!ticket.assignee_id) {
+    throw new ApiError(409, 'Ticket not assigned', 'TICKET_NOT_ASSIGNED')
+  }
+}
+
+/**
  * Site updates: authorize('Update ticket','e') already ran.
- * Allow Admin/PM, the current holder, or an unassigned ticket (claimer).
- * Also allow any user who already has ticket access and Update-ticket edit —
- * raisers with edit rights were blocked by assertHolder after assign.
+ * assertTicketAssigned has already rejected unassigned tickets, so the holder
+ * check below can assume there is a real assignee.
  */
 function assertCanAddUpdate(
   req: AuthedRequest,
   ticket: { assignee_id: string | null; raised_by_user_id: string | null },
 ) {
   if (isTicketPrivilegedRole(req.user!)) return
-  if (!ticket.assignee_id || ticket.assignee_id === req.user!.id) return
+  if (ticket.assignee_id === req.user!.id) return
   if (ticket.raised_by_user_id === req.user!.id) return
   throw new ApiError(403, 'Only the ticket holder can perform this action', 'NOT_HOLDER')
 }
@@ -667,7 +700,7 @@ router.post('/:ticketId/assign', authorize('All tickets', 'a'), async (req: Auth
       )
     }
 
-    await withTransaction(async (client) => {
+    const assignmentEventId = await withTransaction(async (client) => {
       await client.query(
         `UPDATE tickets SET assignee_id = $2, status = 'Under repair', updated_at = NOW() WHERE id = $1`,
         [t.id, body.assigneeId],
@@ -677,16 +710,37 @@ router.post('/:ticketId/assign', authorize('All tickets', 'a'), async (req: Auth
          VALUES ($1,$2,$3,$4)`,
         [t.id, t.assignee_id, body.assigneeId, reason],
       )
-      await client.query(
+      // The event id doubles as the notification's event identity, so this exact
+      // handover can never notify twice while a later, distinct handover can.
+      const inserted = await client.query<{ id: string }>(
         `INSERT INTO ticket_events (ticket_id, event_type, title, body, status_label, actor_user_id)
-         VALUES ($1,'assigned','Assigned',$2,'Still open',$3)`,
+         VALUES ($1,'assigned','Assigned',$2,'Still open',$3)
+         RETURNING id`,
         [
           t.id,
           isFirstAssign ? 'Ticket assigned' : 'Ticket reassigned',
           req.user!.id,
         ],
       )
+      return inserted.rows[0].id as string
     })
+
+    // Only the new assignee is notified, and only after the assignment commits.
+    // Notification failure is logged but must not fail the assignment.
+    try {
+      await createTicketAssignmentNotification({
+        ticketId: t.id,
+        toUserId: body.assigneeId,
+        kind: isFirstAssign ? 'assigned' : 'reassigned',
+        assignedByUserId: req.user!.id,
+        eventId: assignmentEventId,
+      })
+    } catch (notificationError) {
+      console.error(
+        `[notifications] failed after assignment of ${t.public_id}:`,
+        notificationError,
+      )
+    }
 
     const assignmentTrail = await loadAssignmentTrail(t.id)
     return ok(
@@ -753,6 +807,7 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
     const t = ticket.rows[0]
     if (t.status === 'Closed') throw new ApiError(409, 'Ticket is closed', 'CLOSED')
     assertTicketAccess(req.user!, t)
+    assertTicketAssigned(t)
     assertCanAddUpdate(req, t)
 
     const foundInputs = normalizeIssueList(body)
@@ -819,12 +874,34 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
            VALUES ($1,$2,$3,'Handover on update')`,
           [t.id, req.user!.id, body.handoverToUserId],
         )
-      } else if (!t.assignee_id) {
-        await client.query(`UPDATE tickets SET assignee_id = $2 WHERE id = $1`, [t.id, req.user!.id])
       }
+      // No auto-claim: assertTicketAssigned already rejected unassigned tickets,
+      // so an unassigned ticket can never be silently taken over by the updater.
 
       return id
     })
+
+    // Handover moves the ticket to a new holder — notify them once the write commits.
+    // Wrapped so a notification failure never fails the update.
+    if (body.handoverToUserId) {
+      try {
+        // The handover rides on this update's own ticket_event, so that event id is
+        // the notification's identity: a retried update cannot double-notify, while a
+        // later update that hands the ticket over again is a distinct event and does.
+        await createTicketAssignmentNotification({
+          ticketId: t.id,
+          toUserId: body.handoverToUserId,
+          kind: 'reassigned',
+          assignedByUserId: req.user!.id,
+          eventId,
+        })
+      } catch (notificationError) {
+        console.error(
+          `[notifications] failed after handover of ${t.public_id}:`,
+          notificationError,
+        )
+      }
+    }
 
     return created(
       res,
