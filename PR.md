@@ -136,6 +136,8 @@ Canonical `tickets.status` values (exactly four; never `New`):
 - Only **Admin** or the **current assignee** may Add Update. User B (QR scan or otherwise) on a ticket assigned to A → `403` / `NOT_ASSIGNED_USER` / `error: "This ticket is assigned to another user"` with `details.assignedTo` (assignee display name). Project manager and raiser do **not** bypass unless they are the assignee. List visibility is not applied on this path so the toast message is not replaced by a generic road Forbidden.
 - `visitedBy` is required (UUID). Missing/invalid → `400` / `VALIDATION_ERROR` with `details[].field = "visitedBy"`. Must be an Active **Technician** or **Engineer**. Stored in `ticket_events.meta.visitedBy`.
 - **Engineer** role exists (Technician-like permissions); lookups `/api/lookups/technicians` include Engineers.
+- One Add Update request produces exactly one work-history entry. If the on-site issue changes, the found issue is stored on that visit entry (and in `ticket_issues`); the API must not add a second `Issue reclassified` entry.
+- `resolvedReady` is `true` only for `updateType: "Site visit — resolved"`. `"Site visit — not resolved"` returns `resolvedReady: false` and is stored as a `visit_open` event.
 
 **FRONTEND CHANGE REQUIRED:** Send `visitedBy` on Add Update; toast `Ticket not assigned` / `This ticket is assigned to another user` from `error`; show field error under Visited By from `details`.
 

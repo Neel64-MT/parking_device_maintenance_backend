@@ -173,7 +173,8 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
     const limit = filters.limit
     const offset = sqlOffset(filters.page, limit)
     pageParams.push(limit, offset)
-    // Count only activity emitted by Update Ticket. Reclassification is part of that flow.
+    // One Add Update POST creates one visit event. `reclassified` is legacy history and is
+    // still counted so older tickets keep their previous "Updates logged" totals.
     const result = await query(
       `SELECT t.*, d.public_id AS device_public_id, d.slot_id, d.slot_number, r.name AS road_name,
               ru.full_name AS raised_by_name, au.full_name AS assignee_name,
@@ -703,6 +704,19 @@ router.post('/:ticketId/assign', authorize('All tickets', 'a'), async (req: Auth
   }
 })
 
+const RESOLVED_UPDATE_TYPE = 'Site visit — resolved'
+
+/** Exact match only — "Site visit — not resolved" also contains the word "resolved". */
+function isResolvedUpdate(updateType: string) {
+  return updateType === RESOLVED_UPDATE_TYPE
+}
+
+function updateEventType(updateType: string) {
+  if (isResolvedUpdate(updateType)) return 'visit_resolved'
+  if (updateType === 'Waiting for spare') return 'waiting_spare'
+  return 'visit_open'
+}
+
 const updateSchema = z.object({
   updateType: z.enum([
     'Site visit — not resolved',
@@ -748,28 +762,20 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
     const { partsCost, snapshots } = await resolvePartsCost(body.parts)
     const eventCost = visitEventCost(body.cost, partsCost)
 
-    let newStatus = t.status
-    if (body.updateType === 'Waiting for spare') newStatus = 'Waiting for spare'
-    else if (body.updateType.includes('resolved')) newStatus = 'Under repair'
-    else if (!t.assignee_id) newStatus = 'Under repair'
-    else newStatus = 'Under repair'
+    const isResolved = isResolvedUpdate(body.updateType)
+    const eventType = updateEventType(body.updateType)
+    // A waiting-spare visit holds the ticket; every other visit returns it to Under repair.
+    const newStatus = body.updateType === 'Waiting for spare' ? 'Waiting for spare' : 'Under repair'
 
     const eventId = await withTransaction(async (client) => {
       if (foundIssues && primaryFound) {
-        const changed =
-          primaryFound.subcategoryId !== (t.found_subcategory_id || t.reported_subcategory_id)
+        // One update request must create exactly one timeline entry. The visit event inserted
+        // below already stores the on-site issue, so no extra "reclassified" event is written.
         await client.query(
           `UPDATE tickets SET found_category_id = $2, found_subcategory_id = $3, updated_at = NOW() WHERE id = $1`,
           [t.id, primaryFound.categoryId, primaryFound.subcategoryId],
         )
         await replaceTicketIssues(client, t.id, 'found', foundIssues)
-        if (changed) {
-          await client.query(
-            `INSERT INTO ticket_events (ticket_id, event_type, title, body, status_label, actor_user_id, category_id, subcategory_id)
-             VALUES ($1,'reclassified','Issue reclassified','Category updated on site','Still open',$2,$3,$4)`,
-            [t.id, req.user!.id, primaryFound.categoryId, primaryFound.subcategoryId],
-          )
-        }
       }
 
       const inserted = await client.query(
@@ -780,11 +786,7 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
          RETURNING id`,
         [
           t.id,
-          body.updateType.includes('resolved')
-            ? 'visit_resolved'
-            : body.updateType === 'Waiting for spare'
-              ? 'waiting_spare'
-              : 'visit_open',
+          eventType,
           body.updateType,
           body.workDone || body.updateType,
           req.user!.id,
@@ -834,7 +836,7 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
         partsCost,
         labourCost: body.cost,
         parts: snapshots,
-        resolvedReady: body.updateType.includes('resolved'),
+        resolvedReady: isResolved,
       },
       'Update saved',
     )
