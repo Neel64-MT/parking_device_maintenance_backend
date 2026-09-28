@@ -34,7 +34,9 @@
 - Parts create/patch use Issue master `c`/`e` (or Technician/Engineer); hard-delete uses Issue master `d`; do not invent a new permission screen name.
 - Image zoom/crop are frontend-only; do not change upload APIs for crop/zoom.
 - Add Update (`POST /api/tickets/:id/updates`) requires `assignee_id`; reject unassigned with `409` / `TICKET_NOT_ASSIGNED` / `Ticket not assigned`. Do not auto-claim on update.
-- Ticket list `updates` counts only Update Ticket flow events (`visit_open`, `visit_resolved`, `waiting_spare`, `reclassified`); exclude raised, assigned, and closed events and do not filter by actor role.
+- One `POST /api/tickets/:id/updates` request creates exactly one ticket event. When the on-site (found) issue differs from the reported issue, store it on that visit event (`category_id` / `subcategory_id` + `ticket_issues`) — never insert an extra `reclassified` event for the same request.
+- Map update types to events by exact value: `Site visit — resolved` → `visit_resolved`; `Waiting for spare` → `waiting_spare`; everything else (including `Site visit — not resolved`) → `visit_open`. Never use substring matching for `resolved`.
+- Ticket list `updates` counts `visit_open`, `visit_resolved`, `waiting_spare`, plus legacy `reclassified` rows; exclude raised, assigned, and closed events and do not filter by actor role.
 - Add Update is allowed only for **Admin** or the **current assignee**. Reject others (including PM/raiser/user B after QR scan) with `403` / `NOT_ASSIGNED_USER` / `This ticket is assigned to another user` and `details.assignedTo`. Enforce server-side — do not rely on frontend hiding the button.
 - `visitedBy` is required on Add Update; return structured Zod/`VALIDATION_ERROR` JSON (`details[].field = "visitedBy"`), never HTML. Eligible users: Active Technician or Engineer.
 - API validation and business errors must return the existing JSON envelope via `handleApiError` — never framework HTML pages for handled routes.

@@ -6,7 +6,6 @@ import 'dotenv/config'
 import { createApp } from '../src/app.js'
 import { closeDb, query } from '../src/db/pool.js'
 import { deliverNotificationPush } from '../src/lib/notifications.js'
-import { deliverNotificationPush } from '../src/lib/notifications.js'
 
 const app = createApp()
 const server = app.listen(0)
@@ -42,6 +41,14 @@ async function main() {
   assert(cats.status === 200 && cats.body.data?.[0]?.subs?.[0], 'issue categories failed')
   const categoryId = cats.body.data[0].id as string
   const subCategoryId = cats.body.data[0].subs[0].id as string
+  const issuePairs = (cats.body.data as { id: string; subs?: { id: string }[] }[]).flatMap((category) =>
+    (category.subs || []).map((sub) => ({
+      categoryId: category.id,
+      subCategoryId: sub.id,
+    })),
+  )
+  const alternateIssue = issuePairs.find((pair) => pair.subCategoryId !== subCategoryId)
+  assert(alternateIssue, 'need a second subcategory for found-issue update test')
 
   const suffix = String(Date.now()).slice(-5)
   const device = await call('/api/devices', {
@@ -437,6 +444,52 @@ async function main() {
     'parts snapshot shape',
   )
   console.log('OK update with parts cost')
+
+  // One POST /updates must create exactly one timeline event, even when the on-site issue
+  // differs from the reported issue. "not resolved" must not be stored as visit_resolved.
+  const eventsBefore = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM ticket_events WHERE ticket_id = $1`,
+    [ticketUuid],
+  )
+  const notResolved = await call(`/api/tickets/${ticketId}/updates`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      updateType: 'Site visit — not resolved',
+      workDone: 'Found a different fault on site',
+      issues: [alternateIssue],
+    }),
+  })
+  assert(
+    notResolved.status === 201 || notResolved.status === 200,
+    `not-resolved update failed: ${JSON.stringify(notResolved.body).slice(0, 300)}`,
+  )
+  assert(notResolved.body.data?.resolvedReady === false, 'not-resolved update must not be resolvedReady')
+  const eventsAfter = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM ticket_events WHERE ticket_id = $1`,
+    [ticketUuid],
+  )
+  assert(
+    eventsAfter.rows[0]?.n === (eventsBefore.rows[0]?.n ?? 0) + 1,
+    `one update must create one event: before ${eventsBefore.rows[0]?.n} after ${eventsAfter.rows[0]?.n}`,
+  )
+  const latestEvent = await query<{ event_type: string; category_id: string; subcategory_id: string }>(
+    `SELECT event_type, category_id, subcategory_id
+     FROM ticket_events WHERE ticket_id = $1
+     ORDER BY created_at DESC, id DESC LIMIT 1`,
+    [ticketUuid],
+  )
+  assert(latestEvent.rows[0]?.event_type === 'visit_open', 'not-resolved update must be visit_open')
+  assert(
+    latestEvent.rows[0]?.subcategory_id === alternateIssue.subCategoryId,
+    'single update event must carry the on-site issue',
+  )
+  const reclassifiedCount = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM ticket_events WHERE ticket_id = $1 AND event_type = 'reclassified'`,
+    [ticketUuid],
+  )
+  assert(reclassifiedCount.rows[0]?.n === 0, 'update must not create a separate reclassified event')
+  console.log('OK one update = one timeline event (found issue recorded on the visit)')
 
   const badPart = await call(`/api/tickets/${ticketId}/updates`, {
     method: 'POST',

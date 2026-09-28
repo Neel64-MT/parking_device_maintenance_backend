@@ -228,7 +228,7 @@ List/export row `status` and tiles use presentation helpers (DB unchanged):
 |-------|---------|
 | `daysOpen` | Whole days from `raised_at` to `closed_at` (or now if still open) |
 | `daysAfterClose` | Whole days since `closed_at`, or `null` if not closed |
-| `updates` | Count of `visit_open`, `visit_resolved`, `waiting_spare`, and `reclassified` events; raised/assigned/closed excluded; no actor-role filter |
+| `updates` | Count of `visit_open`, `visit_resolved`, and `waiting_spare` events, plus legacy `reclassified` rows; raised/assigned/closed excluded; no actor-role filter. One `POST /api/tickets/:id/updates` creates exactly one event, and the on-site (found) issue is stored on that visit event |
 
 List-only. Ticket detail still uses a “Days open” header fact, not `daysAfterClose`.
 
