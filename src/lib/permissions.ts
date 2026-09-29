@@ -116,7 +116,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     },
   },
   'Site attendant': {
-    note: 'Can scan and raise tickets on any road; list stays raiser-scoped. Cannot update, assign, or close.',
+    note: 'Can scan and raise tickets on any road; list stays raiser-scoped. May run Device Sync and manage Issue master. Cannot update, assign, or close tickets.',
     scope: 'assigned_roads',
     p: {
       Dashboard: '......',
@@ -124,11 +124,11 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
       'Update ticket': '......',
       'All tickets': 'v.....',
       'Work report': '......',
-      'Device list': 'v.....',
+      'Device list': 'vc....',
       'Add device': '......',
       'Device history': '......',
       'Scan QR': 'v.....',
-      'Issue master': 'v.....',
+      'Issue master': 'vce..d',
       'Road master': '......',
       Users: '......',
       'Roles & permissions': '......',

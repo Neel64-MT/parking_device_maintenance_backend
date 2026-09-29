@@ -9,6 +9,7 @@ Node.js (Express + TypeScript) REST API for the parking device maintenance front
 - JWT Bearer auth (email or mobile + password)
 - Local file uploads (`uploads/`)
 - QR PNG via `qrcode`
+- Browser Web Push via `web-push` + VAPID
 
 ## Setup
 
@@ -57,6 +58,42 @@ Admin password change: `PATCH /api/users/:id` with `{ "password": "..." }` (`aut
 
 Optional SMTP: set `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `MAIL_FROM`. Without SMTP, development logs the reset link to the server console.
 
+### Browser notifications
+
+Run `npx web-push generate-vapid-keys` once, then set all three server variables in `.env`:
+
+```env
+VAPID_PUBLIC_KEY=...
+VAPID_PRIVATE_KEY=...
+VAPID_SUBJECT=mailto:admin@example.com
+```
+
+`VAPID_PRIVATE_KEY` stays server-side. The frontend obtains the public key from `GET /api/notifications/push-config`, registers a service-worker Push API subscription with `PUT /api/notifications/push-subscriptions`, and removes it with `DELETE /api/notifications/push-subscriptions/:id`.
+
+New-ticket notifications are stored in `notifications`; eligible recipients are Active users with the existing `Admin`, `Project manager`, or `Control room` role and `All tickets` view permission. Notification persistence or push failure never rolls back or changes a successful ticket raise.
+
+Notification APIs:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/notifications` | Paginated current-user notifications (`unreadOnly=true` supported) |
+| GET | `/api/notifications/unread-count` | Current-user unread badge count |
+| PATCH | `/api/notifications/:id/read` | Mark one owned notification read |
+| PATCH | `/api/notifications/read-all` | Mark all owned notifications read |
+| GET | `/api/notifications/push-config` | VAPID availability + public key + registration state |
+| PUT | `/api/notifications/push-subscriptions` | Register/update one browser subscription |
+| DELETE | `/api/notifications/push-subscriptions/:id` | Remove one owned browser subscription |
+
+### Multi-issue ticket payloads
+
+`POST /api/tickets`, `POST /api/tickets/:ticketId/updates`, and `POST /api/tickets/:ticketId/close` accept the preferred `issues` array:
+
+```json
+{ "issues": [{ "categoryId": "uuid", "subCategoryId": "uuid" }] }
+```
+
+The legacy single `categoryId` / `subCategoryId` pair remains supported. Ticket detail returns `issuesReported` and `issuesFound`; raise returns `eventId` so uploaded photos can be attached afterward.
+
 ### Demo users (seed)
 
 | Name | Role | Mobile | Email | Password |
@@ -101,6 +138,7 @@ The sibling `frontend/` directory is **read-only** for this backend agent unless
 |--------|---------|
 | Dashboard | `GET /api/dashboard` |
 | Tickets | `/api/tickets*` |
+| Ticket notifications | `/api/notifications*` + browser service worker (**frontend integration complete**) |
 | Devices | `/api/devices*` |
 | Road master | `/api/roads*` |
 | Issue master | `/api/issues*` |

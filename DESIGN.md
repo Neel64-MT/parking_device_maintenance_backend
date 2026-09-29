@@ -238,6 +238,19 @@ Tickets also return `tiles` / `tabCounts` (aggregated over visibility + base fil
 
 Status-card → list contract (frontend): `GET /api/devices?status=Working|Under%20repair|Not%20working&page=1&limit=10` — same Device List API; not tickets.
 
+### Device list ordering (Phase 41)
+
+`deviceListQuery` sorts **Slot Label** (`devices.slot_number`) **ascending** in SQL, so the order holds on every page rather than only within a page:
+
+```sql
+ORDER BY (slot_number = ''), slot_number, public_id   -- DEVICE_LIST_ORDER_BY
+```
+
+- Blank labels sort last; `public_id` is the stable tie-break, so `LIMIT/OFFSET` paging never repeats or skips a row when two labels match.
+- `slot_number` is a plain zero-padded `TEXT` (`S1-001` … `S1-010`, `S2-001`), so plain ascending text order is the expected Slot Label order — no natural-sort helper or extra dependency.
+- The single constant feeds both `GET /api/devices` (paginated) and `GET /api/devices/export`, so the CSV matches the list.
+- Ticket list ordering (`ORDER BY t.raised_at DESC`) is **unchanged** — the ticket list has no Slot Label column and its order is ticket chronology, used by the Open / Assigned / Closed tabs.
+
 ## Tickets SQL
 
 1. Base WHERE: visibility + `q` / road / category / assignee  
@@ -285,6 +298,25 @@ Image zoom/crop are frontend-only; `POST /api/uploads` is unchanged.
 | `DELETE /api/issues/subcategories/:id` | Hard-delete unused — `d`; used on tickets → `409 IN_USE` |
 
 Raise picker stays `GET /api/lookups/issue-categories` (active only).
+
+---
+
+# Design — Multiple issues per ticket (Phase 41)
+
+## Storage
+
+| Table / column | Notes |
+|----------------|-------|
+| `ticket_issues` | `(ticket_id, role reported\|found, category_id, subcategory_id, sort_order)`; UNIQUE per ticket+role+sub |
+| `tickets.reported_*` / `found_*` | Primary (first) issue for backward compatibility |
+
+## API
+
+- Raise / Update / Close: `issues: [{ categoryId, subCategoryId }, …]` preferred; legacy single pair still accepted
+- Detail: `issuesReported` / `issuesFound` arrays `{ categoryId, subCategoryId, category, sub, severity }`
+- Update with `issues` **replaces** found list; omit leaves found unchanged
+
+Site attendant: Device list `vc....` (Sync); Issue master `vce..d`; Add device still denied.
 
 ## Visit cost
 
@@ -410,3 +442,118 @@ QR fetch: `GET /qr-codes?status=all&page=N&per_page=50`. Page count from `data.p
 ## Roads after sync
 
 Device Sync upserts parking locations into `roads` (single source of truth). No separate sync-roads endpoint — `GET /api/roads` and `GET /api/lookups/roads` simply read that table.
+
+---
+
+# Design — New-ticket notifications and Web Push (Phase 38)
+
+## Storage
+
+| Table | Purpose |
+|-------|---------|
+| `notifications` | One persistent event per recipient, related ticket, read state, and accepted Web Push timestamp |
+| `push_subscriptions` | Multiple browser/device endpoints per user with `p256dh` / `auth` keys |
+
+`notifications` is unique on `(recipient_user_id, type, related_entity_type, related_entity_id)`. `push_subscriptions.endpoint` is unique, so registering the same browser endpoint updates keys instead of creating a duplicate.
+
+## Recipients and authorization
+
+Two event families share one table but have different recipient rules.
+
+### `ticket.raised` (unchanged)
+
+- Recipients: Active users whose current role is `Admin`, `Project manager`, or `Control room` and whose existing `All tickets` permission has `v`
+- The notification link follows existing road scope / raiser / assignee access (`canOpen` may be `false` when the recipient cannot open the ticket). It does not widen ticket list or detail authorization.
+
+### `ticket.assigned` / `ticket.reassigned` (new)
+
+- Recipient: **only the newly assigned user**; the previous assignee is never notified
+- The recipient is the assignee, so assignee-scoped ticket access always applies: `canOpen` is always `true` and `url` always points at `/tickets/TK-xxxx`
+- The recipient must be Active and hold a role in `NOTIFICATION_DELIVERY_ROLES`; otherwise nothing is written and this is not an error
+
+| Constant | Roles | Applies to |
+|---|---|---|
+| `NEW_TICKET_NOTIFICATION_ROLES` | Admin, Project manager, Control room | `ticket.raised` fan-out |
+| `NOTIFICATION_DELIVERY_ROLES` | the above + Technician, Engineer | Web Push delivery, bell eligibility |
+
+Technician/Engineer are included in delivery because they are the only other roles `assertEligibleAssignee` can assign to. They never receive `ticket.raised`.
+
+### Shared authorization rules
+
+- API access: JWT + `authorize('All tickets', 'v')`
+- No individual user IDs and no new permission screen
+- Notification reads/updates always include `recipient_user_id = current user`; another user's notification returns `404`
+
+## Ticket flow
+
+1. `POST /api/tickets` writes the ticket, raised event, and optional initial assignment.
+2. Only after those writes succeed, `createNewTicketNotifications(ticketId)` resolves the actual ticket/device/issue/raiser fields.
+3. Recipient rows are inserted in a notification-only transaction with `ON CONFLICT DO NOTHING`.
+4. The ticket route catches and logs notification errors independently; ticket creation still returns its original success response.
+5. Failed ticket creation never calls the notification service.
+
+## Assignment flow
+
+Notifications are created from the business layer at every point where `tickets.assignee_id` actually changes, always after the owning transaction commits:
+
+1. The assignment transaction updates `tickets`, writes the `ticket_assignments` trail, and writes the `ticket_events` row.
+2. After it commits, the route calls `createTicketAssignmentNotification({ ticketId, toUserId, kind, assignedByUserId })` inside its own try/catch.
+3. The service inserts one row with `ON CONFLICT DO NOTHING` and schedules background push.
+4. A notification failure is logged and never rolls back or fails the assignment.
+
+Idempotency comes from the existing unique key: assigning the same user again (or replaying the same event) cannot create a second row, and `POST /:ticketId/assign` returns early when the assignee is unchanged.
+
+## Ticket-scoped read state
+
+`POST /api/notifications/ticket/:ticketId/read` → `markTicketNotificationsRead(userId, ticketId)`:
+
+```sql
+UPDATE notifications
+   SET read_at = NOW()
+ WHERE recipient_user_id = $1
+   AND related_entity_type = 'ticket'
+   AND related_entity_id = $2
+   AND read_at IS NULL
+RETURNING id
+```
+
+- Scoped to the caller, so a user can never mark another user's row.
+- Returns `{ updated }`; `0` means there was nothing unread and no row was rewritten.
+- `RETURNING` is required because the PGlite pool derives `rowCount` from returned rows.
+- The route is registered **before** `PATCH /:id/read` so the literal `ticket` segment is not captured by the `:id` param.
+
+## Notification content
+
+Stored `data` contains ticket reference/link, road/slot/device identity, reported category/subcategory/severity, raiser, and created time. It excludes description, photos, costs, email, and mobile.
+
+Browser payload:
+
+```json
+{
+  "notification": {
+    "title": "New ticket raised",
+    "body": "New ticket TK-1042 has been raised for Slot 42 on Science City.",
+    "tag": "notification.<uuid>",
+    "data": { "url": "/tickets/TK-1042" }
+  },
+  "data": {
+    "notificationId": "<uuid>",
+    "type": "ticket.raised",
+    "ticketId": "TK-1042"
+  }
+}
+```
+
+## Web Push lifecycle
+
+- `GET /api/notifications/push-config` returns `{ available, publicKey, registered }`. Browser permission remains browser-owned and is never stored.
+- `PUT /api/notifications/push-subscriptions` validates a public HTTPS endpoint and browser keys, then upserts by endpoint for the current user.
+- `DELETE /api/notifications/push-subscriptions/:id` removes only the current user's subscription.
+- Configured delivery uses `setImmediate` + `web-push`; there is no new queue or WebSocket/SSE system.
+- Push service `404` / `410` deletes the expired subscription. Other errors are logged without endpoint/key contents.
+- `push_sent_at` is set after at least one push is accepted, preventing a later delivery pass from sending that notification again.
+- Without VAPID configuration, persistent in-app notifications still work and push delivery is skipped.
+
+## Frontend
+
+**FRONTEND INTEGRATION COMPLETE:** the sibling frontend owns the service worker, explicit permission action, VAPID subscription, authenticated read-state relay, and the shared unread badges on the Tickets parent and All Tickets child. No new menu item or realtime transport was added.

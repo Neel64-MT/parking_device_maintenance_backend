@@ -70,6 +70,8 @@ backend/
 | Auth | JWT Bearer + email/mobile password |
 | Uploads | multer → local disk |
 | QR labels | `qrcode` PNG |
+| Browser push | `web-push` + VAPID; persistent notifications/subscriptions in PostgreSQL |
+| Browser push | `web-push` + VAPID; persistent notifications/subscriptions in PostgreSQL |
 
 No Nest, Prisma, or Next.js file-based routing. Express routers live in `src/routes/*.ts`.
 
@@ -79,6 +81,7 @@ No Nest, Prisma, or Next.js file-based routing. Express routers live in `src/rou
 - **Masters** — Roads, issue categories/subs (hard-delete unused category/sub via `/api/issues`; used → `409 IN_USE`), parts (with `amount`; CRUD + hard-delete unused via `/api/parts` and Issue master flags including `d` for Tech/Engineer/PM/Admin)
 - **Devices** — Inventory, QR scan, derived operational status from open tickets
 - **Tickets** — Lifecycle (`Open` → assign/`Under repair` → `Waiting for spare` optional → `Closed`), events, visit cost = labour + parts master, photos
+- **Notifications** — Persistent per-user new-ticket alerts, unread/read state, VAPID browser subscriptions and non-blocking Web Push delivery
 - **Reports** — Dashboard aggregates, work report by period
 
 ## Password reset architecture
@@ -170,6 +173,10 @@ PATCH /api/devices/:id     authorize Device list e
 
 `GET /api/devices/:deviceId` already returns `slotId` / `slotIdentifier` / `qrNumber` for the Edit form.
 
+### Device list order
+
+`GET /api/devices` and `GET /api/devices/export` both order by **Slot Label ascending** — `DEVICE_LIST_ORDER_BY` = `ORDER BY (slot_number = ''), slot_number, public_id` in `src/routes/devices.ts`. Sorting lives in SQL (not the frontend) so it is correct across `LIMIT/OFFSET` pagination; blank labels sort last and `public_id` is the stable tie-break. Filters, tiles, and the pagination envelope are unchanged. Ticket list order (`raised_at DESC`) is untouched.
+
 One open ticket per device UUID (`status <> 'Closed'`) = one per Slot Id when `devices.slot_id` is set (unique). DB: `idx_tickets_one_open_per_device`. Raise pre-check + unique-violation → same `OPEN_TICKET_EXISTS` details. Raise also requires non-empty `slot_identifier` → `400` / `SLOT_IDENTIFIER_REQUIRED`.
 
 ## Signup approval
@@ -225,6 +232,7 @@ List/export row `status` and tiles use presentation helpers (DB unchanged):
 |-------|---------|
 | `daysOpen` | Whole days from `raised_at` to `closed_at` (or now if still open) |
 | `daysAfterClose` | Whole days since `closed_at`, or `null` if not closed |
+| `updates` | Count of `visit_open`, `visit_resolved`, and `waiting_spare` events, plus legacy `reclassified` rows; raised/assigned/closed excluded; no actor-role filter. One `POST /api/tickets/:id/updates` creates exactly one event, and the on-site (found) issue is stored on that visit event |
 
 List-only. Ticket detail still uses a “Days open” header fact, not `daysAfterClose`.
 
@@ -342,3 +350,73 @@ APIs: `POST /api/device-sync`, `GET /api/device-sync/latest`, `GET /api/device-s
 Synced locations are written into the existing `roads` table (single source of truth). `GET /api/roads` and `GET /api/lookups/roads` are thin reads of that table — no separate sync-roads API.
 
 Field mapping (external → DB): `slot.id` → `slot_id` (**immutable** match key; **only required** sync field), `slot.slot_label` → `slot_number` (fallback `String(slotId)`), `mac_address` → `slot_identifier` (optional; null does not wipe existing), `qr_number` → `qr_code` (optional; placeholder `UNLINKED-SLOT-{slotId}` if empty), `parking_location` → `roads` / `road_id`. Same Slot Id + changed MAC/QR updates the existing row; duplicates prevented by unique `slot_id`. Ticket/device APIs expose Slot Id as `deviceId` when available (`deviceDisplayId`); `GET /api/devices/:deviceId` resolves by `public_id`, UUID, or Slot Id text (`deviceLookupWhere`). Device CSV “Device ID” prefers Slot Id the same way.
+
+## New-ticket notifications and browser push
+
+```text
+POST /api/tickets succeeds
+  → ticket + raised event + optional assignment are written
+  → notifications service resolves eligible Active recipients
+  → Admin / Project manager / Control room with All tickets v
+  → one `ticket.raised` row per recipient (unique event key)
+  → optional `/tickets/TK-xxxx` link uses existing road/ownership access
+  → setImmediate Web Push delivery when VAPID is configured
+       → send to every active browser subscription for that recipient
+       → 404/410 → delete expired subscription
+       → success → set notifications.push_sent_at
+```
+
+Notification persistence runs after ticket creation and is wrapped separately by the ticket route. A notification database or push failure is logged but never changes the successful `201 Ticket raised` response or rolls back the ticket. Failed ticket requests never enter notification creation.
+
+| Piece | Location |
+|-------|----------|
+| Migration | `src/db/migrations/019_notifications.sql` (`notifications`, `push_subscriptions`) |
+| Service | `src/lib/notifications.ts` |
+| Routes | `src/routes/notifications.ts` mounted at `/api/notifications` |
+| Ticket hook | `src/routes/tickets.ts` after raised event/assignment writes |
+| Config | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` |
+
+No WebSocket, SSE, service worker, external queue, or second permission system is introduced. Web Push reuses the existing in-process `setImmediate` background pattern. The frontend owns browser permission and must provide its own service worker; the backend only stores the resulting subscription and sends encrypted Web Push payloads. The sibling frontend Phase 39 integration now consumes these APIs, relays notification IDs for authenticated read-state updates, and renders the shared unread badges.
+
+## Assignment notifications and ticket-scoped read state
+
+```text
+Ticket assignment changes (after the assignment transaction commits)
+  → createTicketAssignmentNotification(ticketId, toUserId, kind)
+  → kind 'assigned'   → type `ticket.assigned`
+  → kind 'reassigned' → type `ticket.reassigned`
+  → recipient = the NEW assignee only (previous assignee is not notified)
+  → ON CONFLICT DO NOTHING → assigning the same user again is a no-op
+  → setImmediate Web Push delivery (same path as `ticket.raised`)
+
+User opens /tickets/:ticketId
+  → POST /api/notifications/ticket/:ticketId/read
+  → markTicketNotificationsRead(userId, ticketId)
+  → UPDATE only rows WHERE recipient_user_id = current user AND read_at IS NULL
+  → returns { updated }; 0 means nothing unread, so no row is rewritten
+```
+
+Assignment notifications are raised from the same three call sites that change `tickets.assignee_id`, each after its own transaction commits and wrapped in its own try/catch, so a notification failure is logged but never rolls back or fails the assignment:
+
+| Assignment path | `src/routes/tickets.ts` | Notification kind |
+|---|---|---|
+| Raise with `assigneeId` | after the raise transaction | `assigned` |
+| `POST /:ticketId/assign` | after the assign transaction | `assigned` / `reassigned` |
+| Update `handoverToUserId` | after the update transaction | `reassigned` |
+
+`POST /:ticketId/assign` already returns early when the assignee is unchanged, so a no-op assign produces no notification.
+
+### Role classification
+
+Two separate role lists exist, because the two events have different business rules:
+
+| List | Roles | Used by |
+|---|---|---|
+| `NEW_TICKET_NOTIFICATION_ROLES` | Admin, Project manager, Control room | `ticket.raised` **fan-out** (unchanged) |
+| `NOTIFICATION_DELIVERY_ROLES` | the above **+ Technician, Engineer** | Web Push delivery + frontend bell eligibility |
+
+Field roles are added to the delivery list because they are the only other roles that `assertEligibleAssignee` can assign a ticket to, so an assignee is never un-alertable. They still do **not** receive `ticket.raised` alerts. `Site attendant` and `AMC officer` are excluded from both, because they are never eligible assignees.
+
+### No silent auto-claim
+
+An unassigned ticket is rejected for Add Update with `409 / TICKET_NOT_ASSIGNED` for **every** role, including Admin/PM, so a ticket must be routed by an assigner before it can be worked. The previous auto-claim (silently setting `assignee_id` to the updater) was removed.

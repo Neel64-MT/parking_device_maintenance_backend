@@ -15,6 +15,7 @@ import rolesRouter from './routes/roles.js'
 import devicesRouter from './routes/devices.js'
 import deviceSyncRouter from './routes/device-sync.js'
 import ticketsRouter from './routes/tickets.js'
+import notificationsRouter from './routes/notifications.js'
 import dashboardRouter from './routes/dashboard.js'
 import reportsRouter from './routes/reports.js'
 import uploadsRouter from './routes/uploads.js'
@@ -43,6 +44,7 @@ export function createApp() {
   app.use('/api/devices', devicesRouter)
   app.use('/api/device-sync', deviceSyncRouter)
   app.use('/api/tickets', ticketsRouter)
+  app.use('/api/notifications', notificationsRouter)
   app.use('/api/dashboard', dashboardRouter)
   app.use('/api/reports', reportsRouter)
   app.use('/api/uploads', uploadsRouter)

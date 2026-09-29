@@ -141,6 +141,9 @@ async function main() {
     '/api/auth/me',
     '/api/dashboard',
     '/api/tickets',
+    '/api/notifications',
+    '/api/notifications/unread-count',
+    '/api/notifications/push-config',
     '/api/devices',
     '/api/roads',
     '/api/issues',
@@ -428,6 +431,22 @@ async function main() {
     )
   }
   console.log('OK devices status-card filter')
+
+  // Device list order: Slot Label (slot_number) ascending, and stable across pages.
+  const slotLabels: string[] = []
+  for (const page of [1, 2]) {
+    const devPage = await call(`/api/devices?page=${page}&limit=10`, { headers: auth })
+    assert(devPage.status === 200 && devPage.body.success, `devices page=${page} failed`)
+    for (const row of devPage.body.data as Array<{ slotLabel: string | null }>) {
+      if (row.slotLabel) slotLabels.push(row.slotLabel)
+    }
+  }
+  const slotLabelsSorted = [...slotLabels].sort((a, b) => a.localeCompare(b))
+  assert(
+    JSON.stringify(slotLabels) === JSON.stringify(slotLabelsSorted),
+    `device list must be Slot Label ascending across pages (${slotLabels.join(',')})`,
+  )
+  console.log('OK devices Slot Label ascending')
 
   const partsLookup = await call('/api/lookups/parts', { headers: auth })
   assert(partsLookup.status === 200 && Array.isArray(partsLookup.body.data), 'lookups parts failed')
@@ -1116,15 +1135,35 @@ async function main() {
   const syncUnauth = await call('/api/device-sync', { method: 'POST', body: '{}' })
   assert(syncUnauth.status === 401, 'device-sync without auth must be 401')
 
+  const prevSyncToken = process.env.DEVICE_SYNC_API_TOKEN
+  process.env.DEVICE_SYNC_API_TOKEN = ''
+
   const syncTech = await call('/api/device-sync', {
     method: 'POST',
     headers: techAuth,
     body: '{}',
   })
-  assert(syncTech.status === 403, 'tech must not start device-sync')
+  // Technician has Device list c (migration 014) — authz passes; unconfigured → 503
+  assert(
+    syncTech.status === 503 && syncTech.body.code === 'DEVICE_SYNC_NOT_CONFIGURED',
+    `tech device-sync should be authorized (503): ${JSON.stringify(syncTech.body).slice(0, 200)}`,
+  )
 
-  const prevSyncToken = process.env.DEVICE_SYNC_API_TOKEN
-  process.env.DEVICE_SYNC_API_TOKEN = ''
+  const attSyncLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9016374408', password: 'Password123' }),
+  })
+  assert(attSyncLogin.status === 200 && attSyncLogin.body.data?.token, 'attendant login for sync')
+  const attSyncAuth = { Authorization: `Bearer ${attSyncLogin.body.data.token as string}` }
+  const syncAtt = await call('/api/device-sync', {
+    method: 'POST',
+    headers: attSyncAuth,
+    body: '{}',
+  })
+  assert(
+    syncAtt.status === 503 && syncAtt.body.code === 'DEVICE_SYNC_NOT_CONFIGURED',
+    `site attendant device-sync should be authorized (503): ${JSON.stringify(syncAtt.body).slice(0, 200)}`,
+  )
 
   const syncNoToken = await call('/api/device-sync', {
     method: 'POST',
