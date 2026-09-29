@@ -111,6 +111,18 @@ Project manager Users permission: `vce...` (view, create, edit). Roles & permiss
 
 No new signup-request table or approve endpoint.
 
+## Users list visibility and account deletion
+
+**Why the rules live in SQL.** Hiding rows in React would leak every restricted account to any caller who opens devtools, so `appendUserVisibilitySql` is ANDed into the single `WHERE` used by `GET /api/users`. It is applied to the tiles query too (with its own params, since tiles ignore `q` / `status`) so "Total users" equals the number of rows the caller may actually see.
+
+**Two independent clauses, not one role check.** `u.id <> $me` applies to every role and is what removes the caller's own account. `r.name <> 'Admin'` is added only for non-Admin viewers, which is what makes a PM unable to retrieve Admin accounts. Admin therefore keeps full visibility over everyone else, including other Admins.
+
+**Search cannot bypass it.** `q` also matches `LOWER(r.name)`, so searching "Admin" is the natural bypass attempt. Because the visibility clause is one of the ANDed predicates, that search simply returns nothing for a PM and still returns Admins for an Admin.
+
+**Delete is a deactivation.** `RULES.md` requires that a user's name stay readable on the tickets they raised or closed, so `DELETE /api/users/:id` sets `status = 'Inactive'` instead of removing the row. This reuses the existing `users.status` enum — no migration, no new table, no cascade to reason about, and `loadAuthUser` already refuses non-`Active` users so the session dies immediately.
+
+**Guard order in the handler** is deliberate: self first (the most specific, and it must fire even if the caller's other state changes), then existence, then the no-op guard, then `assertNotLastActiveAdmin` — the same helper `PATCH` uses, extracted so the "at least one active Admin" rule cannot drift between the two write paths.
+
 ---
 
 # Design — QR Scan Payload & One-Open-Ticket Rule
