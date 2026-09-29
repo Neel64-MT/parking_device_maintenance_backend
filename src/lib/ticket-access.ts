@@ -36,6 +36,17 @@ export function assertTicketAccess(
   throw new ApiError(403, 'Forbidden', 'FORBIDDEN')
 }
 
+/**
+ * Roles that may hold a ticket ("Hand to" dropdown + assignee filter).
+ * Field roles only: Project manager routes and closes work without attending it,
+ * and Control room raises and routes rather than holding the ticket. This is
+ * deliberately narrower than `canAssignTickets` below, which answers a different
+ * question — who may *perform* an assign. Keep this the single source:
+ * `GET /api/lookups/technicians` and `assertEligibleAssignee` both use it, so the
+ * dropdown and the API cannot disagree.
+ */
+export const ASSIGNABLE_ROLES = ['Technician', 'Engineer']
+
 /** Assign / reassign: Control room, Admin, or Project manager only. Technicians cannot. */
 export function canAssignTickets(user: AuthUser) {
   return (

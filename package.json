@@ -11,6 +11,8 @@
     "db:seed": "tsx src/db/seed.ts",
     "db:setup": "tsx src/db/migrate.ts && tsx src/db/seed.ts",
     "test:smoke": "tsx scripts/smoke-inprocess.ts",
+    "test:smoke:users": "tsx scripts/smoke-users.ts",
+    "test:smoke:roles": "tsx scripts/smoke-roles.ts",
     "test:smoke:writes": "tsx scripts/smoke-writes.ts",
     "test:smoke:close": "tsx scripts/smoke-close.ts"
   },

@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { ApiError, handleApiError } from '../lib/api-error.js'
 import { created, ok } from '../lib/respond.js'
-import { query } from '../db/pool.js'
+import { query, withTransaction } from '../db/pool.js'
 import { authorize, requireAuth, type AuthedRequest } from '../middleware/auth.js'
 import {
   hashPassword,
@@ -12,6 +12,7 @@ import {
   omitPasswordHash,
   passwordSchema,
 } from '../lib/auth.js'
+import { appendUserVisibilitySql, assertNotLastActiveAdmin } from '../lib/user-access.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -21,7 +22,8 @@ router.get('/', authorize('Users', 'v'), async (req: AuthedRequest, res) => {
     const q = String(req.query.q || '').trim().toLowerCase()
     const statusFilter = String(req.query.status || '').trim()
     const params: unknown[] = []
-    const clauses: string[] = []
+    // Own account is never listed, and a non-Admin viewer never sees Admin accounts.
+    const clauses: string[] = [appendUserVisibilitySql(req.user!, params)]
 
     if (q) {
       params.push(`%${q}%`)
@@ -35,6 +37,8 @@ router.get('/', authorize('Users', 'v'), async (req: AuthedRequest, res) => {
     }
 
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+    // LEFT JOIN: an account whose role was deleted keeps `role_id IS NULL` (migration 021)
+    // and must stay listed so an Admin can give it a new role before reactivating it.
     const result = await query(
       `SELECT u.id, u.full_name, u.email, u.mobile, u.status, u.last_active_at, u.role_id,
               r.name AS role,
@@ -44,7 +48,7 @@ router.get('/', authorize('Users', 'v'), async (req: AuthedRequest, res) => {
                 WHERE t.assignee_id = u.id AND t.status NOT IN ('Closed')
               ) AS open_tickets
        FROM users u
-       JOIN roles r ON r.id = u.role_id
+       LEFT JOIN roles r ON r.id = u.role_id
        LEFT JOIN user_roads ur ON ur.user_id = u.id
        LEFT JOIN roads rd ON rd.id = ur.road_id
        ${where}
@@ -53,15 +57,20 @@ router.get('/', authorize('Users', 'v'), async (req: AuthedRequest, res) => {
       params,
     )
 
-    const tiles = await query(`
-      SELECT
-        COUNT(*)::int AS total,
-        COUNT(*) FILTER (WHERE u.status = 'Pending')::int AS pending,
-        COUNT(*) FILTER (WHERE r.name = 'Technician')::int AS technicians,
-        COUNT(*) FILTER (WHERE r.name = 'Site attendant')::int AS attendants,
-        COUNT(*) FILTER (WHERE r.name = 'Control room')::int AS control_room
-      FROM users u JOIN roles r ON r.id = u.role_id
-    `)
+    // Same visibility clause as the list so tile counts match what is visible.
+    // Tiles stay unfiltered by `q` / `status`, so they get their own params.
+    const tileParams: unknown[] = []
+    const tiles = await query(
+      `SELECT
+         COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE u.status = 'Pending')::int AS pending,
+         COUNT(*) FILTER (WHERE r.name = 'Technician')::int AS technicians,
+         COUNT(*) FILTER (WHERE r.name = 'Site attendant')::int AS attendants,
+         COUNT(*) FILTER (WHERE r.name = 'Control room')::int AS control_room
+       FROM users u LEFT JOIN roles r ON r.id = u.role_id
+       WHERE ${appendUserVisibilitySql(req.user!, tileParams)}`,
+      tileParams,
+    )
 
     return ok(res, {
       tiles: [
@@ -77,7 +86,10 @@ router.get('/', authorize('Users', 'v'), async (req: AuthedRequest, res) => {
         you: row.id === req.user!.id,
         email: row.email,
         mobile: row.mobile,
-        role: row.role,
+        role: row.role ?? null,
+        // True when the account's role was deleted; it must get a new role before it can be
+        // activated again. Drives the "No role" marker in the Users table.
+        roleMissing: !row.role_id,
         roleId: row.role_id,
         roads: row.roads,
         openTickets: row.open_tickets || null,
@@ -138,20 +150,26 @@ router.patch('/:id', authorize('Users', 'e'), async (req, res) => {
     const existing = await query('SELECT * FROM users WHERE id = $1', [req.params.id])
     if (!existing.rowCount) throw new ApiError(404, 'User not found', 'NOT_FOUND')
 
+    if (body.roleId) {
+      const role = await query('SELECT id FROM roles WHERE id = $1', [body.roleId])
+      if (!role.rowCount) throw new ApiError(400, 'Role not found', 'ROLE_NOT_FOUND')
+    }
+
+    // An account can lose its role when that role is deleted (migration 021 sets role_id to
+    // NULL). It may stay Inactive, but it must not be reactivated without a role: an Active
+    // user with no role cannot be authorised, because requireAuth resolves permissions
+    // through the roles join. So "change the role" is a precondition of "make Active".
+    const effectiveRoleId = body.roleId ?? existing.rows[0].role_id
+    if (body.status === 'Active' && !effectiveRoleId) {
+      throw new ApiError(
+        409,
+        'Select a role for this user before activating the account.',
+        'ROLE_REQUIRED',
+      )
+    }
+
     if (body.status === 'Inactive') {
-      const adminCheck = await query(
-        `SELECT COUNT(*)::int AS n FROM users u
-         JOIN roles r ON r.id = u.role_id
-         WHERE r.name = 'Admin' AND u.status = 'Active' AND u.id <> $1`,
-        [req.params.id],
-      )
-      const isAdmin = await query(
-        `SELECT r.name FROM users u JOIN roles r ON r.id = u.role_id WHERE u.id = $1`,
-        [req.params.id],
-      )
-      if (isAdmin.rows[0]?.name === 'Admin' && adminCheck.rows[0].n < 1) {
-        throw new ApiError(409, 'At least one admin must remain active', 'LAST_ADMIN')
-      }
+      await assertNotLastActiveAdmin(String(req.params.id))
     }
 
     const passwordHash = body.password ? await hashPassword(body.password) : null
@@ -192,6 +210,63 @@ router.patch('/:id', authorize('Users', 'e'), async (req, res) => {
     }
 
     return ok(res, omitPasswordHash(result.rows[0]), 'User updated')
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
+/**
+ * Hard-delete a user account. Requires Users `d` (Admin).
+ *
+ * The row is removed, not deactivated. `user_roads`, `password_reset_tokens`,
+ * `notifications` and `push_subscriptions` cascade. The remaining references have no
+ * ON DELETE clause, so they are cleared first: the tickets, events, assignments and sync
+ * runs stay intact and only the person reference is emptied, which is why a deleted
+ * user's name no longer appears on past tickets.
+ *
+ * A user can never delete their own account, and the last Active Admin is protected by
+ * the same `assertNotLastActiveAdmin` used by the deactivate path.
+ */
+router.delete('/:id', authorize('Users', 'd'), async (req: AuthedRequest, res) => {
+  try {
+    const targetId = String(req.params.id)
+
+    if (targetId === req.user!.id) {
+      throw new ApiError(400, 'You cannot delete your own account.', 'SELF_DELETE_FORBIDDEN')
+    }
+
+    const existing = await query(`SELECT id, role_id FROM users WHERE id = $1`, [targetId])
+    if (!existing.rowCount) throw new ApiError(404, 'User not found', 'NOT_FOUND')
+
+    await assertNotLastActiveAdmin(targetId)
+
+    await withTransaction(async (client) => {
+      await client.query(
+        `UPDATE tickets SET raised_by_user_id = NULL WHERE raised_by_user_id = $1`,
+        [targetId],
+      )
+      await client.query(`UPDATE tickets SET assignee_id = NULL WHERE assignee_id = $1`, [
+        targetId,
+      ])
+      await client.query(`UPDATE ticket_events SET actor_user_id = NULL WHERE actor_user_id = $1`, [
+        targetId,
+      ])
+      await client.query(
+        `UPDATE ticket_assignments SET from_user_id = NULL WHERE from_user_id = $1`,
+        [targetId],
+      )
+      await client.query(
+        `UPDATE ticket_assignments SET to_user_id = NULL WHERE to_user_id = $1`,
+        [targetId],
+      )
+      await client.query(
+        `UPDATE device_sync_runs SET triggered_by_user_id = NULL WHERE triggered_by_user_id = $1`,
+        [targetId],
+      )
+      await client.query(`DELETE FROM users WHERE id = $1`, [targetId])
+    })
+
+    return ok(res, { id: targetId }, 'User deleted')
   } catch (error) {
     return handleApiError(res, error)
   }

@@ -10,7 +10,7 @@ import {
   requireAuth,
   type AuthedRequest,
 } from '../middleware/auth.js'
-import { appendTicketVisibilitySql, assertCanAssignTickets, assertTicketAccess, isTicketPrivilegedRole } from '../lib/ticket-access.js'
+import { appendTicketVisibilitySql, assertCanAssignTickets, assertTicketAccess, ASSIGNABLE_ROLES, isTicketPrivilegedRole } from '../lib/ticket-access.js'
 import { nextPublicId } from '../lib/ids.js'
 import { deviceDisplayId, deviceLookupWhere } from '../lib/device-ref.js'
 import { limitSchema, pageSchema, paginationMeta, sqlOffset } from '../lib/pagination.js'
@@ -607,7 +607,7 @@ async function loadAssignmentTrail(ticketUuid: string) {
   return assignments.rows.map(mapAssignmentTrailRow)
 }
 
-/** Active field/ops users eligible for Hand to / assign (matches lookups/technicians). */
+/** Active field/ops users eligible for Hand to / assign (uses shared ASSIGNABLE_ROLES). */
 async function assertEligibleAssignee(assigneeId: string) {
   const result = await query<{ id: string; full_name: string }>(
     `SELECT u.id, u.full_name
@@ -615,8 +615,8 @@ async function assertEligibleAssignee(assigneeId: string) {
      JOIN roles r ON r.id = u.role_id
      WHERE u.id = $1
        AND u.status = 'Active'
-       AND r.name IN ('Technician', 'Engineer', 'Control room', 'Project manager')`,
-    [assigneeId],
+       AND r.name = ANY($2::text[])`,
+    [assigneeId, ASSIGNABLE_ROLES],
   )
   if (!result.rowCount) {
     throw new ApiError(400, 'Assignee is not an eligible active worker', 'INVALID_ASSIGNEE')

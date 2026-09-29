@@ -114,6 +114,12 @@ async function main() {
        AND public_id <> 'TK-1042'`,
   )
   const tkExists = await query(`SELECT 1 FROM tickets WHERE public_id = 'TK-1042'`)
+  // The fixture is unassigned, so it must stay `Open` (RULES: unassigned raise uses `Open`).
+  // A `Waiting for spare` ticket is only reachable through an Add Update, which requires an
+  // assignee (`409 TICKET_NOT_ASSIGNED`), so seeding that status with no assignee produced an
+  // impossible row: the device card counted the device as `Under repair` (deriveDeviceStatus
+  // folds Waiting for spare into it) while the All Tickets tiles counted the same ticket under
+  // `Open, not attended` — so the two screens disagreed on a dev database that was otherwise clean.
   if (!tkExists.rowCount) {
     await query(
       `INSERT INTO tickets (
@@ -121,7 +127,7 @@ async function main() {
          reported_category_id, reported_subcategory_id, raised_by_user_id, raised_at
        ) VALUES (
          'TK-1042', (SELECT id FROM devices WHERE public_id = 'PD-0428'),
-         'Waiting for spare', 'Site attendant', 'Smoke fixture open ticket',
+         'Open', 'Site attendant', 'Smoke fixture open ticket',
          $1, $2, $3, NOW() - INTERVAL '3 days'
        )`,
       [cats.rows[0].cid, cats.rows[0].sid, me.rows[0].id],
@@ -130,7 +136,8 @@ async function main() {
     await query(
       `UPDATE tickets SET
          device_id = (SELECT id FROM devices WHERE public_id = 'PD-0428'),
-         status = 'Waiting for spare',
+         status = 'Open',
+         assignee_id = NULL,
          closed_at = NULL,
          updated_at = NOW()
        WHERE public_id = 'TK-1042'`,
