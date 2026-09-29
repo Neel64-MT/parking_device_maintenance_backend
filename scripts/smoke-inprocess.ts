@@ -432,6 +432,22 @@ async function main() {
   }
   console.log('OK devices status-card filter')
 
+  // Device list order: Slot Label (slot_number) ascending, and stable across pages.
+  const slotLabels: string[] = []
+  for (const page of [1, 2]) {
+    const devPage = await call(`/api/devices?page=${page}&limit=10`, { headers: auth })
+    assert(devPage.status === 200 && devPage.body.success, `devices page=${page} failed`)
+    for (const row of devPage.body.data as Array<{ slotLabel: string | null }>) {
+      if (row.slotLabel) slotLabels.push(row.slotLabel)
+    }
+  }
+  const slotLabelsSorted = [...slotLabels].sort((a, b) => a.localeCompare(b))
+  assert(
+    JSON.stringify(slotLabels) === JSON.stringify(slotLabelsSorted),
+    `device list must be Slot Label ascending across pages (${slotLabels.join(',')})`,
+  )
+  console.log('OK devices Slot Label ascending')
+
   const partsLookup = await call('/api/lookups/parts', { headers: auth })
   assert(partsLookup.status === 200 && Array.isArray(partsLookup.body.data), 'lookups parts failed')
   assert(

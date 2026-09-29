@@ -28,6 +28,7 @@
 - Phase 40 — Multi-issue ticket contract parity: `issues[]` accepted on raise/update/close, `ticket_issues` persistence, detail arrays, and raised-event photo attachment
 - Phase 42 — Assignment/reassignment notifications (`ticket.assigned` / `ticket.reassigned`), ticket-open mark-as-read, and removal of the silent auto-claim on Add Update
 - Frontend Phase 39 — NotificationBell, explicit browser permission/subscription UI, service-worker click relay, and shared Tickets/All Tickets unread badges consuming the Phase 38 APIs
+- Phase 41 — Device list / export ordered by Slot Label (`slot_number`) ascending in SQL (`DEVICE_LIST_ORDER_BY`); assign eligibility deliberately unchanged (the frontend narrows the dropdown only)
 
 ## Currently Working On
 
@@ -113,6 +114,7 @@
 - Control room is scoped like other non-privileged roles for viewing (per product requirement)
 - Ticket assign (Phase 35): transactional `POST …/assign`; eligible Active Technician/Engineer/CR/PM; idempotent same assignee; response `{ id, assigneeId, assigneeName, assignmentTrail }`; detail trail from `ticket_assignments`; lookups/technicians includes Engineer
 - FRONTEND CHANGE REQUIRED: TicketDetail Save → `POST /api/tickets/:id/assign`; Hand to → `GET /api/lookups/technicians`
+- Device list / export order (Phase 41): Slot Label ascending via `DEVICE_LIST_ORDER_BY` (`ORDER BY (slot_number = ''), slot_number, public_id`) in `src/routes/devices.ts`; SQL-side so it survives pagination. `GET /api/lookups/technicians` still returns CR/PM because Work report Person filter needs them; the frontend Assign dropdown narrows to Technician/Engineer, and `assertEligibleAssignee` is unchanged.
 
 ## Known Issues
 
@@ -120,3 +122,4 @@
 - Device Sync `devicesUpdated` only counts rows whose road/label/QR/MAC actually changed vs DB; duplicate QRs resolved once per run (last Slot Id wins) so a second sync on the same feed should show Updated: 0.
 - Live Device Sync requires `DEVICE_SYNC_API_TOKEN`; without it `POST /api/device-sync` returns `503 DEVICE_SYNC_NOT_CONFIGURED`.
 - Ticket Detail assignment Save is still a design-preview toast until FE wires `POST …/assign`.
+- `npm run test:smoke` stops at the site-attendant assertion `raiser must see Open ticket on a non-assigned road (TK-1099)` on a reused local pglite database: TK-1099 does not exist because earlier smoke runs already consumed the `public_id` sequence. Data-state issue in the ticket flow, unrelated to the Phase 41 device ordering (the new `OK devices Slot Label ascending` assertion runs before it and passes).

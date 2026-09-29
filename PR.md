@@ -120,6 +120,13 @@ Canonical `tickets.status` values (exactly four; never `New`):
 
 **FRONTEND CHANGE REQUIRED:** TicketList service default `limit` is still 50 and UI hardcodes 100 — align to allowed limits and use `pagination` for a pager when authorized.
 
+### Device list order (Phase 41)
+
+- `GET /api/devices` (and `GET /api/devices/export`) return rows ordered by **Slot Label ascending** (`devices.slot_number`), so the order is correct on every page rather than within a page only.
+- Order is applied in SQL via one shared constant, `DEVICE_LIST_ORDER_BY` = `ORDER BY (slot_number = ''), slot_number, public_id`: blank labels last, `public_id` as the stable tie-break.
+- `slot_number` is a plain zero-padded `TEXT`, so plain ascending order is the expected Slot Label order; no natural-sort dependency is added.
+- Ticket list order stays `raised_at DESC` (the ticket list has no Slot Label column; its order drives the Open / Assigned / Closed tabs).
+
 ### Parts master & visit cost
 
 - `parts.amount` is authoritative; seed and CRUD set prices.

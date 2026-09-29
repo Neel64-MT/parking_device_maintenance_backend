@@ -456,3 +456,22 @@
 **Testing:** multi-issue raise/detail response, legacy payload compatibility, `eventId`, issue persistence, update/close issue replacement, and notification integration regression.
 
 **Done when:** build and isolated smoke suites pass; no frontend source changes required beyond the already-integrated multi-select UI.
+
+## Phase 41 — Device list Slot Label ascending order
+
+**Status:** Complete
+
+**Objective:** Show the Device List in ascending Slot Label order without breaking API-driven pagination, filters, search, or export.
+
+**Behavior:**
+- `GET /api/devices` and `GET /api/devices/export` order by Slot Label (`devices.slot_number`) ascending through one shared constant, `DEVICE_LIST_ORDER_BY` = `ORDER BY (slot_number = ''), slot_number, public_id`.
+- Sorting is done in SQL, not in the frontend: `LIMIT/OFFSET` paging means client-side sorting would only order one page.
+- Blank labels sort last; `public_id` is the stable tie-break so paging never repeats or skips a row when two labels are equal.
+- `slot_number` is a plain zero-padded `TEXT` (`S1-001`, `S1-010`, `S2-001`), so plain ascending text order is the expected Slot Label order — no natural-sort library or dependency added.
+- Unchanged: filters (`q` / road / status / repeats), status tiles, search, `pagination` envelope, columns, the `slotLabel` value, and ticket list order (`raised_at DESC`).
+
+**Assign role filter:** frontend only. `GET /api/lookups/technicians` keeps returning Active Technician / Engineer / Control room / Project manager (Work report Person filter needs CR/PM) and `assertEligibleAssignee` is unchanged, so the backend stays the final source of truth. The frontend Assign / Reassign dropdown narrows to Technician / Engineer.
+
+**Files:** `src/routes/devices.ts`, `scripts/smoke-inprocess.ts`, docs.
+
+**Testing:** smoke fetches page 1 and 2 of `GET /api/devices` and asserts the concatenated Slot Labels are ascending (fails on the previous `public_id` order, passes on the new order). `npm run build` passes; `test:smoke:writes` and `test:smoke:close` pass. `npm run test:smoke` reaches a pre-existing, unrelated data-state failure at the site-attendant TK-1099 assertion (that ticket does not exist in the local pglite data because earlier runs consumed the public-id sequence); ticket list code is untouched by this phase.
