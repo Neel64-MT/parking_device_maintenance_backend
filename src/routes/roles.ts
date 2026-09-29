@@ -147,4 +147,42 @@ router.patch('/:id/permissions', authorize('Roles & permissions', 'e'), async (r
   }
 })
 
+/**
+ * Delete a role. Requires Roles & permissions `d` (Admin).
+ * A role can only be removed while no *live* account is assigned to it. Inactive
+ * accounts are deliberately ignored: they cannot sign in, and they must not keep a
+ * role alive forever. The users→roles FK is `ON DELETE SET NULL` (migration 021), so
+ * an Inactive account that loses its role ends up with `role_id IS NULL` and is then
+ * refused reactivation until an Admin picks a new role (see PATCH /api/users/:id).
+ * `role_permissions` rows cascade with the role.
+ */
+router.delete('/:id', authorize('Roles & permissions', 'd'), async (req, res) => {
+  try {
+    const roleId = req.params.id
+
+    const role = await query('SELECT id FROM roles WHERE id = $1', [roleId])
+    if (!role.rowCount) throw new ApiError(404, 'Role not found', 'NOT_FOUND')
+
+    // Pending and Active accounts block; only Inactive ones are ignored.
+    const assigned = await query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM users WHERE role_id = $1 AND status <> 'Inactive'`,
+      [roleId],
+    )
+    const userCount = Number(assigned.rows[0]?.n || 0)
+    if (userCount > 0) {
+      throw new ApiError(
+        409,
+        'Role is assigned to users. Please change their role before deleting it.',
+        'ROLE_IN_USE',
+        { users: userCount },
+      )
+    }
+
+    await query('DELETE FROM roles WHERE id = $1', [roleId])
+    return ok(res, { id: roleId }, 'Role deleted')
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
 export default router

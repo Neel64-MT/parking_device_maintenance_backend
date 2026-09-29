@@ -29,16 +29,21 @@
 - Phase 42 — Assignment/reassignment notifications (`ticket.assigned` / `ticket.reassigned`), ticket-open mark-as-read, and removal of the silent auto-claim on Add Update
 - Frontend Phase 39 — NotificationBell, explicit browser permission/subscription UI, service-worker click relay, and shared Tickets/All Tickets unread badges consuming the Phase 38 APIs
 - Phase 41 — Device list / export ordered by Slot Label (`slot_number`) ascending in SQL (`DEVICE_LIST_ORDER_BY`); assign eligibility deliberately unchanged (the frontend narrows the dropdown only)
+- Phase 44 — Users visibility + account deletion: `src/lib/user-access.ts` (`appendUserVisibilitySql`, `assertNotLastActiveAdmin`); own account always excluded, Admin accounts hidden from non-Admin viewers; `DELETE /api/users/:id` (Users `d`, Admin only) deactivates and blocks self-delete
+- Phase 45 - Project manager and Control room are not assignable ticket holders: ASSIGNABLE_ROLES in src/lib/ticket-access.ts is the single source for the assignee dropdown and 400 INVALID_ASSIGNEE
+- Phase 46 - Role delete guard + user hard delete: `DELETE /api/roles/:id` (Roles & permissions d, Admin only) is refused with 409 ROLE_IN_USE while any Active or Pending account holds the role; Inactive accounts are ignored and end up role-less. Migration 021 `users_role_set_null` makes users.role_id nullable and re-points the FK to ON DELETE SET NULL; PATCH /api/users/:id then refuses status=Active on a role-less account (409 ROLE_REQUIRED) and an unknown roleId (400 ROLE_NOT_FOUND). The users list and tiles LEFT JOIN roles (COALESCE in the Admin exclusion) so role-less accounts stay visible with `roleMissing`. `DELETE /api/users/:id` is a HARD delete: one withTransaction nulls tickets.raised_by_user_id/assignee_id, ticket_events.actor_user_id, ticket_assignments.from/to_user_id, device_sync_runs.triggered_by_user_id, then deletes the row (self-delete 400, unknown 404, last Active Admin 409 LAST_ADMIN; ALREADY_INACTIVE removed). Smokes: npm run test:smoke:roles, npm run test:smoke:users
+- Dashboard vs All Tickets count mismatch was smoke-fixture data, not a code bug: `test:smoke` seeds `TK-1042` as `Waiting for spare` with **no assignee**, which the app itself can no longer create (Add Update requires an assignee). That one row made the Dashboard read 17 / 5 and All Tickets 16 / 6. Fixed the fixture to unassigned `Open` (and reset the live row). Dashboard now 612 / 16 / 6 and All Tickets 6 / 16 / 0 - both pairs agree. Note the two tiles measure different things: Dashboard legend = devices (one per device, latest open ticket), All Tickets tiles = tickets.
 
 ## Currently Working On
 
-- (idle — backend Phase 38 + 42 and frontend Phase 39 notification integration complete)
+- (idle - Phase 46 role delete guard complete)
 
 ## Pending
 
 ### FRONTEND CHANGE REQUIRED (do not implement until authorized)
 
 - Feature screens still on mocks / partial wiring
+- **No backend role hierarchy on `POST` / `PATCH /api/users`:** any caller holding Users `c`/`e` (including a Project manager) can pass an Admin `roleId` on create, or promote an existing user to Admin on PATCH. `ROLE_HIERARCHY` in `frontend/src/services/users.js` filters the role dropdowns in the browser only, so the API is the weaker boundary. Deliberately out of scope for Phase 44; needs its own `assertCanAssignRole` in `lib/user-access.ts` (Admin rank 0) plus tests.
 - PartMaster: Delete → `DELETE /api/parts/:id`; on `409 IN_USE` toast deactivate instead; Tech/Engineer/PM/Admin may delete unused
 - IssueMaster: wire live APIs; Site attendant now has `vce..d`; add `createIssueCategory` / `createIssueSubcategory` / `deleteIssueCategory`; Delete unused → `DELETE`; used → deactivate
 - Raise/Update/Close: send `issues: [{ categoryId, subCategoryId }, …]`; read `issuesReported` / `issuesFound` on detail (legacy single fields still accepted)
@@ -65,6 +70,9 @@
 ## Important Decisions
 
 - New-ticket notifications: persistent rows created only after successful ticket/event/assignment writes; failures are logged but never change the ticket response
+- Users visibility is SQL-level via one helper, mirroring the ticket-access precedent: `u.id <> $me` for every role, plus `r.name <> 'Admin'` for non-Admin viewers. Tiles share the clause (own params) so counts never exceed what the caller can see
+- `DELETE /api/users/:id` is a **deactivation** (`status = 'Inactive'`), never a row delete — the name must stay readable on past tickets. Gated by the existing Users `d` flag (Admin is the only seeded role with it, so no permission was granted to anyone). Self-delete → `400 SELF_DELETE_FORBIDDEN`; last-active-Admin guard is shared with `PATCH` via `assertNotLastActiveAdmin`
+- The Users list still has **no pagination** parameters, so there is no page/limit bypass surface; `q` and `status` are ANDed into the same WHERE as the visibility clause
 - Notification recipients: Active `Admin` / `Project manager` / `Control room` with `All tickets v`; no hardcoded user IDs and no new permission screen
 - Notification APIs scope every read/update to the authenticated recipient; browser permission stays in the browser, subscription keys stay server-side
 - Web Push uses `web-push` + VAPID and existing `setImmediate`; no WebSocket/SSE/queue. `404`/`410` deletes expired endpoints; `push_sent_at` prevents repeat sends
@@ -88,6 +96,8 @@
 - Other roles: `assignee_id = me OR raised_by_user_id = me` in SQL + `assertTicketAccess`
 - Same helper scopes dashboard ticket metrics, device ticket overlays/history, and work report rows
 - Assign / reassign: Control room, Admin, or Project manager only; technicians cannot `/assign` or `handoverToUserId`
+- Assignable **ticket-holder** roles are `ASSIGNABLE_ROLES` in `lib/ticket-access.ts` = **Technician / Engineer only**. Neither `Project manager` (routes and closes) nor `Control room` (raises and routes) may hold a ticket, and neither appears in the Hand to dropdown. One shared constant feeds both `GET /api/lookups/technicians` and `assertEligibleAssignee`; such an assignee is `400 INVALID_ASSIGNEE` and leaves the ticket unchanged. This list is deliberately **narrower than** `canAssignTickets` (Control room / Admin / PM) — holding a ticket vs performing an assign are different questions; keep them separate. Verified: all 23 assigned seeded tickets are Technician, so existing data is unaffected
+- `lookups/technicians` `label` is **`Name (Role)`** and display-only (`Jignesh Solanki (Technician)`). Replaced `Name — lowercased-role[, road-when-not-"All roads"]`, which was inconsistent: road was appended only when it was not "All roads", so rows silently changed shape and a missing road could not be distinguished from "not shown". `roads` is still returned separately. `name` is the wire value for assignee filters, `id` is what assign submits — the label must never be parsed. Consumers: `TicketList` + `TicketDetail` Assign/Reassign dropdowns only; `Work report` uses `name`
 - Assign stays road-only (`assertRoadAccess`) for Control room routing; list/detail/dashboard/reports stay visibility-scoped
 - Device list / export / history are city-wide (no `assigned_roads` filter); open-ticket overlays stay ticket-visibility scoped; create/PATCH keep `assertRoadAccess`; scan + raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician / Engineer)
 - Raise / Update / Close tickets accept `issues: [{ categoryId, subCategoryId }, …]` (legacy single `categoryId`/`subCategoryId` still works); persisted in `ticket_issues` with scalar primary for compat

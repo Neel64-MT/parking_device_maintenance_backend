@@ -21,7 +21,7 @@ export const NEW_TICKET_NOTIFICATION_ROLES = [
  * Roles that may hold a delivered notification (in-app + browser push).
  * The raised-alert list above is a business rule and stays narrow; this list
  * adds the roles that can actually be made a ticket assignee
- * (see assertEligibleAssignee: Technician, Engineer, Control room, Project manager)
+ * (see ASSIGNABLE_ROLES in lib/ticket-access.ts: Technician, Engineer)
  * so an assignee is never un-alertable. Site attendant / AMC officer are excluded
  * because they are never eligible assignees.
  */
