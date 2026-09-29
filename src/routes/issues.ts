@@ -135,6 +135,8 @@ router.delete('/categories/:id', authorize('Issue master', 'd'), async (req, res
          (SELECT COUNT(*)::int FROM ticket_events e
           JOIN issue_subcategories s ON s.id = e.subcategory_id
           WHERE s.category_id = $1)
+         +
+         (SELECT COUNT(*)::int FROM ticket_issues WHERE category_id = $1)
        )::int AS n`,
       [req.params.id],
     )
@@ -228,8 +230,12 @@ router.post('/subcategories/:id/deactivate', authorize('Issue master', 'd'), asy
 router.delete('/subcategories/:id', authorize('Issue master', 'd'), async (req, res) => {
   try {
     const usage = await query(
-      `SELECT COUNT(*)::int AS n FROM tickets
-       WHERE reported_subcategory_id = $1 OR found_subcategory_id = $1`,
+      `SELECT (
+         (SELECT COUNT(*)::int FROM tickets
+          WHERE reported_subcategory_id = $1 OR found_subcategory_id = $1)
+         +
+         (SELECT COUNT(*)::int FROM ticket_issues WHERE subcategory_id = $1)
+       )::int AS n`,
       [req.params.id],
     )
     if (usage.rows[0].n > 0) {

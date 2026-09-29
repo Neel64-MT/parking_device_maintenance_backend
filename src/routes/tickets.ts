@@ -15,6 +15,18 @@ import { nextPublicId } from '../lib/ids.js'
 import { deviceDisplayId, deviceLookupWhere } from '../lib/device-ref.js'
 import { limitSchema, pageSchema, paginationMeta, sqlOffset } from '../lib/pagination.js'
 import { insertEventParts, resolvePartsCost, visitEventCost } from '../lib/parts-cost.js'
+import {
+  issuePairSchema,
+  loadTicketIssues,
+  mapIssueApi,
+  normalizeIssueList,
+  replaceTicketIssues,
+  resolveIssuePairs,
+} from '../lib/ticket-issues.js'
+import {
+  createNewTicketNotifications,
+  createTicketAssignmentNotification,
+} from '../lib/notifications.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -164,12 +176,17 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
     const limit = filters.limit
     const offset = sqlOffset(filters.page, limit)
     pageParams.push(limit, offset)
+    // One Add Update POST creates one visit event. `reclassified` is legacy history and is
+    // still counted so older tickets keep their previous "Updates logged" totals.
     const result = await query(
       `SELECT t.*, d.public_id AS device_public_id, d.slot_id, d.slot_number, r.name AS road_name,
               ru.full_name AS raised_by_name, au.full_name AS assignee_name,
               rc.name AS reported_cat, rs.name AS reported_sub,
               fc.name AS found_cat, fs.name AS found_sub,
-              (SELECT COUNT(*)::int FROM ticket_events e WHERE e.ticket_id = t.id) AS updates
+              (SELECT COUNT(*)::int FROM ticket_events e
+                WHERE e.ticket_id = t.id
+                  AND e.event_type IN ('visit_open', 'visit_resolved', 'waiting_spare', 'reclassified')
+               ) AS updates
        ${ticketListJoins}
        ${pageWhereSql}
        ORDER BY t.raised_at DESC
@@ -272,20 +289,35 @@ router.get('/export', authorize('All tickets', 'v'), async (req: AuthedRequest, 
   }
 })
 
-const raiseSchema = z.object({
-  deviceId: z.string().min(1),
-  categoryId: z.string().uuid(),
-  subCategoryId: z.string().uuid(),
-  description: z.string().optional(),
-  reporterType: z.string().default('Site attendant'),
-  assigneeId: z.string().uuid().nullable().optional(),
-  priority: z.string().optional(),
-  photos: z.array(z.string()).default([]),
-})
+const raiseSchema = z
+  .object({
+    deviceId: z.string().min(1),
+    issues: z.array(issuePairSchema).min(1).optional(),
+    categoryId: z.string().uuid().optional(),
+    subCategoryId: z.string().uuid().optional(),
+    description: z.string().optional(),
+    reporterType: z.string().default('Site attendant'),
+    assigneeId: z.string().uuid().nullable().optional(),
+    priority: z.string().optional(),
+    photos: z.array(z.string()).default([]),
+  })
+  .superRefine((data, ctx) => {
+    if (!normalizeIssueList(data).length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'At least one issue is required (issues[] or categoryId + subCategoryId)',
+        path: ['issues'],
+      })
+    }
+  })
 
 router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res) => {
   try {
     const body = raiseSchema.parse(req.body)
+    const issueInputs = normalizeIssueList(body)
+    const resolvedIssues = await resolveIssuePairs(issueInputs)
+    const primary = resolvedIssues[0]
+
     const deviceId = body.deviceId.trim()
     const device = await query(
       `SELECT d.*, r.name AS road_name FROM devices d JOIN roads r ON r.id = d.road_id
@@ -294,7 +326,6 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
     )
     if (!device.rowCount) throw new ApiError(404, 'Device not found', 'NOT_FOUND')
     assertRoadAccessUnlessFieldWork(req.user!, device.rows[0].road_id)
-
     const open = await query(
       `SELECT public_id, id, status FROM tickets
        WHERE device_id = $1 AND status <> 'Closed'
@@ -307,7 +338,6 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
         openTicketId: open.rows[0].public_id,
       })
     }
-
     const recent = await query(
       `SELECT public_id, id, closed_at FROM tickets
        WHERE device_id = $1 AND status = 'Closed' AND closed_at >= NOW() - INTERVAL '7 days'
@@ -322,30 +352,58 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
         { ticketId: recent.rows[0].public_id },
       )
     }
-
     const publicId = await nextPublicId('TK', 4)
     const status = body.assigneeId ? 'Under repair' : 'Open'
-    let ticket
+    let ticketUuid: string
+    let raisedEventId: string
     try {
-      ticket = await query(
-        `INSERT INTO tickets (
-          public_id, device_id, status, priority, reporter_type, description,
-          reported_category_id, reported_subcategory_id,
-          raised_by_user_id, assignee_id
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
-        [
-          publicId,
-          device.rows[0].id,
-          status,
-          body.priority || null,
-          body.reporterType,
-          body.description || null,
-          body.categoryId,
-          body.subCategoryId,
-          req.user!.id,
-          body.assigneeId || null,
-        ],
-      )
+      const createdTicket = await withTransaction(async (client) => {
+        const ticket = await client.query(
+          `INSERT INTO tickets (
+            public_id, device_id, status, priority, reporter_type, description,
+            reported_category_id, reported_subcategory_id,
+            raised_by_user_id, assignee_id
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+          [
+            publicId,
+            device.rows[0].id,
+            status,
+            body.priority || null,
+            body.reporterType,
+            body.description || null,
+            primary.categoryId,
+            primary.subcategoryId,
+            req.user!.id,
+            body.assigneeId || null,
+          ],
+        )
+        const id = ticket.rows[0].id as string
+        await replaceTicketIssues(client, id, 'reported', resolvedIssues)
+        const raisedEvent = await client.query(
+          `INSERT INTO ticket_events (ticket_id, event_type, title, body, status_label, actor_user_id, category_id, subcategory_id, photos)
+           VALUES ($1,'raised','Ticket raised',$2,$3,$4,$5,$6,$7)
+           RETURNING id`,
+          [
+            id,
+            body.description || 'Ticket raised',
+            status,
+            req.user!.id,
+            primary.categoryId,
+            primary.subcategoryId,
+            JSON.stringify(body.photos),
+          ],
+        )
+        if (body.assigneeId) {
+          await client.query(
+            `INSERT INTO ticket_assignments (ticket_id, from_user_id, to_user_id, reason)
+             VALUES ($1,$2,$3,'Assigned at raise')`,
+            [id, req.user!.id, body.assigneeId],
+          )
+        }
+        return { id, eventId: raisedEvent.rows[0].id as string }
+      })
+      ticketUuid = createdTicket.id
+      raisedEventId = createdTicket.eventId
     } catch (err) {
       if (isUniqueViolation(err)) {
         const raced = await query(
@@ -364,29 +422,43 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
       throw err
     }
 
-    await query(
-      `INSERT INTO ticket_events (ticket_id, event_type, title, body, status_label, actor_user_id, category_id, subcategory_id, photos)
-       VALUES ($1,'raised','Ticket raised',$2,$3,$4,$5,$6,$7)`,
-      [
-        ticket.rows[0].id,
-        body.description || 'Ticket raised',
-        status,
-        req.user!.id,
-        body.categoryId,
-        body.subCategoryId,
-        JSON.stringify(body.photos),
-      ],
-    )
-
-    if (body.assigneeId) {
-      await query(
-        `INSERT INTO ticket_assignments (ticket_id, from_user_id, to_user_id, reason)
-         VALUES ($1,$2,$3,'Assigned at raise')`,
-        [ticket.rows[0].id, req.user!.id, body.assigneeId],
-      )
+    // The ticket is fully created before notification persistence is attempted.
+    // Notification failures are logged but must never turn a successful raise into an error.
+    try {
+      await createNewTicketNotifications(ticketUuid, raisedEventId)
+    } catch (notificationError) {
+      console.error(`[notifications] failed after ticket ${publicId} was raised:`, notificationError)
     }
 
-    return created(res, { id: publicId, uuid: ticket.rows[0].id, status }, 'Ticket raised')
+    // A ticket raised already-assigned must also tell its new holder.
+    if (body.assigneeId) {
+      try {
+        await createTicketAssignmentNotification({
+          ticketId: ticketUuid,
+          toUserId: body.assigneeId,
+          kind: 'assigned',
+          assignedByUserId: req.user!.id,
+          eventId: raisedEventId,
+        })
+      } catch (notificationError) {
+        console.error(
+          `[notifications] failed after assignment at raise of ${publicId}:`,
+          notificationError,
+        )
+      }
+    }
+
+    return created(
+      res,
+      {
+        id: publicId,
+        uuid: ticketUuid,
+        eventId: raisedEventId,
+        status,
+        issuesReported: mapIssueApi(resolvedIssues),
+      },
+      'Ticket raised',
+    )
   } catch (error) {
     return handleApiError(res, error)
   }
@@ -414,6 +486,8 @@ router.get('/:ticketId', authorize('All tickets', 'v'), async (req: AuthedReques
     if (!result.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
     const t = result.rows[0]
     assertTicketAccess(req.user!, t)
+
+    const ticketIssueLists = await loadTicketIssues(t.id)
 
     const events = await query(
       `SELECT e.*, u.full_name AS actor_name, c.name AS cat_name, s.name AS sub_name
@@ -477,6 +551,8 @@ router.get('/:ticketId', authorize('All tickets', 'v'), async (req: AuthedReques
         reported: { category: t.reported_cat, sub: t.reported_sub },
         found: { category: t.found_cat, sub: t.found_sub },
       },
+      issuesReported: mapIssueApi(ticketIssueLists.reported),
+      issuesFound: mapIssueApi(ticketIssueLists.found),
       workHistory: events.rows.map((e) => ({
         when: e.created_at,
         actor: e.actor_name,
@@ -557,17 +633,29 @@ function assertHolder(req: AuthedRequest, assigneeId: string | null) {
 }
 
 /**
+ * Add Update requires a ticket that is already assigned (Phase 30 / DESIGN step 3).
+ * An unassigned ticket must be routed by an assigner first — this applies to every
+ * role including Admin/PM. There is deliberately NO auto-claim here: silently
+ * assigning the ticket to whoever posted the first update hides the routing step
+ * and hides it from the control room.
+ */
+function assertTicketAssigned(ticket: { assignee_id: string | null }) {
+  if (!ticket.assignee_id) {
+    throw new ApiError(409, 'Ticket not assigned', 'TICKET_NOT_ASSIGNED')
+  }
+}
+
+/**
  * Site updates: authorize('Update ticket','e') already ran.
- * Allow Admin/PM, the current holder, or an unassigned ticket (claimer).
- * Also allow any user who already has ticket access and Update-ticket edit —
- * raisers with edit rights were blocked by assertHolder after assign.
+ * assertTicketAssigned has already rejected unassigned tickets, so the holder
+ * check below can assume there is a real assignee.
  */
 function assertCanAddUpdate(
   req: AuthedRequest,
   ticket: { assignee_id: string | null; raised_by_user_id: string | null },
 ) {
   if (isTicketPrivilegedRole(req.user!)) return
-  if (!ticket.assignee_id || ticket.assignee_id === req.user!.id) return
+  if (ticket.assignee_id === req.user!.id) return
   if (ticket.raised_by_user_id === req.user!.id) return
   throw new ApiError(403, 'Only the ticket holder can perform this action', 'NOT_HOLDER')
 }
@@ -612,7 +700,7 @@ router.post('/:ticketId/assign', authorize('All tickets', 'a'), async (req: Auth
       )
     }
 
-    await withTransaction(async (client) => {
+    const assignmentEventId = await withTransaction(async (client) => {
       await client.query(
         `UPDATE tickets SET assignee_id = $2, status = 'Under repair', updated_at = NOW() WHERE id = $1`,
         [t.id, body.assigneeId],
@@ -622,16 +710,37 @@ router.post('/:ticketId/assign', authorize('All tickets', 'a'), async (req: Auth
          VALUES ($1,$2,$3,$4)`,
         [t.id, t.assignee_id, body.assigneeId, reason],
       )
-      await client.query(
+      // The event id doubles as the notification's event identity, so this exact
+      // handover can never notify twice while a later, distinct handover can.
+      const inserted = await client.query<{ id: string }>(
         `INSERT INTO ticket_events (ticket_id, event_type, title, body, status_label, actor_user_id)
-         VALUES ($1,'assigned','Assigned',$2,'Still open',$3)`,
+         VALUES ($1,'assigned','Assigned',$2,'Still open',$3)
+         RETURNING id`,
         [
           t.id,
           isFirstAssign ? 'Ticket assigned' : 'Ticket reassigned',
           req.user!.id,
         ],
       )
+      return inserted.rows[0].id as string
     })
+
+    // Only the new assignee is notified, and only after the assignment commits.
+    // Notification failure is logged but must not fail the assignment.
+    try {
+      await createTicketAssignmentNotification({
+        ticketId: t.id,
+        toUserId: body.assigneeId,
+        kind: isFirstAssign ? 'assigned' : 'reassigned',
+        assignedByUserId: req.user!.id,
+        eventId: assignmentEventId,
+      })
+    } catch (notificationError) {
+      console.error(
+        `[notifications] failed after assignment of ${t.public_id}:`,
+        notificationError,
+      )
+    }
 
     const assignmentTrail = await loadAssignmentTrail(t.id)
     return ok(
@@ -649,6 +758,19 @@ router.post('/:ticketId/assign', authorize('All tickets', 'a'), async (req: Auth
   }
 })
 
+const RESOLVED_UPDATE_TYPE = 'Site visit — resolved'
+
+/** Exact match only — "Site visit — not resolved" also contains the word "resolved". */
+function isResolvedUpdate(updateType: string) {
+  return updateType === RESOLVED_UPDATE_TYPE
+}
+
+function updateEventType(updateType: string) {
+  if (isResolvedUpdate(updateType)) return 'visit_resolved'
+  if (updateType === 'Waiting for spare') return 'waiting_spare'
+  return 'visit_open'
+}
+
 const updateSchema = z.object({
   updateType: z.enum([
     'Site visit — not resolved',
@@ -657,6 +779,7 @@ const updateSchema = z.object({
     'Waiting for spare',
     'Waiting for traffic police / AMC',
   ]),
+  issues: z.array(issuePairSchema).min(1).optional(),
   categoryId: z.string().uuid().optional(),
   subCategoryId: z.string().uuid().optional(),
   workDone: z.string().optional(),
@@ -684,32 +807,30 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
     const t = ticket.rows[0]
     if (t.status === 'Closed') throw new ApiError(409, 'Ticket is closed', 'CLOSED')
     assertTicketAccess(req.user!, t)
+    assertTicketAssigned(t)
     assertCanAddUpdate(req, t)
+
+    const foundInputs = normalizeIssueList(body)
+    const foundIssues = foundInputs.length ? await resolveIssuePairs(foundInputs) : null
+    const primaryFound = foundIssues?.[0] ?? null
 
     const { partsCost, snapshots } = await resolvePartsCost(body.parts)
     const eventCost = visitEventCost(body.cost, partsCost)
 
-    let newStatus = t.status
-    if (body.updateType === 'Waiting for spare') newStatus = 'Waiting for spare'
-    else if (body.updateType.includes('resolved')) newStatus = 'Under repair'
-    else if (!t.assignee_id) newStatus = 'Under repair'
-    else newStatus = 'Under repair'
+    const isResolved = isResolvedUpdate(body.updateType)
+    const eventType = updateEventType(body.updateType)
+    // A waiting-spare visit holds the ticket; every other visit returns it to Under repair.
+    const newStatus = body.updateType === 'Waiting for spare' ? 'Waiting for spare' : 'Under repair'
 
     const eventId = await withTransaction(async (client) => {
-      if (body.categoryId && body.subCategoryId) {
-        const changed =
-          body.subCategoryId !== (t.found_subcategory_id || t.reported_subcategory_id)
+      if (foundIssues && primaryFound) {
+        // One update request must create exactly one timeline entry. The visit event inserted
+        // below already stores the on-site issue, so no extra "reclassified" event is written.
         await client.query(
           `UPDATE tickets SET found_category_id = $2, found_subcategory_id = $3, updated_at = NOW() WHERE id = $1`,
-          [t.id, body.categoryId, body.subCategoryId],
+          [t.id, primaryFound.categoryId, primaryFound.subcategoryId],
         )
-        if (changed) {
-          await client.query(
-            `INSERT INTO ticket_events (ticket_id, event_type, title, body, status_label, actor_user_id, category_id, subcategory_id)
-             VALUES ($1,'reclassified','Issue reclassified','Category updated on site','Still open',$2,$3,$4)`,
-            [t.id, req.user!.id, body.categoryId, body.subCategoryId],
-          )
-        }
+        await replaceTicketIssues(client, t.id, 'found', foundIssues)
       }
 
       const inserted = await client.query(
@@ -720,16 +841,12 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
          RETURNING id`,
         [
           t.id,
-          body.updateType.includes('resolved')
-            ? 'visit_resolved'
-            : body.updateType === 'Waiting for spare'
-              ? 'waiting_spare'
-              : 'visit_open',
+          eventType,
           body.updateType,
           body.workDone || body.updateType,
           req.user!.id,
-          body.categoryId || null,
-          body.subCategoryId || null,
+          primaryFound?.categoryId || body.categoryId || null,
+          primaryFound?.subcategoryId || body.subCategoryId || null,
           eventCost,
           body.nextVisitAt || null,
           body.notFixedReason || null,
@@ -757,12 +874,34 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
            VALUES ($1,$2,$3,'Handover on update')`,
           [t.id, req.user!.id, body.handoverToUserId],
         )
-      } else if (!t.assignee_id) {
-        await client.query(`UPDATE tickets SET assignee_id = $2 WHERE id = $1`, [t.id, req.user!.id])
       }
+      // No auto-claim: assertTicketAssigned already rejected unassigned tickets,
+      // so an unassigned ticket can never be silently taken over by the updater.
 
       return id
     })
+
+    // Handover moves the ticket to a new holder — notify them once the write commits.
+    // Wrapped so a notification failure never fails the update.
+    if (body.handoverToUserId) {
+      try {
+        // The handover rides on this update's own ticket_event, so that event id is
+        // the notification's identity: a retried update cannot double-notify, while a
+        // later update that hands the ticket over again is a distinct event and does.
+        await createTicketAssignmentNotification({
+          ticketId: t.id,
+          toUserId: body.handoverToUserId,
+          kind: 'reassigned',
+          assignedByUserId: req.user!.id,
+          eventId,
+        })
+      } catch (notificationError) {
+        console.error(
+          `[notifications] failed after handover of ${t.public_id}:`,
+          notificationError,
+        )
+      }
+    }
 
     return created(
       res,
@@ -774,7 +913,7 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
         partsCost,
         labourCost: body.cost,
         parts: snapshots,
-        resolvedReady: body.updateType.includes('resolved'),
+        resolvedReady: isResolved,
       },
       'Update saved',
     )
@@ -783,9 +922,53 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
   }
 })
 
-const attachUpdatePhotosSchema = z.object({
+const attachEventPhotosSchema = z.object({
   photos: z.array(z.string().min(1)).min(1),
 })
+
+/** Attach uploaded photo URLs after POST /tickets (raise) succeeds. */
+router.patch(
+  '/:ticketId/raised/:eventId/photos',
+  authorize('Raise ticket', 'c'),
+  async (req: AuthedRequest, res) => {
+    try {
+      const body = attachEventPhotosSchema.parse(req.body)
+      const ticketId = String(req.params.ticketId || '').trim()
+      const ticket = await query(
+        `SELECT t.*, d.road_id FROM tickets t JOIN devices d ON d.id = t.device_id
+         WHERE t.public_id = $1 OR t.id::text = $1`,
+        [ticketId],
+      )
+      if (!ticket.rowCount) {
+        throw new ApiError(404, 'No tickets available', 'NO_TICKETS_AVAILABLE')
+      }
+      const t = ticket.rows[0]
+      if (t.status === 'Closed') throw new ApiError(409, 'Ticket is closed', 'CLOSED')
+      assertTicketAccess(req.user!, t)
+
+      const event = await query(
+        `SELECT id, photos, event_type FROM ticket_events WHERE id = $1 AND ticket_id = $2`,
+        [req.params.eventId, t.id],
+      )
+      if (!event.rowCount) throw new ApiError(404, 'Raised event not found', 'NOT_FOUND')
+      if (event.rows[0].event_type !== 'raised') {
+        throw new ApiError(400, 'Event is not a raised event', 'VALIDATION_ERROR')
+      }
+
+      const existing = Array.isArray(event.rows[0].photos) ? event.rows[0].photos : []
+      const photos = [...existing, ...body.photos]
+
+      await query(`UPDATE ticket_events SET photos = $2::jsonb WHERE id = $1`, [
+        req.params.eventId,
+        JSON.stringify(photos),
+      ])
+
+      return ok(res, { eventId: req.params.eventId, photos }, 'Photos attached')
+    } catch (error) {
+      return handleApiError(res, error)
+    }
+  },
+)
 
 /** Attach uploaded photo URLs after POST /updates succeeds. */
 router.patch(
@@ -793,7 +976,7 @@ router.patch(
   authorize('Update ticket', 'e'),
   async (req: AuthedRequest, res) => {
     try {
-      const body = attachUpdatePhotosSchema.parse(req.body)
+      const body = attachEventPhotosSchema.parse(req.body)
       const ticketId = String(req.params.ticketId || '').trim()
       const ticket = await query(
         `SELECT t.*, d.road_id FROM tickets t JOIN devices d ON d.id = t.device_id
@@ -857,16 +1040,27 @@ router.get('/:ticketId/close-preview', authorize('Update ticket', 'x'), async (r
   }
 })
 
-const closeSchema = z.object({
-  categoryId: z.string().uuid(),
-  subCategoryId: z.string().uuid(),
-  workDone: z.string().min(1),
-  parts: z.array(z.string().uuid()).default([]),
-  photos: z.array(z.string()).default([]),
-  /** Labour / non-part charges only — part prices come from Parts Master. */
-  cost: z.coerce.number().nonnegative().default(0),
-  deviceTested: z.string().min(1),
-})
+const closeSchema = z
+  .object({
+    issues: z.array(issuePairSchema).min(1).optional(),
+    categoryId: z.string().uuid().optional(),
+    subCategoryId: z.string().uuid().optional(),
+    workDone: z.string().min(1),
+    parts: z.array(z.string().uuid()).default([]),
+    photos: z.array(z.string()).default([]),
+    /** Labour / non-part charges only — part prices come from Parts Master. */
+    cost: z.coerce.number().nonnegative().default(0),
+    deviceTested: z.string().min(1),
+  })
+  .superRefine((data, ctx) => {
+    if (!normalizeIssueList(data).length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'At least one issue is required (issues[] or categoryId + subCategoryId)',
+        path: ['issues'],
+      })
+    }
+  })
 
 router.post('/:ticketId/close', authorize('Update ticket', 'x'), async (req: AuthedRequest, res) => {
   try {
@@ -874,6 +1068,9 @@ router.post('/:ticketId/close', authorize('Update ticket', 'x'), async (req: Aut
     if (body.deviceTested.toLowerCase().includes('not tested')) {
       throw new ApiError(400, 'Device must be tested before closing', 'NOT_TESTED')
     }
+
+    const closeIssues = await resolveIssuePairs(normalizeIssueList(body))
+    const primaryClose = closeIssues[0]
 
     const ticket = await query(
       `SELECT t.*, d.road_id FROM tickets t JOIN devices d ON d.id = t.device_id
@@ -900,8 +1097,8 @@ router.post('/:ticketId/close', authorize('Update ticket', 'x'), async (req: Aut
           t.id,
           body.workDone,
           req.user!.id,
-          body.categoryId,
-          body.subCategoryId,
+          primaryClose.categoryId,
+          primaryClose.subcategoryId,
           eventCost,
           body.workDone,
           JSON.stringify(body.photos),
@@ -921,13 +1118,22 @@ router.post('/:ticketId/close', authorize('Update ticket', 'x'), async (req: Aut
            total_cost = total_cost + $4,
            updated_at = NOW()
          WHERE id = $1`,
-        [t.id, body.categoryId, body.subCategoryId, eventCost],
+        [t.id, primaryClose.categoryId, primaryClose.subcategoryId, eventCost],
       )
+      await replaceTicketIssues(client, t.id, 'found', closeIssues)
     })
 
     return ok(
       res,
-      { id: t.public_id, status: 'Closed', cost: eventCost, partsCost, labourCost: body.cost, parts: snapshots },
+      {
+        id: t.public_id,
+        status: 'Closed',
+        cost: eventCost,
+        partsCost,
+        labourCost: body.cost,
+        parts: snapshots,
+        issuesFound: mapIssueApi(closeIssues),
+      },
       'Ticket closed',
     )
   } catch (error) {

@@ -14,7 +14,7 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 | Project manager | City-wide ops; can approve Pending signups and manage users (Users `vce...`); cannot delete masters |
 | Control room | Raise and route tickets; does not close or edit masters |
 | Technician | Scan any road; update/close tickets they hold or raised (any road); list assignee/raiser-scoped |
-| Site attendant | Scan QR and raise tickets on any road; list raiser-scoped |
+| Site attendant | Scan QR and raise tickets on any road; list raiser-scoped; Device Sync; Issue master CRUD |
 | AMC officer | View-only everywhere |
 | Custom roles | Created via Roles & permissions UI |
 
@@ -25,7 +25,7 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 1. **Authentication** — Email or mobile + password, JWT session, logout, current user (`/me`), forgot password, reset password
 2. **Authorization** — Screen × flag matrix (`v c e a x d`), road scope, ticket holder rules
 3. **Dashboard** — Fleet status, down reasons, road-wise status, oldest open tickets
-4. **Tickets** — List (tabs/filters), raise, detail, assign, site-update, close; one non-`Closed` ticket per device (`409 OPEN_TICKET_EXISTS` with `openTicketId`); raise requires Slot Identifier (`400 SLOT_IDENTIFIER_REQUIRED` if missing); 7-day reopen = same ticket. List rows include `daysOpen` and `daysAfterClose` (whole days since `closed_at`, or `null` if still open). **Pagination:** `page`/`limit` with default `page=1`, `limit=10`; allowed limits `10|25|50|100`; DB `LIMIT`/`OFFSET` after visibility + filters; response `pagination: { page, limit, total, totalPages }`. **Statuses:** `Open`, `Under repair`, `Waiting for spare`, `Closed` (no `New`). **Visibility:** Admin and Project manager see all (within road scope). All other roles see only tickets where `assignee_id` or `raised_by_user_id` is the current user (enforced in SQL and on detail/mutations). **Add Update:** requires an assignee (`409 TICKET_NOT_ASSIGNED` if none); only **Admin** or the **current assignee** may post (`403 NOT_ASSIGNED_USER` otherwise); required `visitedBy` (active Technician or Engineer UUID) with structured `VALIDATION_ERROR` field details.
+4. **Tickets** — List (tabs/filters), raise, detail, assign, site-update, close; one non-`Closed` ticket per device (`409 OPEN_TICKET_EXISTS` with `openTicketId`); raise requires Slot Identifier (`400 SLOT_IDENTIFIER_REQUIRED` if missing); 7-day reopen = same ticket. **Multiple issues:** raise/update/close accept `issues: [{ categoryId, subCategoryId }, …]` (legacy single pair still works); detail returns `issuesReported` / `issuesFound`; primary pair kept on ticket scalars. List rows include `daysOpen` and `daysAfterClose` (whole days since `closed_at`, or `null` if still open). **Pagination:** `page`/`limit` with default `page=1`, `limit=10`; allowed limits `10|25|50|100`; DB `LIMIT`/`OFFSET` after visibility + filters; response `pagination: { page, limit, total, totalPages }`. **Statuses:** `Open`, `Under repair`, `Waiting for spare`, `Closed` (no `New`). **Visibility:** Admin and Project manager see all (within road scope). All other roles see only tickets where `assignee_id` or `raised_by_user_id` is the current user (enforced in SQL and on detail/mutations). **Add Update:** requires an assignee (`409 TICKET_NOT_ASSIGNED` if none); only **Admin** or the **current assignee** may post (`403 NOT_ASSIGNED_USER` otherwise); required `visitedBy` (active Technician or Engineer UUID) with structured `VALIDATION_ERROR` field details.
 5. **Devices** — List, add, history, QR scan/lookup (`GET /api/devices/scan?q=`), QR label PNG, export; optional `latitude` / `longitude` (TEXT). **List / export / history are city-wide** for every role with Device list/history view (not filtered by `assigned_roads`). Open-ticket overlays on list/history remain ticket-visibility scoped. Create/PATCH keep `assertRoadAccess`. Scan and ticket raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician bypass). **Status cards:** click Working / Under repair / Not working → same Device List with `?status=` (exact labels; SQL `derived_status` filter); not the Ticket page. Tile counts stay stable when `status` is set. **Pagination:** same `page`/`limit` rules as tickets (DB-level after status/repeats filters). **Device Sync** — `POST /api/device-sync` starts an async import from SmartPark (locations → roads, then QR pages → devices); poll `GET /api/device-sync/:id` or `/latest` for `started` / `completed` / `failed`.
 6. **Issue master** — Categories / sub-categories with severity; hard-delete unused categories and subs (`Issue master` `d`); deactivate if used (`409 IN_USE`); create/patch names trimmed `min(2)`/`max(120)`; sub create requires active parent category
 7. **Parts master** — Active parts with `amount` (`NUMERIC(12,2)`); list/lookups return `{ id, name, amount }`; create/patch via `/api/parts` (Issue master `c`/`e` or Technician/Engineer); hard-delete unused via `DELETE /api/parts/:id` (`Issue master` `d`); used → `409 IN_USE` (deactivate instead)
@@ -35,6 +35,7 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 11. **Lookups** — Roads, technicians, parts (with amount), issue categories, road slots
 12. **Uploads** — Multipart photos for tickets/devices
 13. **Exports** — CSV for tickets, devices, roads, work report
+14. **Notifications** — Persistent new-ticket alerts, unread/read APIs, VAPID browser subscriptions, and non-blocking Web Push for eligible Admin / Project manager / Control room users
 
 ### QR scan & raise-ticket requirements
 
@@ -66,6 +67,13 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 - Synced locations upsert into `roads` (single source of truth). Existing `GET /api/roads` / `GET /api/lookups/roads` already return them — no sync-specific road API.
 
 **FRONTEND:** Device list road filter reads `GET /api/lookups/roads` (same `roads` table) and refetches after sync. **Still FRONTEND CHANGE REQUIRED:** Road master / TicketList mocks → `/api/roads` or lookups when authorized.
+
+### Multi-issue ticket contract
+
+- Raise, update, and close accept `issues: [{ categoryId, subCategoryId }, …]`; legacy single `categoryId` / `subCategoryId` remains accepted.
+- `ticket_issues` stores ordered `reported` and `found` issue rows; scalar ticket columns retain the primary pair for compatibility.
+- Ticket detail returns `issuesReported` / `issuesFound`; raise returns the raised `eventId` for the photo-attachment flow.
+- Issue master hard-delete usage checks include `ticket_issues`.
 
 ### Ticket status requirements
 
@@ -112,6 +120,13 @@ Canonical `tickets.status` values (exactly four; never `New`):
 
 **FRONTEND CHANGE REQUIRED:** TicketList service default `limit` is still 50 and UI hardcodes 100 — align to allowed limits and use `pagination` for a pager when authorized.
 
+### Device list order (Phase 41)
+
+- `GET /api/devices` (and `GET /api/devices/export`) return rows ordered by **Slot Label ascending** (`devices.slot_number`), so the order is correct on every page rather than within a page only.
+- Order is applied in SQL via one shared constant, `DEVICE_LIST_ORDER_BY` = `ORDER BY (slot_number = ''), slot_number, public_id`: blank labels last, `public_id` as the stable tie-break.
+- `slot_number` is a plain zero-padded `TEXT`, so plain ascending order is the expected Slot Label order; no natural-sort dependency is added.
+- Ticket list order stays `raised_at DESC` (the ticket list has no Slot Label column; its order drives the Open / Assigned / Closed tabs).
+
 ### Parts master & visit cost
 
 - `parts.amount` is authoritative; seed and CRUD set prices.
@@ -124,10 +139,12 @@ Canonical `tickets.status` values (exactly four; never `New`):
 
 ### Add Update restrictions (Phase 30)
 
-- Unassigned tickets (`assignee_id` null) cannot receive `POST /api/tickets/:id/updates` → `409` / `TICKET_NOT_ASSIGNED` / `error: "Ticket not assigned"`.
+- Unassigned tickets (`assignee_id` null) cannot receive `POST /api/tickets/:id/updates` → `409` / `TICKET_NOT_ASSIGNED` / `error: "Ticket not assigned"`. This applies to **every** role, including Admin/PM — a ticket must be assigned before it can be worked. The updater is never silently made the assignee.
 - Only **Admin** or the **current assignee** may Add Update. User B (QR scan or otherwise) on a ticket assigned to A → `403` / `NOT_ASSIGNED_USER` / `error: "This ticket is assigned to another user"` with `details.assignedTo` (assignee display name). Project manager and raiser do **not** bypass unless they are the assignee. List visibility is not applied on this path so the toast message is not replaced by a generic road Forbidden.
 - `visitedBy` is required (UUID). Missing/invalid → `400` / `VALIDATION_ERROR` with `details[].field = "visitedBy"`. Must be an Active **Technician** or **Engineer**. Stored in `ticket_events.meta.visitedBy`.
 - **Engineer** role exists (Technician-like permissions); lookups `/api/lookups/technicians` include Engineers.
+- One Add Update request produces exactly one work-history entry. If the on-site issue changes, the found issue is stored on that visit entry (and in `ticket_issues`); the API must not add a second `Issue reclassified` entry.
+- `resolvedReady` is `true` only for `updateType: "Site visit — resolved"`. `"Site visit — not resolved"` returns `resolvedReady: false` and is stored as a `visit_open` event.
 
 **FRONTEND CHANGE REQUIRED:** Send `visitedBy` on Add Update; toast `Ticket not assigned` / `This ticket is assigned to another user` from `error`; show field error under Visited By from `details`.
 
@@ -138,6 +155,36 @@ Canonical `tickets.status` values (exactly four; never `New`):
 - Visibility: Admin/PM city-wide; others assignee/raiser scoped.
 
 **FRONTEND CHANGE REQUIRED:** Replace `REPORT` mock in WorkReport.jsx with `GET /api/reports/work`; Export → `/work/export`; Person options from lookups; gate page with Work report `v`.
+
+### New-ticket notification requirements
+
+- A successful `POST /api/tickets` creates one persistent `ticket.raised` notification for every Active user whose role is `Admin`, `Project manager`, or `Control room` and whose existing `All tickets` permission has `v`.
+- Notification failure must not change or roll back a successful ticket response. Failed ticket requests must not create notifications.
+- Stored content includes ticket reference, authorized detail link when applicable, road/slot/device, reported issue, raiser, and created time. It excludes description, photos, cost, email, and mobile.
+- `GET /api/notifications` lists only the authenticated user's rows; `/unread-count`, `/:id/read`, and `/read-all` enforce the same ownership boundary.
+- `GET /api/notifications/push-config` exposes VAPID availability/public key and whether the user has a stored subscription. Browser permission remains browser-controlled.
+- `PUT` / `DELETE /api/notifications/push-subscriptions` manage multiple browser/device subscriptions; duplicate endpoints update in place and expired `404`/`410` push endpoints are removed.
+- Web Push runs through the existing in-process `setImmediate` pattern. No WebSocket, SSE, service worker, or external queue is implemented by the backend.
+- Notification event uniqueness prevents duplicate rows on repeated processing. `push_sent_at` prevents a delivered notification from being sent again.
+
+**FRONTEND INTEGRATION COMPLETE:** the sibling frontend now owns the browser service worker, explicit permission action, VAPID `applicationServerKey` subscription, authenticated read-state relay, and shared unread badges on Tickets parent and All Tickets child. It uses the existing `/api/notifications` contract without adding a menu item or realtime transport.
+
+### Assignment notification requirements
+
+- Whenever `tickets.assignee_id` actually changes, the **newly assigned user** receives a persistent notification. Types follow the existing ticket-event wording: `ticket.assigned` (first assign, and raise with `assigneeId`) and `ticket.reassigned` (reassign, and update `handoverToUserId`).
+- Only the new assignee is notified. The previous assignee is **not** notified on reassignment.
+- If the assignee does not change, no notification is created. `POST /api/tickets/:id/assign` already short-circuits on an unchanged assignee, and the existing unique key `(recipient_user_id, type, related_entity_type, related_entity_id)` prevents duplicate rows.
+- Messages: `Ticket TK-XXXX has been assigned to you.` / `Ticket TK-XXXX has been reassigned to you.`
+- Stored `data` carries `ticketId`, `reference`, `url`, `canOpen: true`, `device` (id/road/slot), `issue` (reported category/subcategory/severity), and `assignedBy`. Read state and timestamps come from the notification row itself.
+- Notifications are created in the backend after the owning transaction commits. A notification failure is logged and must not roll back or fail the assignment, reassignment, or update.
+- Recipient must be Active and hold a role in `NOTIFICATION_DELIVERY_ROLES` (`Admin`, `Project manager`, `Control room`, `Technician`, `Engineer`). `ticket.raised` fan-out stays limited to the first three — field roles are added for delivery only, so an assignee is never un-alertable.
+
+### Ticket-open read behavior
+
+- `POST /api/notifications/ticket/:ticketId/read` marks every unread notification the **caller** holds for that ticket as read and returns `{ updated }`.
+- Only the authenticated user's rows are affected. A user can never mark another user's notification read; the per-id route still returns `404` for someone else's notification.
+- `updated: 0` means nothing was unread, so no row is rewritten. The unread badge reflects the change on the next `/unread-count` poll.
+- This makes opening a ticket directly (not only via the bell) clear its unread notification, while leaving every other ticket's notifications untouched.
 
 ### Signup approval requirements
 
@@ -171,6 +218,7 @@ PostgreSQL via discrete env vars: `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSW
 |--------|-----|
 | Dashboard | `GET /api/dashboard` |
 | Tickets | `/api/tickets*` |
+| Ticket notifications | `/api/notifications*` + service-worker Web Push |
 | Devices | `/api/devices*`, especially `GET /api/devices/scan?q=`; Sync Device → `POST /api/device-sync` + status poll |
 | Roads | `/api/roads*` |
 | Issue master | `/api/issues*` |

@@ -277,6 +277,14 @@ function buildDeviceListBase(filters: z.infer<typeof listSchema>, user: AuthUser
   }
 }
 
+/**
+ * Device list / export order: Slot Label (`devices.slot_number`) ascending.
+ * Sorted in SQL so the order holds across every page (LIMIT/OFFSET), not just
+ * within a page. Blank labels go last, `public_id` is the stable tie-break so
+ * paginating never repeats or skips a row when two labels are equal.
+ */
+const DEVICE_LIST_ORDER_BY = `ORDER BY (slot_number = ''), slot_number, public_id`
+
 async function deviceListQuery(
   filters: z.infer<typeof listSchema>,
   user: AuthUser,
@@ -294,7 +302,7 @@ async function deviceListQuery(
     const all = await query(
       `WITH device_rows AS (${cteBody})
        SELECT * FROM device_rows ${pageWhere}
-       ORDER BY (slot_id IS NULL), public_id`,
+       ${DEVICE_LIST_ORDER_BY}`,
       pageParams,
     )
     return { rows: all.rows, total: all.rowCount || all.rows.length, tiles: null }
@@ -326,7 +334,7 @@ async function deviceListQuery(
   const page = await query(
     `WITH device_rows AS (${cteBody})
      SELECT * FROM device_rows ${pageWhere}
-       ORDER BY (slot_id IS NULL), public_id
+     ${DEVICE_LIST_ORDER_BY}
      LIMIT $${limitParams.length - 1} OFFSET $${limitParams.length}`,
     limitParams,
   )

@@ -178,7 +178,7 @@ router.patch('/:id', authorize('Users', 'e'), async (req, res) => {
     )
 
     if (body.password) {
-      await markPasswordChanged(req.params.id)
+      await markPasswordChanged(String(req.params.id))
     }
 
     if (body.roadIds) {

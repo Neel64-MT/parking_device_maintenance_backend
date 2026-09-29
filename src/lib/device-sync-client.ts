@@ -73,7 +73,7 @@ export async function fetchSlotMacByQrToken(qrToken: string): Promise<SlotMacRes
     const text = await res.text()
     let json: unknown
     try {
-      json = text ? JSON.parse(text) : null
+      json = text ? JSON.parse(text) : null;
     } catch {
       throw new DeviceSyncClientError(
         `Invalid JSON from get-slot-mac (${res.status})`,

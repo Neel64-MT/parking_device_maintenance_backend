@@ -24,10 +24,15 @@
 - Phase 35 — Ticket assign harden: transactional, eligible assignee, idempotent, trail response; technicians lookup includes Engineer
 - Phase 36 — Part/Issue hard delete: `DELETE /api/parts/:id` + Issue master `d` for Technician/Engineer/PM; used → `409 IN_USE` (deactivate)
 - Phase 37 — Issue category gap-close: `DELETE /api/issues/categories/:id` + IN_USE; name max 120; sub create parent active check
+- Phase 38 — Persistent new-ticket notifications + browser Web Push; role fan-out, unread/read APIs, VAPID subscriptions
+- Phase 40 — Multi-issue ticket contract parity: `issues[]` accepted on raise/update/close, `ticket_issues` persistence, detail arrays, and raised-event photo attachment
+- Phase 42 — Assignment/reassignment notifications (`ticket.assigned` / `ticket.reassigned`), ticket-open mark-as-read, and removal of the silent auto-claim on Add Update
+- Frontend Phase 39 — NotificationBell, explicit browser permission/subscription UI, service-worker click relay, and shared Tickets/All Tickets unread badges consuming the Phase 38 APIs
+- Phase 41 — Device list / export ordered by Slot Label (`slot_number`) ascending in SQL (`DEVICE_LIST_ORDER_BY`); assign eligibility deliberately unchanged (the frontend narrows the dropdown only)
 
 ## Currently Working On
 
-- (idle — Phase 37 complete)
+- (idle — backend Phase 38 + 42 and frontend Phase 39 notification integration complete)
 
 ## Pending
 
@@ -35,7 +40,9 @@
 
 - Feature screens still on mocks / partial wiring
 - PartMaster: Delete → `DELETE /api/parts/:id`; on `409 IN_USE` toast deactivate instead; Tech/Engineer/PM/Admin may delete unused
-- IssueMaster: wire live APIs; add `createIssueCategory` / `createIssueSubcategory` / `deleteIssueCategory`; Delete unused category/sub → `DELETE …/categories|subcategories/:id`; used → deactivate
+- IssueMaster: wire live APIs; Site attendant now has `vce..d`; add `createIssueCategory` / `createIssueSubcategory` / `deleteIssueCategory`; Delete unused → `DELETE`; used → deactivate
+- Raise/Update/Close: send `issues: [{ categoryId, subCategoryId }, …]`; read `issuesReported` / `issuesFound` on detail (legacy single fields still accepted)
+- DeviceList Sync: Site attendant has Device list `c` — Sync button should show for attendant
 - Image zoom/crop: FE-only (no backend upload change)
 - Wire Scan QR to `GET /api/devices/scan?q=`; if `openTicketId` → ticket detail / update; else raise; on raise `409 OPEN_TICKET_EXISTS` redirect via `details.openTicketId`
 - Wire Sync Device to `POST /api/device-sync`; poll `GET /api/device-sync/latest` or `/:id` for status (Device list done)
@@ -53,10 +60,23 @@
 - Signup success copy: “Admin” → “Admin or Project manager” (optional; API already unlocks Approve for PM)
 - Parts / update-ticket UI: PartChips send part UUIDs (not names); `cost` is labour-only — do not add master part prices into `cost`; show amounts from Parts/lookups APIs
 - Wire Edit/Add device Save to `PATCH`/`POST /api/devices` with `slotIdentifier`, `qrNumber`, `slotNumber`, `roadId`, etc.; keep Slot Id read-only and do not rely on writing `slotId`
+- Raise/Update/Close: send `issues: [{ categoryId, subCategoryId }, …]`; detail reads `issuesReported` / `issuesFound`; raised photos use the returned `eventId`
 
 ## Important Decisions
 
-- Add Update: require `assignee_id`; only Admin or assignee; `NOT_ASSIGNED_USER` for others (QR user B); no auto-claim; no `assertTicketAccess` on this path (clear toast)
+- New-ticket notifications: persistent rows created only after successful ticket/event/assignment writes; failures are logged but never change the ticket response
+- Notification recipients: Active `Admin` / `Project manager` / `Control room` with `All tickets v`; no hardcoded user IDs and no new permission screen
+- Notification APIs scope every read/update to the authenticated recipient; browser permission stays in the browser, subscription keys stay server-side
+- Web Push uses `web-push` + VAPID and existing `setImmediate`; no WebSocket/SSE/queue. `404`/`410` deletes expired endpoints; `push_sent_at` prevents repeat sends
+- Control Room notification links preserve existing road/ownership access; notification fan-out does not widen ticket list authorization
+- Multi-issue tickets prefer `issues[]`; legacy single category/subcategory remains accepted; `ticket_issues` stores ordered reported/found rows while scalar fields retain the primary pair
+- Ticket raise returns `eventId` so the frontend can attach photos through the raised-event endpoint without changing ticket creation semantics
+- Add Update: require `assignee_id` for **every** role incl. Admin/PM → `409 TICKET_NOT_ASSIGNED`; only Admin or assignee; `NOT_ASSIGNED_USER` for others (QR user B); the silent auto-claim (updater becomes assignee) was removed; no `assertTicketAccess` on this path (clear toast)
+- Assignment notifications: only the new assignee is notified — `ticket.assigned` on first assign / raise-with-assignee, `ticket.reassigned` on reassign / update handover. Triggered in the backend after the owning transaction commits, wrapped in its own try/catch so a notification failure never fails the assignment. No notification when the assignee is unchanged (early return + existing unique key)
+- Two separate role lists, deliberately not merged: `NEW_TICKET_NOTIFICATION_ROLES` (Admin/PM/CR) governs `ticket.raised` fan-out; `NOTIFICATION_DELIVERY_ROLES` (those + Technician/Engineer) governs Web Push delivery and frontend bell eligibility — an assignee must never be un-alertable, but field staff still get no new-ticket alerts. Site attendant / AMC officer are in neither (never eligible assignees)
+- Assignment notifications always set `canOpen: true` (recipient is the assignee, so assignee-scoped access applies) — unlike `ticket.raised`, where the link may be suppressed for road-scoped recipients
+- Ticket-open read: `POST /api/notifications/ticket/:ticketId/read` marks the caller's unread rows for that ticket and returns `{ updated }`; `0` means nothing unread so no row is rewritten. Scoped by `recipient_user_id` so users cannot mark others' notifications. Registered before `PATCH /:id/read` so the literal `ticket` segment is not captured by `:id`
+- Notification `UPDATE`s must use `RETURNING` — the PGlite pool derives `rowCount` from returned rows, so a bare `UPDATE` always reports 0 on that driver
 - `visitedBy` required on Add Update; Active Technician or Engineer; stored in `ticket_events.meta`
 - Engineer role: Technician-like permissions; eligible Visited By; field-work road bypass like Technician
 - Work report: Technician+Engineer actors; road filter on `rd.name`; view-shaped tickets; export filtered like `/work`
@@ -70,7 +90,8 @@
 - Assign / reassign: Control room, Admin, or Project manager only; technicians cannot `/assign` or `handoverToUserId`
 - Assign stays road-only (`assertRoadAccess`) for Control room routing; list/detail/dashboard/reports stay visibility-scoped
 - Device list / export / history are city-wide (no `assigned_roads` filter); open-ticket overlays stay ticket-visibility scoped; create/PATCH keep `assertRoadAccess`; scan + raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician / Engineer)
-- Site attendant: city-wide scan/raise; Technician/Engineer: city-wide scan; Add Update = Admin or assignee only
+- Raise / Update / Close tickets accept `issues: [{ categoryId, subCategoryId }, …]` (legacy single `categoryId`/`subCategoryId` still works); persisted in `ticket_issues` with scalar primary for compat
+- Site attendant: city-wide scan/raise; Device Sync + Issue master CRUD; Technician/Engineer: city-wide scan; Add Update = Admin or assignee only
 - Scan details stay on `GET /api/devices/scan?q=` (no `/scan-details` alias); scan `openTicketId` is not ticket-visibility filtered
 - One open ticket per device means `status <> 'Closed'`; unassigned stored status is `Open` (not `New`); DB partial unique index `idx_tickets_one_open_per_device` (migration `012`); Slot Id uniqueness follows via unique `devices.slot_id`
 - List tab `new` = unassigned non-closed; list may show assigned+`Open` as `Under repair` without DB update
@@ -93,6 +114,7 @@
 - Control room is scoped like other non-privileged roles for viewing (per product requirement)
 - Ticket assign (Phase 35): transactional `POST …/assign`; eligible Active Technician/Engineer/CR/PM; idempotent same assignee; response `{ id, assigneeId, assigneeName, assignmentTrail }`; detail trail from `ticket_assignments`; lookups/technicians includes Engineer
 - FRONTEND CHANGE REQUIRED: TicketDetail Save → `POST /api/tickets/:id/assign`; Hand to → `GET /api/lookups/technicians`
+- Device list / export order (Phase 41): Slot Label ascending via `DEVICE_LIST_ORDER_BY` (`ORDER BY (slot_number = ''), slot_number, public_id`) in `src/routes/devices.ts`; SQL-side so it survives pagination. `GET /api/lookups/technicians` still returns CR/PM because Work report Person filter needs them; the frontend Assign dropdown narrows to Technician/Engineer, and `assertEligibleAssignee` is unchanged.
 
 ## Known Issues
 
@@ -100,3 +122,4 @@
 - Device Sync `devicesUpdated` only counts rows whose road/label/QR/MAC actually changed vs DB; duplicate QRs resolved once per run (last Slot Id wins) so a second sync on the same feed should show Updated: 0.
 - Live Device Sync requires `DEVICE_SYNC_API_TOKEN`; without it `POST /api/device-sync` returns `503 DEVICE_SYNC_NOT_CONFIGURED`.
 - Ticket Detail assignment Save is still a design-preview toast until FE wires `POST …/assign`.
+- `npm run test:smoke` stops at the site-attendant assertion `raiser must see Open ticket on a non-assigned road (TK-1099)` on a reused local pglite database: TK-1099 does not exist because earlier smoke runs already consumed the `public_id` sequence. Data-state issue in the ticket flow, unrelated to the Phase 41 device ordering (the new `OK devices Slot Label ascending` assertion runs before it and passes).

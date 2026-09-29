@@ -389,3 +389,89 @@
 **Testing:** unused category delete; used → IN_USE; soft deactivate; tech hard-delete unused; API cleanup (no raw SQL)
 
 **Done when:** smoke passes; FRONTEND CHANGE REQUIRED — `createIssueCategory`, `createIssueSubcategory`, `deleteIssueCategory` in `issues.js` + IssueMaster create/delete UI
+
+## Phase 38 — New-ticket notifications and browser Web Push
+
+**Status:** Complete
+
+**Objective:** Persist and deliver a new-ticket alert to eligible Admin, Project manager, and Control room users without affecting ticket creation success.
+
+**APIs:**
+- `GET /api/notifications`, `/unread-count`, `/push-config`
+- `PATCH /api/notifications/:id/read`, `/read-all`
+- `PUT/DELETE /api/notifications/push-subscriptions[/:id]`
+
+**Database:** `019_notifications.sql` — `notifications` + `push_subscriptions`; unique recipient/event and browser endpoint keys.
+
+**Recipient rule:** Active `Admin` / `Project manager` / `Control room` users with existing `All tickets v`; no hardcoded user IDs.
+
+**Delivery:** `web-push` + VAPID; `setImmediate` background send; `404`/`410` removes expired subscriptions; notification failure is logged and cannot fail the ticket response.
+
+**Files:** `src/lib/notifications.ts`, `src/routes/notifications.ts`, `src/routes/tickets.ts`, `src/app.ts`, env/config, seed, types, smoke, docs.
+
+**Testing:** role fan-out; unrelated role excluded; failed raises excluded; content/reference; read/unread and ownership; subscription upsert/removal; successful push; expired subscription cleanup; sent-state duplicate prevention.
+
+**Done when:** build + write smoke pass; frontend notification integration is complete in the sibling frontend (service worker, explicit browser permission/subscription UI, authenticated read-state relay, and shared Tickets/All Tickets badges).
+
+## Phase 42 — Assignment notifications, ticket-open read, and no silent auto-claim
+
+**Status:** Complete
+
+**Objective:** Alert the person a ticket was assigned to, clear the unread notification when a ticket is opened, and stop Add Update from silently claiming unassigned tickets.
+
+**New behavior:**
+- `ticket.assigned` — first assign, and raise with `assigneeId`
+- `ticket.reassigned` — reassign, and update `handoverToUserId`
+- Recipient is the **new assignee only**; the previous assignee is never notified
+- No notification when the assignee is unchanged (assign route early-returns; the existing unique key also dedupes)
+- `POST /api/notifications/ticket/:ticketId/read` marks the caller's unread rows for that ticket, returning `{ updated }` (`0` = nothing unread, no row rewritten)
+- Unassigned tickets reject Add Update with `409 TICKET_NOT_ASSIGNED` for every role including Admin/PM; the silent auto-claim was removed
+
+**Role classification (two lists, deliberately separate):**
+- `NEW_TICKET_NOTIFICATION_ROLES` = Admin / Project manager / Control room → `ticket.raised` fan-out (unchanged)
+- `NOTIFICATION_DELIVERY_ROLES` = the above + Technician / Engineer → Web Push delivery and frontend bell eligibility
+- Rationale: Technician/Engineer are the only other roles `assertEligibleAssignee` can assign to, so an assignee is never un-alertable, while field staff still receive no new-ticket alerts. Site attendant / AMC officer are in neither list.
+
+**Files:** `src/lib/notifications.ts`, `src/routes/notifications.ts`, `src/routes/tickets.ts`, `frontend/src/services/notifications.js`, `frontend/src/services/users.js`, `frontend/src/hooks/useTicketNotifications.js`, `scripts/smoke-writes.ts`, docs.
+
+**Testing:** A open-ticket marks read; B no unread → no write; C ticket A opened leaves ticket B unread and drops the count by one; D cross-user read refused (404 per-id, ticket route scoped); E assign notifies; F reassign notifies the new assignee only; G same assignee → no duplicate; H notification insert failure still completes the assignment; plus `409 TICKET_NOT_ASSIGNED` and no auto-claim.
+
+**Done when:** `npm run build` (backend + frontend) and `npm run test:smoke:writes` pass. Note: `npm run test:smoke` has a pre-existing unrelated failure in the device-sync authorization assertion (expects `503`, gets `403`).
+
+## Phase 40 — Multi-issue ticket contract parity
+
+**Status:** Complete
+
+**Objective:** Align the backend with the frontend's multi-select issue contract without changing legacy single-issue clients.
+
+**APIs / storage:**
+- Raise / Update / Close accept `issues[]`; legacy `categoryId` + `subCategoryId` remains supported
+- `ticket_issues` stores ordered `reported` / `found` rows with scalar primary compatibility
+- Ticket detail returns `issuesReported` / `issuesFound`; raise returns `eventId`
+- `PATCH /api/tickets/:ticketId/raised/:eventId/photos` supports post-raise photo attachment
+- Issue master delete checks include `ticket_issues`
+
+**Files:** `017_ticket_issues.sql`, `src/lib/ticket-issues.ts`, `src/routes/tickets.ts`, `src/routes/issues.ts`, seed, smoke, docs.
+
+**Testing:** multi-issue raise/detail response, legacy payload compatibility, `eventId`, issue persistence, update/close issue replacement, and notification integration regression.
+
+**Done when:** build and isolated smoke suites pass; no frontend source changes required beyond the already-integrated multi-select UI.
+
+## Phase 41 — Device list Slot Label ascending order
+
+**Status:** Complete
+
+**Objective:** Show the Device List in ascending Slot Label order without breaking API-driven pagination, filters, search, or export.
+
+**Behavior:**
+- `GET /api/devices` and `GET /api/devices/export` order by Slot Label (`devices.slot_number`) ascending through one shared constant, `DEVICE_LIST_ORDER_BY` = `ORDER BY (slot_number = ''), slot_number, public_id`.
+- Sorting is done in SQL, not in the frontend: `LIMIT/OFFSET` paging means client-side sorting would only order one page.
+- Blank labels sort last; `public_id` is the stable tie-break so paging never repeats or skips a row when two labels are equal.
+- `slot_number` is a plain zero-padded `TEXT` (`S1-001`, `S1-010`, `S2-001`), so plain ascending text order is the expected Slot Label order — no natural-sort library or dependency added.
+- Unchanged: filters (`q` / road / status / repeats), status tiles, search, `pagination` envelope, columns, the `slotLabel` value, and ticket list order (`raised_at DESC`).
+
+**Assign role filter:** frontend only. `GET /api/lookups/technicians` keeps returning Active Technician / Engineer / Control room / Project manager (Work report Person filter needs CR/PM) and `assertEligibleAssignee` is unchanged, so the backend stays the final source of truth. The frontend Assign / Reassign dropdown narrows to Technician / Engineer.
+
+**Files:** `src/routes/devices.ts`, `scripts/smoke-inprocess.ts`, docs.
+
+**Testing:** smoke fetches page 1 and 2 of `GET /api/devices` and asserts the concatenated Slot Labels are ascending (fails on the previous `public_id` order, passes on the new order). `npm run build` passes; `test:smoke:writes` and `test:smoke:close` pass. `npm run test:smoke` reaches a pre-existing, unrelated data-state failure at the site-attendant TK-1099 assertion (that ticket does not exist in the local pglite data because earlier runs consumed the public-id sequence); ticket list code is untouched by this phase.

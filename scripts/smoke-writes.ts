@@ -5,6 +5,7 @@
 import 'dotenv/config'
 import { createApp } from '../src/app.js'
 import { closeDb, query } from '../src/db/pool.js'
+import { deliverNotificationPush } from '../src/lib/notifications.js'
 
 const app = createApp()
 const server = app.listen(0)
@@ -40,6 +41,14 @@ async function main() {
   assert(cats.status === 200 && cats.body.data?.[0]?.subs?.[0], 'issue categories failed')
   const categoryId = cats.body.data[0].id as string
   const subCategoryId = cats.body.data[0].subs[0].id as string
+  const issuePairs = (cats.body.data as { id: string; subs?: { id: string }[] }[]).flatMap((category) =>
+    (category.subs || []).map((sub) => ({
+      categoryId: category.id,
+      subCategoryId: sub.id,
+    })),
+  )
+  const alternateIssue = issuePairs.find((pair) => pair.subCategoryId !== subCategoryId)
+  assert(alternateIssue, 'need a second subcategory for found-issue update test')
 
   const suffix = String(Date.now()).slice(-5)
   const device = await call('/api/devices', {
@@ -75,7 +84,220 @@ async function main() {
     `ticket raise failed: ${ticket.status} ${JSON.stringify(ticket.body).slice(0, 300)}`,
   )
   const ticketId = ticket.body.data.id as string
+  const ticketUuid = ticket.body.data.uuid as string
   console.log('OK ticket raise', ticketId)
+
+  // New-ticket notifications: role fan-out, read state, ownership, subscriptions, push cleanup.
+  const pmNotificationLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9825012345', password: 'Password123' }),
+  })
+  const crNotificationLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '7990011002', password: 'Password123' }),
+  })
+  const techNotificationLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9099941128', password: 'Password123' }),
+  })
+  assert(
+    pmNotificationLogin.status === 200 && crNotificationLogin.status === 200 && techNotificationLogin.status === 200,
+    'notification role logins failed',
+  )
+  const pmNotificationAuth = {
+    Authorization: `Bearer ${pmNotificationLogin.body.data.token as string}`,
+  }
+  const crNotificationAuth = {
+    Authorization: `Bearer ${crNotificationLogin.body.data.token as string}`,
+  }
+  const techNotificationAuth = {
+    Authorization: `Bearer ${techNotificationLogin.body.data.token as string}`,
+  }
+
+  const notificationsUnauth = await call('/api/notifications')
+  assert(notificationsUnauth.status === 401, 'notifications without auth must be 401')
+
+  const adminNotifications = await call('/api/notifications?limit=100', { headers: auth })
+  assert(adminNotifications.status === 200 && Array.isArray(adminNotifications.body.data), 'admin notifications list')
+  const adminNotification = adminNotifications.body.data.find(
+    (row: { data?: { ticketId?: string } }) => row.data?.ticketId === ticketId,
+  )
+  assert(adminNotification?.id, 'Admin must receive new-ticket notification')
+  assert(
+    adminNotification.data?.device?.road && adminNotification.data?.device?.slot,
+    'notification must include device location',
+  )
+  assert(
+    adminNotification.data?.issue?.category && adminNotification.data?.issue?.subCategory,
+    'notification must include issue information',
+  )
+  assert(
+    adminNotification.data?.raisedBy?.name === 'Admin User' && adminNotification.data?.createdAt,
+    'notification must include raiser and created time',
+  )
+  assert(adminNotification.data?.url === `/tickets/${ticketId}`, 'notification detail reference')
+
+  const pmNotifications = await call('/api/notifications?limit=100', { headers: pmNotificationAuth })
+  const crNotifications = await call('/api/notifications?limit=100', { headers: crNotificationAuth })
+  const techNotifications = await call('/api/notifications?limit=100', { headers: techNotificationAuth })
+  assert(
+    pmNotifications.body.data?.some((row: { data?: { ticketId?: string } }) => row.data?.ticketId === ticketId),
+    'Project manager must receive new-ticket notification',
+  )
+  assert(
+    crNotifications.body.data?.some((row: { data?: { ticketId?: string } }) => row.data?.ticketId === ticketId),
+    'Control room must receive new-ticket notification',
+  )
+  assert(
+    !techNotifications.body.data?.some((row: { data?: { ticketId?: string } }) => row.data?.ticketId === ticketId),
+    'Technician must not receive new-ticket notification',
+  )
+
+  const eligibleRecipients = await query<{ n: number }>(
+    `SELECT COUNT(DISTINCT u.id)::int AS n
+     FROM users u
+     JOIN roles r ON r.id = u.role_id
+     JOIN role_permissions rp ON rp.role_id = r.id
+     WHERE u.status = 'Active'
+       AND r.name IN ('Admin', 'Project manager', 'Control room')
+       AND rp.screen = 'All tickets' AND rp.can_view = TRUE`,
+  )
+  const notificationRecipients = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n
+     FROM notifications
+     WHERE related_entity_id = $1 AND type = 'ticket.raised'`,
+    [ticketUuid],
+  )
+  assert(
+    (eligibleRecipients.rows[0]?.n ?? 0) >= 3 &&
+      notificationRecipients.rows[0]?.n === eligibleRecipients.rows[0]?.n,
+    'all eligible target-role users must receive exactly one notification',
+  )
+
+  const adminUnreadBefore = await call('/api/notifications/unread-count', { headers: auth })
+  const crossUserRead = await call(
+    `/api/notifications/${adminNotification.id as string}/read`,
+    { method: 'PATCH', headers: pmNotificationAuth },
+  )
+  assert(crossUserRead.status === 404, 'user cannot mark another user notification read')
+  const adminRead = await call(`/api/notifications/${adminNotification.id as string}/read`, {
+    method: 'PATCH',
+    headers: auth,
+  })
+  assert(adminRead.status === 200 && adminRead.body.data?.isRead, 'mark notification read')
+  const adminUnreadAfter = await call('/api/notifications/unread-count', { headers: auth })
+  assert(
+    adminUnreadAfter.body.data?.count === adminUnreadBefore.body.data?.count - 1,
+    'unread count must decrease after mark read',
+  )
+  const readAll = await call('/api/notifications/read-all', { method: 'PATCH', headers: auth })
+  const adminUnreadCleared = await call('/api/notifications/unread-count', { headers: auth })
+  assert(readAll.status === 200 && adminUnreadCleared.body.data?.count === 0, 'mark all notifications read')
+  console.log('OK notification fan-out + read APIs')
+
+  const pushConfig = await call('/api/notifications/push-config', { headers: pmNotificationAuth })
+  assert(
+    pushConfig.status === 200 && typeof pushConfig.body.data?.available === 'boolean',
+    'push config availability',
+  )
+  const invalidSubscription = await call('/api/notifications/push-subscriptions', {
+    method: 'PUT',
+    headers: pmNotificationAuth,
+    body: JSON.stringify({
+      endpoint: 'http://127.0.0.1/internal-push',
+      keys: { p256dh: 'smoke-p256dh-key', auth: 'smoke-auth-key' },
+    }),
+  })
+  assert(
+    invalidSubscription.status === 400 && invalidSubscription.body.code === 'VALIDATION_ERROR',
+    'private/non-HTTPS push endpoint must be rejected',
+  )
+  const expiredEndpoint = `https://push.example.test/expired-${suffix}`
+  const okEndpoint = `https://push.example.test/ok-${suffix}`
+  const expiredSubscription = await call('/api/notifications/push-subscriptions', {
+    method: 'PUT',
+    headers: pmNotificationAuth,
+    body: JSON.stringify({
+      endpoint: expiredEndpoint,
+      keys: { p256dh: 'smoke-p256dh-key', auth: 'smoke-auth-key' },
+    }),
+  })
+  assert(expiredSubscription.status === 200 && expiredSubscription.body.data?.id, 'push subscription register')
+  const updatedSubscription = await call('/api/notifications/push-subscriptions', {
+    method: 'PUT',
+    headers: pmNotificationAuth,
+    body: JSON.stringify({
+      endpoint: expiredEndpoint,
+      keys: { p256dh: 'smoke-p256dh-key-updated', auth: 'smoke-auth-key-updated' },
+    }),
+  })
+  assert(updatedSubscription.body.data?.id === expiredSubscription.body.data?.id, 'push subscription upsert')
+  const duplicateSubscriptions = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM push_subscriptions WHERE endpoint = $1`,
+    [expiredEndpoint],
+  )
+  assert(duplicateSubscriptions.rows[0]?.n === 1, 'duplicate push endpoint must update in place')
+  const foreignRemove = await call(
+    `/api/notifications/push-subscriptions/${expiredSubscription.body.data.id as string}`,
+    { method: 'DELETE', headers: auth },
+  )
+  assert(foreignRemove.status === 404, 'user cannot remove another user push subscription')
+
+  const pmNotification = pmNotifications.body.data.find(
+    (row: { data?: { ticketId?: string } }) => row.data?.ticketId === ticketId,
+  )
+  assert(pmNotification?.id, 'PM notification id for push delivery test')
+  await deliverNotificationPush([pmNotification.id as string], async () => {
+    throw Object.assign(new Error('expired subscription'), { statusCode: 410 })
+  })
+  const expiredAfterSend = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM push_subscriptions WHERE endpoint = $1`,
+    [expiredEndpoint],
+  )
+  assert(expiredAfterSend.rows[0]?.n === 0, '410 push response must remove expired subscription')
+
+  const okSubscription = await call('/api/notifications/push-subscriptions', {
+    method: 'PUT',
+    headers: pmNotificationAuth,
+    body: JSON.stringify({
+      endpoint: okEndpoint,
+      keys: { p256dh: 'smoke-p256dh-key', auth: 'smoke-auth-key' },
+    }),
+  })
+  assert(okSubscription.status === 200, 'push subscription re-register')
+  let successfulPushes = 0
+  await deliverNotificationPush([pmNotification.id as string], async (subscription, payload) => {
+    successfulPushes += 1
+    assert(subscription.endpoint === okEndpoint, 'push subscription passed to sender')
+    const body = JSON.parse(payload) as {
+      notification?: { title?: string; body?: string }
+      data?: { notificationId?: string; ticketId?: string }
+    }
+    assert(body.notification?.title === 'New ticket raised', 'push title')
+    assert(body.notification?.body?.includes(ticketId), 'push ticket reference')
+    assert(
+      body.data?.notificationId === pmNotification.id && body.data?.ticketId === ticketId,
+      'push payload identity',
+    )
+    return { statusCode: 201, body: '', headers: {} }
+  })
+  assert(successfulPushes === 1, 'push delivery should run once')
+  await deliverNotificationPush([pmNotification.id as string], async () => {
+    successfulPushes += 1
+    return { statusCode: 201, body: '', headers: {} }
+  })
+  assert(successfulPushes === 1, 'sent notification must not be delivered twice')
+  const sentState = await query<{ push_sent_at: Date | string | null }>(
+    `SELECT push_sent_at FROM notifications WHERE id = $1`,
+    [pmNotification.id],
+  )
+  assert(sentState.rows[0]?.push_sent_at, 'push sent timestamp')
+  const removeOkSubscription = await call(
+    `/api/notifications/push-subscriptions/${okSubscription.body.data.id as string}`,
+    { method: 'DELETE', headers: pmNotificationAuth },
+  )
+  assert(removeOkSubscription.status === 200, 'push subscription remove')
+  console.log('OK push subscription lifecycle + delivery cleanup')
 
   const users = await call('/api/users', { headers: auth })
   const tech = users.body.data.users.find(
@@ -148,6 +370,376 @@ async function main() {
     `expected INVALID_ASSIGNEE: ${JSON.stringify(badAssignee.body).slice(0, 200)}`,
   )
   console.log('OK invalid assignee rejected')
+
+  // ---------------------------------------------------------------------------
+  // Assignment notifications + ticket-scoped mark-as-read
+  // ---------------------------------------------------------------------------
+  if (techB?.id) {
+    // Pin both notification recipients to the exact seeded accounts this block
+    // logs in as, so the assertions cannot drift with /api/users list ordering.
+    const notifTechA = users.body.data.users.find(
+      (u: { mobile?: string }) => u.mobile === '9099941128',
+    )
+    const notifTechB = users.body.data.users.find(
+      (u: { mobile?: string; role: string; status: string }) =>
+        u.mobile === '9428033471' && u.role === 'Technician' && u.status === 'Active',
+    )
+    assert(notifTechA?.id && notifTechB?.id, 'notification technician fixtures missing')
+    const techAId = notifTechA.id as string
+    const techBId = notifTechB.id as string
+
+    const techBLogin = await call('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: '9428033471', password: 'Password123' }),
+    })
+    assert(techBLogin.status === 200, 'second technician login failed')
+    const techBNotificationAuth = {
+      Authorization: `Bearer ${techBLogin.body.data.token as string}`,
+    }
+
+    // E) Assign a fresh ticket to a technician -> technician is notified.
+    const assignDev = await call('/api/devices', {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({
+        roadId,
+        slotNumber: `ASG-${suffix}`,
+        installedOn: '2026-09-01',
+      }),
+    })
+    const assignTicket = await call('/api/tickets', {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({
+        deviceId: assignDev.body.data.publicId,
+        categoryId,
+        subCategoryId,
+        reporterType: 'Control room',
+      }),
+    })
+    assert(assignTicket.status === 201, 'assignment-notification ticket raise failed')
+    const assignTicketId = assignTicket.body.data.id as string
+    const assignTicketUuid = assignTicket.body.data.uuid as string
+
+    const doAssign = await call(`/api/tickets/${assignTicketId}/assign`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ assigneeId: techAId, reason: 'Notification assign' }),
+    })
+    assert(doAssign.status === 200, `assign for notification failed: ${doAssign.status}`)
+
+    const techNotifs = await call('/api/notifications?limit=100', { headers: techNotificationAuth })
+    const assignedNotif = techNotifs.body.data?.find(
+      (row: { type: string; data?: { ticketId?: string } }) =>
+        row.type === 'ticket.assigned' && row.data?.ticketId === assignTicketId,
+    )
+    assert(assignedNotif?.id, 'E: assignee must receive ticket.assigned notification')
+    assert(assignedNotif.isRead === false, 'assignment notification starts unread')
+    assert(
+      assignedNotif.data?.url === `/tickets/${assignTicketId}` && assignedNotif.data?.canOpen === true,
+      'assignment notification must carry an openable ticket link',
+    )
+    assert(
+      /has been assigned to you/.test(assignedNotif.message || ''),
+      `assignment message wording: ${assignedNotif.message}`,
+    )
+    console.log('OK E: assignee receives ticket.assigned notification')
+
+    // G) Re-assigning the same user must not duplicate the notification.
+    const sameAssign = await call(`/api/tickets/${assignTicketId}/assign`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ assigneeId: techAId }),
+    })
+    assert(sameAssign.status === 200, 'same-assign should be accepted')
+    const dupCount = await query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM notifications
+       WHERE recipient_user_id = $1 AND type = 'ticket.assigned' AND related_entity_id = $2`,
+      [techAId, assignTicketUuid],
+    )
+    assert(dupCount.rows[0]?.n === 1, 'G: same assignee must not create a duplicate notification')
+    console.log('OK G: same assignee creates no duplicate notification')
+
+    // F) Reassign A -> B: B is notified, A is not re-notified.
+    const reassignForNotif = await call(`/api/tickets/${assignTicketId}/assign`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ assigneeId: techBId }),
+    })
+    assert(reassignForNotif.status === 200, 'reassign for notification failed')
+    const techBNotifs = await call('/api/notifications?limit=100', {
+      headers: techBNotificationAuth,
+    })
+    const reassignedNotif = techBNotifs.body.data?.find(
+      (row: { type: string; data?: { ticketId?: string } }) =>
+        row.type === 'ticket.reassigned' && row.data?.ticketId === assignTicketId,
+    )
+    assert(reassignedNotif?.id, 'F: new assignee must receive ticket.reassigned notification')
+    assert(
+      /has been reassigned to you/.test(reassignedNotif.message || ''),
+      `reassignment message wording: ${reassignedNotif.message}`,
+    )
+    const techAReassignCount = await query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM notifications
+       WHERE recipient_user_id = $1 AND type = 'ticket.reassigned' AND related_entity_id = $2`,
+      [techAId, assignTicketUuid],
+    )
+    assert(
+      techAReassignCount.rows[0]?.n === 0,
+      'previous assignee must not be notified on reassignment',
+    )
+    console.log('OK F: new assignee receives ticket.reassigned; previous assignee not notified')
+
+    // D) A user cannot mark another user's notification read.
+    // D1: per-id route with another user's notification id -> 404, row untouched.
+    const d1 = await call(
+      `/api/notifications/${reassignedNotif.id as string}/read`,
+      { method: 'PATCH', headers: techNotificationAuth },
+    )
+    assert(d1.status === 404, `D1: cross-user per-id read must be 404, got ${d1.status}`)
+    // D2: ticket-scoped route is scoped to the caller, not the whole ticket.
+    const d2 = await call(`/api/notifications/ticket/${assignTicketId}/read`, {
+      method: 'POST',
+      headers: techNotificationAuth,
+    })
+    assert(d2.status === 200, 'D2: caller marking own ticket notifications should succeed')
+    const techBStillUnread = await query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM notifications
+       WHERE recipient_user_id = $1 AND related_entity_id = $2 AND read_at IS NULL`,
+      [techBId, assignTicketUuid],
+    )
+    assert(
+      techBStillUnread.rows[0]?.n === 1,
+      "D2: marking read must not touch another user's notification",
+    )
+    const techAReadAfterD2 = await query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM notifications
+       WHERE recipient_user_id = $1 AND related_entity_id = $2 AND read_at IS NULL`,
+      [techAId, assignTicketUuid],
+    )
+    assert(
+      techAReadAfterD2.rows[0]?.n === 0,
+      'D2: caller own notification for that ticket must become read',
+    )
+    console.log('OK D: ticket mark-read is scoped to the calling user')
+
+    // B) Already-read ticket -> no row is rewritten (reports 0 updated).
+    const firstRead = await call(`/api/notifications/ticket/${assignTicketId}/read`, {
+      method: 'POST',
+      headers: techBNotificationAuth,
+    })
+    assert(
+      firstRead.status === 200 && firstRead.body.data?.updated === 1,
+      `B setup: first read must mark 1 row, got ${JSON.stringify(firstRead.body.data)}`,
+    )
+    const noopRead = await call(`/api/notifications/ticket/${assignTicketId}/read`, {
+      method: 'POST',
+      headers: techBNotificationAuth,
+    })
+    assert(
+      noopRead.status === 200 && noopRead.body.data?.updated === 0,
+      `B: repeat read must report 0 updated, got ${JSON.stringify(noopRead.body.data)}`,
+    )
+    console.log('OK B: nothing unread -> no database write')
+
+    // C) Opening ticket A must leave ticket B's notification unread.
+    const otherDev = await call('/api/devices', {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({
+        roadId,
+        slotNumber: `ASGB-${suffix}`,
+        installedOn: '2026-09-01',
+      }),
+    })
+    const otherTicket = await call('/api/tickets', {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({
+        deviceId: otherDev.body.data.publicId,
+        categoryId,
+        subCategoryId,
+        reporterType: 'Control room',
+      }),
+    })
+    const otherTicketId = otherTicket.body.data.id as string
+    const otherTicketUuid = otherTicket.body.data.uuid as string
+    await call(`/api/tickets/${otherTicketId}/assign`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ assigneeId: techBId }),
+    })
+
+    // Ticket A is a second fresh ticket assigned to the same user, so both A and B
+    // start unread and the count delta is unambiguous.
+    const ticketADev = await call('/api/devices', {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({
+        roadId,
+        slotNumber: `ASGA-${suffix}`,
+        installedOn: '2026-09-01',
+      }),
+    })
+    const ticketA = await call('/api/tickets', {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({
+        deviceId: ticketADev.body.data.publicId,
+        categoryId,
+        subCategoryId,
+        reporterType: 'Control room',
+      }),
+    })
+    assert(ticketA.status === 201, 'ticket A raise failed')
+    const ticketAId = ticketA.body.data.id as string
+    const ticketAUuid = ticketA.body.data.uuid as string
+    await call(`/api/tickets/${ticketAId}/assign`, {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ assigneeId: techBId }),
+    })
+
+    const techBUnreadBefore = await call('/api/notifications/unread-count', {
+      headers: techBNotificationAuth,
+    })
+    assert(
+      techBUnreadBefore.body.data?.count >= 2,
+      `C: expected at least 2 unread for the two tickets, got ${techBUnreadBefore.body.data?.count}`,
+    )
+
+    // Open ticket A.
+    const openA = await call(`/api/notifications/ticket/${ticketAId}/read`, {
+      method: 'POST',
+      headers: techBNotificationAuth,
+    })
+    assert(
+      openA.status === 200 && openA.body.data?.updated === 1,
+      `A: opening ticket A must mark its notification read, got ${JSON.stringify(openA.body.data)}`,
+    )
+
+    // Ticket B (otherTicketId) must still be unread.
+    const bStillUnread = await query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM notifications
+       WHERE recipient_user_id = $1 AND related_entity_id = $2 AND read_at IS NULL`,
+      [techBId, otherTicketUuid],
+    )
+    assert(
+      bStillUnread.rows[0]?.n === 1,
+      'C: opening ticket A must leave ticket B notification unread',
+    )
+    const aNowRead = await query<{ n: number }>(
+      `SELECT COUNT(*)::int AS n FROM notifications
+       WHERE recipient_user_id = $1 AND related_entity_id = $2 AND read_at IS NULL`,
+      [techBId, ticketAUuid],
+    )
+    assert(aNowRead.rows[0]?.n === 0, 'A: ticket A notification must now be read')
+
+    const techBUnreadAfter = await call('/api/notifications/unread-count', {
+      headers: techBNotificationAuth,
+    })
+    assert(
+      techBUnreadAfter.body.data?.count ===
+        techBUnreadBefore.body.data?.count - 1,
+      `C: unread count must drop by exactly one, before=${techBUnreadBefore.body.data?.count} after=${techBUnreadAfter.body.data?.count}`,
+    )
+    console.log('OK A + C: opening ticket A marks it read, ticket B stays unread, count drops by one')
+
+    // H) A notification failure must not break the assignment itself.
+    // Force the notification INSERT to fail, then confirm the assign still succeeds.
+    const hDev = await call('/api/devices', {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({ roadId, slotNumber: `NF-${suffix}`, installedOn: '2026-09-01' }),
+    })
+    const hTicket = await call('/api/tickets', {
+      method: 'POST',
+      headers: auth,
+      body: JSON.stringify({
+        deviceId: hDev.body.data.publicId,
+        categoryId,
+        subCategoryId,
+        reporterType: 'Control room',
+      }),
+    })
+    assert(hTicket.status === 201, 'H: ticket raise failed')
+    const hTicketId = hTicket.body.data.id as string
+
+    // Reject notification inserts, then assign.
+    await query(
+      `ALTER TABLE notifications ADD CONSTRAINT smoke_block_notify CHECK (type <> 'ticket.assigned') NOT VALID`,
+    )
+    try {
+      const hAssign = await call(`/api/tickets/${hTicketId}/assign`, {
+        method: 'POST',
+        headers: auth,
+        body: JSON.stringify({ assigneeId: techAId }),
+      })
+      assert(
+        hAssign.status === 200 && hAssign.body.data?.assigneeId === techAId,
+        `H: assignment must still succeed when notification insert fails, got ${hAssign.status} ${JSON.stringify(hAssign.body).slice(0, 200)}`,
+      )
+      const hAssigned = await query<{ assignee_id: string | null }>(
+        `SELECT assignee_id FROM tickets WHERE public_id = $1`,
+        [hTicketId],
+      )
+      assert(hAssigned.rows[0]?.assignee_id === techAId, 'H: assignee must be persisted')
+      const hTrail = await query<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM ticket_assignments WHERE ticket_id = (SELECT id FROM tickets WHERE public_id = $1)`,
+        [hTicketId],
+      )
+      assert(hTrail.rows[0]?.n === 1, 'H: assignment trail must be written')
+    } finally {
+      await query(`ALTER TABLE notifications DROP CONSTRAINT IF EXISTS smoke_block_notify`)
+    }
+    console.log('OK H: notification failure does not break assignment')
+  }
+
+  // ---------------------------------------------------------------------------
+  // Add Update on an unassigned ticket is rejected (no silent auto-claim)
+  // ---------------------------------------------------------------------------
+  const unassignedDev = await call('/api/devices', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      roadId,
+      slotNumber: `UNASSIGNED-${suffix}`,
+      installedOn: '2026-09-01',
+    }),
+  })
+  const unassignedTicket = await call('/api/tickets', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      deviceId: unassignedDev.body.data.publicId,
+      categoryId,
+      subCategoryId,
+      reporterType: 'Control room',
+    }),
+  })
+  assert(unassignedTicket.status === 201, 'unassigned ticket raise failed')
+  const unassignedTicketId = unassignedTicket.body.data.id as string
+
+  // Even an Admin must assign first.
+  const adminUpdateUnassigned = await call(`/api/tickets/${unassignedTicketId}/updates`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({ updateType: 'Site visit — not resolved', workDone: 'should fail' }),
+  })
+  assert(
+    adminUpdateUnassigned.status === 409 &&
+      adminUpdateUnassigned.body.code === 'TICKET_NOT_ASSIGNED',
+    `Admin update on unassigned must be 409 TICKET_NOT_ASSIGNED, got ${adminUpdateUnassigned.status} ${JSON.stringify(adminUpdateUnassigned.body).slice(0, 200)}`,
+  )
+  const stillUnassigned = await query<{ assignee_id: string | null }>(
+    `SELECT assignee_id FROM tickets WHERE public_id = $1`,
+    [unassignedTicketId],
+  )
+  assert(
+    stillUnassigned.rows[0]?.assignee_id == null,
+    'rejected update must not auto-assign the ticket',
+  )
+  console.log('OK unassigned ticket rejects Add Update without auto-claiming')
 
   // Parts master create/update (Issue c/e or Technician) + amounts on list/lookups
   const partA = await call('/api/parts', {
@@ -222,6 +814,52 @@ async function main() {
     'parts snapshot shape',
   )
   console.log('OK update with parts cost')
+
+  // One POST /updates must create exactly one timeline event, even when the on-site issue
+  // differs from the reported issue. "not resolved" must not be stored as visit_resolved.
+  const eventsBefore = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM ticket_events WHERE ticket_id = $1`,
+    [ticketUuid],
+  )
+  const notResolved = await call(`/api/tickets/${ticketId}/updates`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      updateType: 'Site visit — not resolved',
+      workDone: 'Found a different fault on site',
+      issues: [alternateIssue],
+    }),
+  })
+  assert(
+    notResolved.status === 201 || notResolved.status === 200,
+    `not-resolved update failed: ${JSON.stringify(notResolved.body).slice(0, 300)}`,
+  )
+  assert(notResolved.body.data?.resolvedReady === false, 'not-resolved update must not be resolvedReady')
+  const eventsAfter = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM ticket_events WHERE ticket_id = $1`,
+    [ticketUuid],
+  )
+  assert(
+    eventsAfter.rows[0]?.n === (eventsBefore.rows[0]?.n ?? 0) + 1,
+    `one update must create one event: before ${eventsBefore.rows[0]?.n} after ${eventsAfter.rows[0]?.n}`,
+  )
+  const latestEvent = await query<{ event_type: string; category_id: string; subcategory_id: string }>(
+    `SELECT event_type, category_id, subcategory_id
+     FROM ticket_events WHERE ticket_id = $1
+     ORDER BY created_at DESC, id DESC LIMIT 1`,
+    [ticketUuid],
+  )
+  assert(latestEvent.rows[0]?.event_type === 'visit_open', 'not-resolved update must be visit_open')
+  assert(
+    latestEvent.rows[0]?.subcategory_id === alternateIssue.subCategoryId,
+    'single update event must carry the on-site issue',
+  )
+  const reclassifiedCount = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n FROM ticket_events WHERE ticket_id = $1 AND event_type = 'reclassified'`,
+    [ticketUuid],
+  )
+  assert(reclassifiedCount.rows[0]?.n === 0, 'update must not create a separate reclassified event')
+  console.log('OK one update = one timeline event (found issue recorded on the visit)')
 
   const badPart = await call(`/api/tickets/${ticketId}/updates`, {
     method: 'POST',
@@ -303,6 +941,12 @@ async function main() {
     }),
   })
   assert(t1.status === 201, 'first ticket failed')
+  const failedRaiseNotificationCount = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n
+     FROM notifications
+     WHERE related_entity_id = $1 AND type = 'ticket.raised'`,
+    [t1.body.data.uuid],
+  )
   const [raceA, raceB] = await Promise.all([
     call('/api/tickets', {
       method: 'POST',
@@ -354,7 +998,17 @@ async function main() {
     dup.body.details?.openTicketId && dup.body.details?.ticketId,
     'OPEN_TICKET_EXISTS must include openTicketId and ticketId',
   )
-  console.log('OK one-open-ticket rule')
+  const countAfterFailedRaises = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n
+     FROM notifications
+     WHERE related_entity_id = $1 AND type = 'ticket.raised'`,
+    [t1.body.data.uuid],
+  )
+  assert(
+    countAfterFailedRaises.rows[0]?.n === failedRaiseNotificationCount.rows[0]?.n,
+    'failed raises must not create notifications',
+  )
+  console.log('OK one-open-ticket rule + failed raises create no notifications')
 
   // Issues: create unused subcategory, hard-delete OK; used subcategory → deactivate-only
   const catCreate = await call('/api/issues/categories', {
@@ -488,6 +1142,93 @@ async function main() {
   })
   assert(patchUser.status === 200, `user patch failed: ${JSON.stringify(patchUser.body).slice(0, 200)}`)
   console.log('OK user patch')
+
+  // Phase 41 — multi-issue raise + Site attendant Device Sync / Issue master
+  const catsFull = await call('/api/lookups/issue-categories', { headers: auth })
+  assert(catsFull.status === 200 && catsFull.body.data?.length >= 1, 'categories for multi-issue')
+  const cat0 = catsFull.body.data[0]
+  const sub0 = cat0.subs[0]
+  const sub1 = cat0.subs[1] || cat0.subs[0]
+  assert(sub0?.id, 'need subcategory for multi-issue')
+
+  const multiDev = await call('/api/devices', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      roadId,
+      slotNumber: `MI-${suffix}`,
+      installedOn: '2026-09-01',
+      installStatus: 'Working',
+    }),
+  })
+  assert(
+    multiDev.status === 201 && multiDev.body.data?.publicId,
+    `multi-issue device create: ${multiDev.status} ${JSON.stringify(multiDev.body).slice(0, 300)}`,
+  )
+
+  const multiRaise = await call('/api/tickets', {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      deviceId: multiDev.body.data.publicId,
+      issues: [
+        { categoryId: cat0.id, subCategoryId: sub0.id },
+        { categoryId: cat0.id, subCategoryId: sub1.id },
+      ],
+      description: 'Smoke multi-issue raise',
+      reporterType: 'Control room',
+    }),
+  })
+  assert(
+    multiRaise.status === 201 && Array.isArray(multiRaise.body.data?.issuesReported),
+    `multi-issue raise failed: ${JSON.stringify(multiRaise.body).slice(0, 300)}`,
+  )
+  assert(multiRaise.body.data.issuesReported.length >= 1, 'issuesReported length')
+  const multiId = multiRaise.body.data.id as string
+
+  const multiDetail = await call(`/api/tickets/${multiId}`, { headers: auth })
+  assert(multiDetail.status === 200, 'multi-issue detail')
+  assert(
+    Array.isArray(multiDetail.body.data?.issuesReported) &&
+      multiDetail.body.data.issuesReported.length >= 1,
+    'detail issuesReported',
+  )
+  console.log('OK multi-issue raise + detail')
+
+  const attendantLogin = await call('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ identifier: '9016374408', password: 'Password123' }),
+  })
+  assert(attendantLogin.status === 200 && attendantLogin.body.data?.token, 'site attendant login')
+  const attAuth = { Authorization: `Bearer ${attendantLogin.body.data.token as string}` }
+
+  const prevTok = process.env.DEVICE_SYNC_API_TOKEN
+  process.env.DEVICE_SYNC_API_TOKEN = ''
+  const attSync = await call('/api/device-sync', {
+    method: 'POST',
+    headers: attAuth,
+    body: '{}',
+  })
+  assert(
+    attSync.status === 503 && attSync.body.code === 'DEVICE_SYNC_NOT_CONFIGURED',
+    `attendant device-sync should pass auth (503 not configured): ${JSON.stringify(attSync.body).slice(0, 200)}`,
+  )
+  if (prevTok === undefined) delete process.env.DEVICE_SYNC_API_TOKEN
+  else process.env.DEVICE_SYNC_API_TOKEN = prevTok
+  console.log('OK site attendant device-sync authorized')
+
+  const attCat = await call('/api/issues/categories', {
+    method: 'POST',
+    headers: attAuth,
+    body: JSON.stringify({ name: `Att Smoke Cat ${suffix}` }),
+  })
+  assert(attCat.status === 201 && attCat.body.data?.id, `attendant create category: ${JSON.stringify(attCat.body).slice(0, 200)}`)
+  const attDel = await call(`/api/issues/categories/${attCat.body.data.id}`, {
+    method: 'DELETE',
+    headers: attAuth,
+  })
+  assert(attDel.status === 200, `attendant delete unused category: ${JSON.stringify(attDel.body).slice(0, 200)}`)
+  console.log('OK site attendant Issue master CRUD')
 
   console.log('\nDomain write checks passed')
   server.close()
