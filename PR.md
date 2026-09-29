@@ -30,7 +30,7 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 6. **Issue master** — Categories / sub-categories with severity; hard-delete unused categories and subs (`Issue master` `d`); deactivate if used (`409 IN_USE`); create/patch names trimmed `min(2)`/`max(120)`; sub create requires active parent category
 7. **Parts master** — Active parts with `amount` (`NUMERIC(12,2)`); list/lookups return `{ id, name, amount }`; create/patch via `/api/parts` (Issue master `c`/`e` or Technician/Engineer); hard-delete unused via `DELETE /api/parts/:id` (`Issue master` `d`); used → `409 IN_USE` (deactivate instead)
 8. **Road master** — CRUD roads; sequential `RD-xx` codes
-9. **Users & roles** — Create/edit/inactivate users; Admin and Project manager may approve Pending signups, update details/role/password via `PATCH /api/users/:id`; role permission matrix; never hard-delete users
+9. **Users & roles** — Create/edit/inactivate users; Admin and Project manager may approve Pending signups, update details/role/password via `PATCH /api/users/:id`; role permission matrix; never hard-delete users. **List visibility:** the authenticated user's own account is never returned, and a non-Admin viewer never receives Admin-role accounts (SQL-level, applies to search and status filters). **Delete:** `DELETE /api/users/:id` requires Users `d` (Admin) and deactivates the account (`status = 'Inactive'`); self-delete is rejected with `400` / `SELF_DELETE_FORBIDDEN`.
 10. **Work report** — Day/week/month/range field-staff load and outcomes via `GET /api/reports/work` (`view`, `from`, `to`, `person`, `road`). Actors: Technician and Engineer. Road filter uses road name. Detail `tickets` tuples are view-shaped (day = per-event TK- rows; week/range = per-day; month = per-week). Export: `GET /api/reports/work/export` with the same filters (CSV).
 11. **Lookups** — Roads, technicians, parts (with amount), issue categories, road slots
 12. **Uploads** — Multipart photos for tickets/devices
@@ -215,7 +215,7 @@ PostgreSQL via discrete env vars: `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSW
 | Devices | `/api/devices*`, especially `GET /api/devices/scan?q=`; Sync Device → `POST /api/device-sync` + status poll |
 | Roads | `/api/roads*` |
 | Issue master | `/api/issues*` |
-| Users / roles | `/api/users*`, `/api/roles*` |
+| Users / roles | `/api/users*` (DELETE is a hard delete), `/api/roles*` — `DELETE /api/roles/:id` needs `Roles & permissions` `d` and returns `409 ROLE_IN_USE` while any Active or Pending account holds the role; Inactive accounts are exempt and become role-less, and reactivating one needs a new role (`409 ROLE_REQUIRED`) |
 | Work report | `/api/reports/work*` |
 | Uploads | `POST /api/uploads` |
 

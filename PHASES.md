@@ -456,3 +456,88 @@
 **Testing:** multi-issue raise/detail response, legacy payload compatibility, `eventId`, issue persistence, update/close issue replacement, and notification integration regression.
 
 **Done when:** build and isolated smoke suites pass; no frontend source changes required beyond the already-integrated multi-select UI.
+
+## Phase 44 — Users list visibility and account deletion
+
+**Status:** Complete
+
+**Objective:** Stop exposing Admin accounts to non-Admin viewers, hide every caller's own account, and add a permission-gated delete that cannot remove your own account.
+
+**Changes:**
+- `src/lib/user-access.ts` (new) — `isAdminRoleName`, `appendUserVisibilitySql(user, params)`, `assertNotLastActiveAdmin(targetUserId)`. Mirrors `lib/ticket-access.ts` so the two visibility concerns read the same way.
+- `src/routes/users.ts` — visibility clause ANDed into the `GET /api/users` WHERE (so `q` and `status` cannot bypass it) and into the tiles query with its own params; `assertNotLastActiveAdmin` replaces the inline last-admin block in `PATCH`; new `DELETE /:id`.
+- No migration, no new table, no new role permission. Admin already held Users `d` (`vceaxd`), so delete is Admin-only with nothing granted to anyone else.
+
+**Authorization:**
+- Own account excluded for every role (`u.id <> $me`), matched on the authenticated UUID only.
+- `r.name <> 'Admin'` added for every non-Admin viewer, so a PM cannot retrieve Admin accounts by any means.
+- Admin sees all other accounts including other Admins; the PM exclusion is not applied to Admin.
+- `DELETE` requires Users `d`; self-delete → `400` / `SELF_DELETE_FORBIDDEN`; already-Inactive → `409` / `ALREADY_INACTIVE`; last Active Admin → `409` / `LAST_ADMIN`.
+
+**Delete semantics:** deactivate (`status = 'Inactive'`), never a hard delete — `RULES.md` requires the name to stay readable on past tickets. Reuses the existing `users.status` enum, and `loadAuthUser` already refuses non-`Active` users so the deleted account's JWT dies immediately.
+
+**Files:** `src/lib/user-access.ts`, `src/routes/users.ts`, `scripts/smoke-users.ts`, `package.json`, docs.
+
+**Testing:** `npm run test:smoke:users` — A Admin sees other Admins and not self; B PM sees no Admin and not self; C Technician stays 403; I/J PM cannot retrieve Admins via `?q=Admin` / `?status=…` / combined; D/E/K Admin deletes an eligible user and list state stays correct; F Technician and PM delete → 403; L failed delete leaves status unchanged; G own account never listed; H self-delete rejected at the API for every role; last-active-Admin stays guarded.
+
+**Done when:** `npm run build` and `npm run test:smoke:users` pass; frontend `npm run lint` and `npm run build` pass. `npm run test:smoke` still fails at the pre-existing TK-1099 ticket-visibility assertion (unrelated; reproduced on a clean tree).
+
+## Phase 45 — Project manager and Control room are not assignable ticket holders
+
+**Status:** Complete
+
+**Objective:** Remove Project manager and Control room from the Hand to / assignee dropdown and reject either as an assignee at the API.
+
+**Changes:**
+- `src/lib/ticket-access.ts` — new exported `ASSIGNABLE_ROLES = ['Technician', 'Engineer']` as the single source of truth.
+- `src/routes/lookups.ts` — `/technicians` reads that constant instead of an inlined list.
+- `src/routes/tickets.ts` — `assertEligibleAssignee` reads the same constant.
+- `src/lib/notifications.ts` — corrected a stale comment that listed the old four-role set.
+
+**Why one constant:** the dropdown and the eligibility guard previously duplicated the same four-role list in two files (the old comment even said "matches lookups/technicians"). Narrowing only the dropdown would have left those roles assignable by direct API call; narrowing only the guard would have hidden them in the UI while still accepting them. Sharing the constant removes the drift and the duplicate.
+
+**Two different questions, kept separate:** `ASSIGNABLE_ROLES` (Technician / Engineer) answers *who may hold a ticket*. `canAssignTickets` (Control room / Admin / Project manager) answers *who may perform an assign*. Control room therefore can no longer *receive* a ticket but can still *route* one — verified live.
+
+**Behavior:** PM and Control room no longer appear in Hand to, the assignee filter, or the work-report person list. `POST /api/tickets/:id/assign` with either role returns `400` / `INVALID_ASSIGNEE` and leaves the ticket unchanged. Technician and Engineer are unaffected.
+
+**Data safety:** all 23 assigned seeded tickets belong to Technicians, so nothing already in the database changes appearance.
+
+**Testing:** verified against the running API — the lookup returns 4 workers (3 Technician, 1 Engineer); PM and Control room assigns are both rejected `400 INVALID_ASSIGNEE` with the assignee unchanged; Control room can still perform an assign; the ticket was reverted after the check. Temporary probe script removed afterward.
+
+**Note on `test:smoke:writes`:** its "notification role logins" assertion (line 103) fails because the seeded Control Room user is `Inactive` in the local database. That is pre-existing local data state, reproduced on a clean tree, and unrelated to this change; the user was restored to `Active` for verification.
+
+**Done when:** `npm run build` passes and `npm run test:smoke:users` still passes. `npm run test:smoke` and `npm run test:smoke:writes` still fail for the pre-existing reasons noted above.
+
+## Phase 46 - Role delete guard, Inactive exemption, and user hard delete
+
+**Status:** Complete
+
+**Objective:** Add role deletion, refused while a live account holds the role; let Inactive accounts stop blocking it; and make user deletion a real hard delete.
+
+**APIs:**
+- `DELETE /api/roles/:id` - requires `Roles & permissions` `d` (Admin is the only seeded role with it; Project manager stays view-only)
+- `DELETE /api/users/:id` - requires Users `d`; now a **hard delete**
+- `PATCH /api/users/:id` - two new guards: unknown `roleId` -> `400 ROLE_NOT_FOUND`, activating a role-less account -> `409 ROLE_REQUIRED`
+
+**Database:** migration `021_user_role_set_null.sql` - `users.role_id` becomes nullable and the FK is re-pointed to `ON DELETE SET NULL`.
+
+**Behavior - role delete:**
+- Role not found -> `404` / `NOT_FOUND`
+- One or more **Active or Pending** accounts assigned -> `409` / `ROLE_IN_USE` / "Role is assigned to users. Please change their role before deleting it." with `details.users` = that count
+- Only Inactive accounts assigned -> the role is deleted, its `role_permissions` rows cascade, and those accounts end up with `role_id IS NULL`
+
+**Behavior - user hard delete:**
+- The six references with no `ON DELETE` clause are cleared in one transaction (`tickets.raised_by_user_id`, `tickets.assignee_id`, `ticket_events.actor_user_id`, `ticket_assignments.from_user_id` / `to_user_id`, `device_sync_runs.triggered_by_user_id`), then the row is deleted. `user_roads`, `password_reset_tokens`, `notifications` and `push_subscriptions` cascade.
+- Tickets, events, photos and costs survive; only the person reference is cleared, so the deleted name no longer renders on past tickets. This is the accepted trade-off of hard delete.
+- Self-delete `400 SELF_DELETE_FORBIDDEN`, unknown `404`, last Active Admin `409 LAST_ADMIN`. The old `409 ALREADY_INACTIVE` is gone - deleting an Inactive account is now a normal hard delete.
+
+**Why the migration was needed:** `users.role_id` was `NOT NULL REFERENCES roles(id)` with no `ON DELETE`, so an Inactive account kept a role alive forever. `ON DELETE SET NULL` gives the state a meaning ("this account has no role") and makes the reactivation prompt reachable. The state is only safe because activation is gated - `requireAuth` resolves permissions through a join on roles, so an Active user with no role could not be authorised at all. Consequently the Users list and its tiles switched to `LEFT JOIN roles`, and the Admin exclusion in `appendUserVisibilitySql` uses `COALESCE(r.name, '')` so a role-less account is not filtered out of the list.
+
+**Counting rule:** the guard counts `status <> 'Inactive'`, so a Pending signup still blocks. Reading the count inside the request is what makes "role assigned between page load and delete" safe.
+
+**Files:** `src/routes/roles.ts`, `src/routes/users.ts`, `src/lib/user-access.ts`, `src/db/migrations/021_user_role_set_null.sql`, `scripts/smoke-roles.ts`, `scripts/smoke-users.ts`, `package.json` (`test:smoke:roles`)
+
+**Testing:** `npm run test:smoke:roles` - A unassigned role deletes; B one assigned account -> 409; C two -> 409 with `details.users = 2`; D/H direct API delete as PM and Technician -> 403; a seeded in-use role -> 409; F rejected delete leaves role, matrix and assignments untouched; G deletable after reassignment; unknown role -> 404; H2 a Pending signup still blocks; I two Inactive accounts do not block, the role deletes and both accounts end up with `role_id IS NULL`; J a role-less account is still listed with `roleMissing`, activation is refused `409 ROLE_REQUIRED` and stays Inactive, activation with a role succeeds, unknown `roleId` -> `400 ROLE_NOT_FOUND`.
+`npm run test:smoke:users` - hard delete removes the row (not deactivated), the account leaves every status-filtered list, a second delete is `404`, an already-Inactive account can be hard-deleted, and the last-Active-Admin guard still holds.
+
+**Done when:** `npm run build`, `npm run test:smoke:roles` and `npm run test:smoke:users` pass, and the frontend `npm run lint` / `npm run build` pass.

@@ -77,7 +77,7 @@ No Nest, Prisma, or Next.js file-based routing. Express routers live in `src/rou
 
 ## Key Domains
 
-- **Auth / Users / Roles** — Email or mobile + password login, forgot/reset password, permission matrix, road assignments
+- **Auth / Users / Roles** — Email or mobile + password login, forgot/reset password, permission matrix, road assignments. `DELETE /api/roles/:id` deletes a role only while no **Active or Pending** account is assigned to it; an assigned role is rejected with `409 ROLE_IN_USE` ("Role is assigned to users. Please change their role before deleting it."). Inactive accounts do not block it — the users→roles FK is `ON DELETE SET NULL` (migration 021), so they survive as role-less accounts and `PATCH /api/users/:id` refuses to make such an account `Active` (`409 ROLE_REQUIRED`) until a role is chosen. `DELETE /api/users/:id` is a hard delete that clears the six un-cascaded user references and keeps the tickets themselves
 - **Masters** — Roads, issue categories/subs (hard-delete unused category/sub via `/api/issues`; used → `409 IN_USE`), parts (with `amount`; CRUD + hard-delete unused via `/api/parts` and Issue master flags including `d` for Tech/Engineer/PM/Admin)
 - **Devices** — Inventory, QR scan, derived operational status from open tickets
 - **Tickets** — Lifecycle (`Open` → assign/`Under repair` → `Waiting for spare` optional → `Closed`), events, visit cost = labour + parts master, photos
@@ -186,6 +186,32 @@ Admin or Project manager (Users v/c/e)
 
 Project manager Users permission: `vce...` (migration `006_pm_users_edit.sql`).
 
+## Users list visibility and delete
+
+Helper: [`src/lib/user-access.ts`](src/lib/user-access.ts), mirroring `lib/ticket-access.ts`.
+
+```text
+appendUserVisibilitySql(user, params)
+  → u.id <> $me                      (every role, always)
+  → AND r.name <> 'Admin'            (only when the viewer is not Admin)
+
+GET /api/users        authorize('Users','v')  + that clause ANDed with q / status
+GET /api/users tiles  same clause, own params (tiles ignore q / status)
+```
+
+Consequences: Admin sees every other account including other Admins; Project manager sees no Admin account and no self; every caller never sees their own row. Because the clause lives in the same SQL `WHERE`, `?q=Admin`, `?status=…` and any query-parameter manipulation cannot surface a hidden row. The list has no pagination parameters.
+
+```text
+DELETE /api/users/:id   authorize('Users','d')   → Admin only (Users 'vceaxd')
+  self           → 400 SELF_DELETE_FORBIDDEN "You cannot delete your own account."
+  unknown        → 404 NOT_FOUND
+  already off    → 409 ALREADY_INACTIVE
+  last admin     → 409 LAST_ADMIN   (assertNotLastActiveAdmin, shared with PATCH)
+  otherwise      → UPDATE users SET status = 'Inactive'  → { id } "User deleted"
+```
+
+No hard delete, no schema change, no new role permission. `loadAuthUser` already rejects non-`Active` users, so a deleted account's JWT dies on its next request.
+
 ## Ticket statuses
 
 ```text
@@ -196,7 +222,7 @@ POST .../updates (other visit) → Under repair
 POST .../close → Closed
 ```
 
-Assign (`POST /api/tickets/:id/assign`): `{ assigneeId, reason? }` → Active Technician / Engineer / Control room / Project manager only (`400 INVALID_ASSIGNEE`). Same assignee → `200 Already assigned` (no trail growth). Else transactional `assignee_id` + `ticket_assignments` + `ticket_events`; response `{ id, assigneeId, assigneeName, assignmentTrail }`. Detail `assignmentTrail` uses the same shape. Hand-to options: `GET /api/lookups/technicians` (includes Engineer).
+Assign (`POST /api/tickets/:id/assign`): `{ assigneeId, reason? }` → Active **Technician / Engineer** only (`400 INVALID_ASSIGNEE`). **Neither Project manager nor Control room may hold a ticket** — a PM routes and closes, Control room raises and routes; neither attends. The role list is the shared `ASSIGNABLE_ROLES` constant in [`src/lib/ticket-access.ts`](src/lib/ticket-access.ts), consumed by both `assertEligibleAssignee` and `GET /api/lookups/technicians`, so the Hand to dropdown and the API cannot drift apart. It is intentionally narrower than `canAssignTickets` (Control room / Admin / PM), which governs who may *perform* an assign. Same assignee → `200 Already assigned` (no trail growth). Else transactional `assignee_id` + `ticket_assignments` + `ticket_events`; response `{ id, assigneeId, assigneeName, assignmentTrail }`. Detail `assignmentTrail` uses the same shape. Hand-to options: `GET /api/lookups/technicians` → `{ id, label, name, role, roads }`, where `label` is display-only and reads **`Name (Role)`** (`Jignesh Solanki (Technician)`). Road scope is deliberately **not** in the label — the old format appended `, <road>` only when the road was not "All roads", so entries silently changed shape and a missing road was ambiguous between "works everywhere" and "not shown". `roads` is still returned separately for any caller that needs scope. `name` is the wire value for assignee filters; `id` is what assign submits. Only the Assign/Reassign dropdowns consume `label`; `Work report` uses `name`.
 
 Stored values: `Open` | `Under repair` | `Waiting for spare` | `Closed`. Do not write `New`.
 

@@ -3,6 +3,7 @@ import { handleApiError } from '../lib/api-error.js'
 import { ok } from '../lib/respond.js'
 import { query } from '../db/pool.js'
 import { authorize, requireAuth } from '../middleware/auth.js'
+import { ASSIGNABLE_ROLES } from '../lib/ticket-access.js'
 
 const router = Router()
 
@@ -30,15 +31,16 @@ router.get('/technicians', authorize('All tickets', 'v'), async (_req, res) => {
        LEFT JOIN user_roads ur ON ur.user_id = u.id
        LEFT JOIN roads rd ON rd.id = ur.road_id
        WHERE u.status = 'Active'
-         AND r.name IN ('Technician', 'Engineer', 'Control room', 'Project manager')
+         AND r.name = ANY($1::text[])
        GROUP BY u.id, u.full_name, r.name
        ORDER BY u.full_name`,
+      [ASSIGNABLE_ROLES],
     )
     return ok(
       res,
       result.rows.map((row) => ({
         id: row.id,
-        label: `${row.name} — ${String(row.role).toLowerCase()}${row.roads && row.roads !== 'All roads' ? `, ${row.roads}` : ''}`,
+        label: `${row.name} (${row.role})`,
         name: row.name,
         role: row.role,
         roads: row.roads,
