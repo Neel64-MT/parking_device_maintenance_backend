@@ -173,6 +173,10 @@ PATCH /api/devices/:id     authorize Device list e
 
 `GET /api/devices/:deviceId` already returns `slotId` / `slotIdentifier` / `qrNumber` for the Edit form.
 
+### Device list order
+
+`GET /api/devices` and `GET /api/devices/export` both order by **Slot Label ascending** — `DEVICE_LIST_ORDER_BY` = `ORDER BY (slot_number = ''), slot_number, public_id` in `src/routes/devices.ts`. Sorting lives in SQL (not the frontend) so it is correct across `LIMIT/OFFSET` pagination; blank labels sort last and `public_id` is the stable tie-break. Filters, tiles, and the pagination envelope are unchanged. Ticket list order (`raised_at DESC`) is untouched.
+
 One open ticket per device UUID (`status <> 'Closed'`) = one per Slot Id when `devices.slot_id` is set (unique). DB: `idx_tickets_one_open_per_device`. Raise pre-check + unique-violation → same `OPEN_TICKET_EXISTS` details. Raise also requires non-empty `slot_identifier` → `400` / `SLOT_IDENTIFIER_REQUIRED`.
 
 ## Signup approval

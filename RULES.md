@@ -51,6 +51,8 @@
 - QR scan details use `GET /api/devices/scan?q=` (do not invent a second `/scan-details` route that fights `/:deviceId`). Trim `q` before lookup. When the device has no open ticket, respond with message `No tickets available` (still 200 + device payload, `openTicketId: null`) so Update can show that copy; raise remains available.
 - Ticket update (`POST /api/tickets/:id/updates`) when the ticket id does not exist returns `404` / `NO_TICKETS_AVAILABLE` with error `No tickets available`.
 - Device `latitude` / `longitude` are optional TEXT; seed and create/PATCH may set them.
+- Device list / export order by **Slot Label ascending** in SQL (`DEVICE_LIST_ORDER_BY` in `routes/devices.ts`), never client-side: sorting a single page breaks pagination. Keep `public_id` as the tie-break and blank labels last. Do not change ticket list order (`raised_at DESC`).
+- Assign eligibility stays server-side in `assertEligibleAssignee` (Active Technician / Engineer / Control room / Project manager). A narrower Assign dropdown in the frontend is a presentation choice and must not delete users, change roles, or tighten this check.
 - Close: only the current ticket holder (or privileged close path) may close. Assign / reassign is Control room, Admin, or Project manager only — technicians cannot handover. Add Update holder rule is Admin-or-assignee (stricter than list visibility).
 - Admin and Project manager retain city-wide ticket visibility; other roles only see tickets they raised or are assigned to (SQL + detail asserts). Visibility is not the same as Add Update permission.
 - Apply the same ticket visibility helper to dashboard metrics, device ticket overlays/history, and work report rows — do not duplicate Admin/PM branches per route.

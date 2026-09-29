@@ -238,6 +238,19 @@ Tickets also return `tiles` / `tabCounts` (aggregated over visibility + base fil
 
 Status-card → list contract (frontend): `GET /api/devices?status=Working|Under%20repair|Not%20working&page=1&limit=10` — same Device List API; not tickets.
 
+### Device list ordering (Phase 41)
+
+`deviceListQuery` sorts **Slot Label** (`devices.slot_number`) **ascending** in SQL, so the order holds on every page rather than only within a page:
+
+```sql
+ORDER BY (slot_number = ''), slot_number, public_id   -- DEVICE_LIST_ORDER_BY
+```
+
+- Blank labels sort last; `public_id` is the stable tie-break, so `LIMIT/OFFSET` paging never repeats or skips a row when two labels match.
+- `slot_number` is a plain zero-padded `TEXT` (`S1-001` … `S1-010`, `S2-001`), so plain ascending text order is the expected Slot Label order — no natural-sort helper or extra dependency.
+- The single constant feeds both `GET /api/devices` (paginated) and `GET /api/devices/export`, so the CSV matches the list.
+- Ticket list ordering (`ORDER BY t.raised_at DESC`) is **unchanged** — the ticket list has no Slot Label column and its order is ticket chronology, used by the Open / Assigned / Closed tabs.
+
 ## Tickets SQL
 
 1. Base WHERE: visibility + `q` / road / category / assignee  
