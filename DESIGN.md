@@ -75,6 +75,8 @@ Shared Zod: minimum 8 characters (same for create user, admin patch, reset).
 
 ## Ticket visibility
 
+> **Superseded by Phase 51** ("Every Ticket, Every Road" — see the last section). Every user with `All tickets` `v` now sees every ticket; `assertTicketAccess`, the assignee/raiser SQL filter and `POST /:id/assign` no longer exist. The text below is history.
+
 Privileged roles (`Admin`, `Project manager`): no assignee/raiser filter (still subject to `assigned_roads` if ever scoped that way; defaults are `all_roads`).
 
 All other roles: list/export/aggregate SQL adds  
@@ -125,7 +127,7 @@ No new signup-request table or approve endpoint.
 
 ---
 
-# Design — QR Scan Payload & One-Open-Ticket Rule
+# Design — QR Scan Payload & Duplicate-Ticket Rule
 
 ## Scan API
 
@@ -133,7 +135,9 @@ Canonical endpoint: `GET /api/devices/scan?q={identifier}` (`authorize('Scan QR'
 
 Matches `public_id`, `qr_code`, `slot_number` (case-insensitive), or `slot_id` as text. Road scope via `assertRoadAccessUnlessFieldWork` (Site attendant / Technician bypass). Open-ticket lateral join is **not** ticket-visibility filtered (so Raise vs Update is reliable); 6-month count remains visibility-filtered.
 
-Canonical response fields (Phase 17+): `deviceId` (Slot Id preferred), `deviceName`, `locationSite`, `slot`, `slotId`, `slotLabel`, `slotIdentifier`, `currentStatus`, `statusDate`, `ticketsLast6Months`, `openTicketId`, `openTicketAge`, `openTicketIssue`, `latitude`, `longitude`, plus legacy `qr` / `qrNumber` / `parkingLocation`.
+Canonical response fields (Phase 17+): `deviceId` (Slot Id preferred), `deviceName`, `locationSite`, `slot`, `slotId`, `slotLabel`, `slotIdentifier`, `currentStatus`, `statusDate`, `ticketsLast6Months`, `openTicketId`, `openTicketAge`, `openTicketIssue`, `openTickets`, `latitude`, `longitude`, plus legacy `qr` / `qrNumber` / `parkingLocation`.
+
+`openTickets` (Phase 50): every non-Closed ticket on the device, oldest first, as `{ id, status, assigneeId (historical only since Phase 51), age, issues: [{ id, categoryId, subCategoryId, category, sub, severity }] }` — `issues` holds only the still-Open reported issues (`loadOpenDeviceTickets`). `openTicketId` / `openTicketAge` / `openTicketIssue` describe the **worst** open ticket (the one driving `currentStatus`).
 
 Legacy fields (`id`, `location`, `status`, `statusTone`, `facts`, `deviceUuid`, `roadId`) remain for older ScanQr clients.
 
@@ -151,17 +155,28 @@ Errors: `503 DEVICE_SYNC_NOT_CONFIGURED`; `502 SLOT_MAC_UPSTREAM_ERROR`; `404 SL
 
 `devices.latitude` / `devices.longitude` are TEXT (migration `001_init`). Seed populates Ahmedabad-area dummy strings. Create/PATCH accept optional string coords.
 
-## One open ticket
+## Duplicate tickets — by issue (Phase 50)
 
 Before insert on `POST /api/tickets`, require non-empty `devices.slot_identifier`. If missing → `ApiError(400, ..., 'SLOT_IDENTIFIER_REQUIRED', { deviceId })`.
 
-Before insert on `POST /api/tickets`, query non-`Closed` tickets for the device. If any exist → `ApiError(409, ..., 'OPEN_TICKET_EXISTS', { ticketId, openTicketId })`.
+Duplicate key = **device + sub-category that is an Open reported issue on a non-Closed ticket**. Before insert, `assertNoOpenIssueConflicts` runs `findOpenIssueConflicts(deviceId, subIds)`. Any hit → `ApiError(409, ..., 'OPEN_TICKET_EXISTS', { ticketId, openTicketId, issues: [{ ticketId, id, categoryId, subCategoryId, category, sub }] })`; a mixed selection (some new, some duplicate) is rejected whole.
 
-DB backstop: partial unique index `idx_tickets_one_open_per_device` on `tickets(device_id) WHERE status <> 'Closed'` (migration `012`). Concurrent insert races map unique-violation to the same `OPEN_TICKET_EXISTS` payload.
+| Case | Result |
+|------|--------|
+| Issue already Open on an open ticket of this device | `409 OPEN_TICKET_EXISTS` → update that ticket |
+| Different issue while other tickets are open | `201` new ticket |
+| Issue only on a Closed ticket (any age) | `201` new ticket; the Closed ticket is never touched or reopened |
+| Issue Resolved on a still-open ticket | `201` new ticket |
 
-Flow: QR → scan → (`openTicketId` ? update existing via `POST /api/tickets/:id/updates` : `POST /api/tickets`). Frontend should redirect to `openTicketId` instead of creating another ticket. An unassigned open ticket reached this way is auto-assigned to the field-role user who adds the update (same endpoint, no QR-specific path).
+DB backstop: `ticket_issues.device_id` (copied from the ticket; a ticket's device never changes) + partial unique index `idx_ticket_issues_one_open_issue_per_device` on `ticket_issues(device_id, subcategory_id) WHERE role = 'reported' AND status = 'Open'` (migration `025`, which drops `idx_tickets_one_open_per_device` and resolves stray Open issues on Closed tickets). A concurrent same-issue raise hits the index, the whole raise transaction rolls back, and the catch re-runs the pre-check to answer the same `409` pointing at the winner. Resolving an issue removes it from the index, so a later raise of that issue succeeds.
 
-When `devices.slot_id` is set (unique), one open ticket per device UUID equals one open ticket per Slot Id.
+Flow: QR → scan → `openTickets` — same problem ⇒ update that ticket via `POST /api/tickets/:id/updates`; different problem ⇒ `POST /api/tickets`. Since Phase 51 any user with `Update ticket` `e` updates that ticket directly (no assignment, no QR-specific path).
+
+Notifications: a new ticket (even beside other open tickets) sends `ticket.raised`; a `409` or an update sends none.
+
+## Device status with several open tickets (Phase 50)
+
+`openTicketLateralSql(alias)` (`src/lib/device-status.ts`; the `visFilter` argument was removed in Phase 51) picks one row per device — the **worst** open ticket, ranked like `deriveDeviceStatus` (unassigned non-Minor = Not working > assigned / Under repair / Waiting for spare = Under repair > unassigned Minor = Working; ties → latest raise) — and exposes `open_ticket_count` and `first_open_at`. Used by Dashboard fleet/road stats, Device list (`derived_status`, `openTicketCount`), Device detail (status; days-down from `first_open_at`) and scan. Roads `down` = `COUNT(DISTINCT device_id)` of open tickets.
 
 ---
 
@@ -173,8 +188,8 @@ Exactly four values on `tickets.status`:
 
 | Status | Written by |
 |--------|------------|
-| `Open` | `POST /api/tickets` when `assigneeId` is omitted |
-| `Under repair` | Raise with assignee; `POST /:id/assign`; most site updates |
+| `Open` | `POST /api/tickets` (always, since Phase 51) |
+| `Under repair` | Most site updates (before Phase 51 also raise-with-assignee and `POST /:id/assign`) |
 | `Waiting for spare` | Site update `updateType === 'Waiting for spare'` |
 | `Closed` | `POST /:id/close` |
 
@@ -182,21 +197,19 @@ There is no `New` status. Schema default is already `Open` (`001_init`). Migrati
 
 ## “Open” vs “open ticket”
 
-- Status **`Open`**: unassigned, newly raised.
+- Status **`Open`**: newly raised, no update yet.
 - **Open ticket** (one-per-device / dashboard overlays): any ticket with `status <> 'Closed'` (`Open`, `Under repair`, or `Waiting for spare`).
 
 ## List UI
 
-The tickets list tab query `tab=new` means **unassigned and not closed**. Tab key `new` is not a stored status. Tab `asg` = has assignee; `cls` = Closed.
+Since Phase 52 the tickets list tabs are `tab=open` (raised, no update yet), `tab=urp` (at least one update — Under repair, Waiting for spare, or legacy Open + assignee) and `tab=cls` (Closed). Phase 51's `open` meant every ticket not closed; the older `new` / `asg` tabs are gone and `tab=asg` → `400`. See "Design — Under repair tab and age filter (Phase 52)" at the end of this file.
 
 List/export/tiles presentation (`listStatus` in `tickets.ts`):
 
 - Stored `New` → `Open`
-- Has `assignee_id` and stored `Open` → list shows `Under repair` (DB unchanged; detail still returns stored status)
+- Historical `assignee_id` and stored `Open` → list shows `Under repair` (DB unchanged; detail still returns stored status)
 
-Badges for unassigned tickets must render `Open`, never `New`.
-
-**FRONTEND CHANGE REQUIRED:** replace `New` badges with `Open`; trust list `status` for Assigned vs Under repair alignment.
+Badges for new tickets must render `Open`, never `New`.
 
 ---
 
@@ -209,7 +222,7 @@ if closed_at set → floor((now - closed_at) / 1 day)
 else → null
 ```
 
-Purpose: All Tickets closed tab / 7-day reopen copy can show “N days since close” without the client parsing dates.
+Purpose: All Tickets closed tab can show “N days since close” without the client parsing dates. (The 7-day reopen rule it once supported was removed in Phase 50 — a raise after close always creates a new ticket.)
 
 Not added to `GET /api/tickets/:id` (detail still has “Days open” in `header.facts`). No migration.
 
@@ -219,9 +232,9 @@ Not added to `GET /api/tickets/:id` (detail still has “Days open” in `header
 
 # Design — List presentation for assigned `Open`
 
-Some rows can have `assignee_id` set while stored `status` remains `Open` (legacy / edge cases). Assign path normally writes `Under repair`.
+Some rows can have `assignee_id` set while stored `status` remains `Open` (legacy rows; since Phase 51 nothing writes `assignee_id`).
 
-For **list, tiles, and CSV only**, `listStatus(status, assigneeId)` maps assigned + `Open` → `Under repair` so the Assigned tab pills match the Under repair tile without a data migration.
+For **list, tiles, and CSV only**, `listStatus(status, assigneeId)` maps assigned + `Open` → `Under repair`, so a historically assigned ticket keeps reading as work in progress without a data migration.
 
 Detail and mutate paths keep stored status (with `New` → `Open` display normalization where applied).
 
@@ -246,7 +259,7 @@ Unchanged envelope sibling:
 { "success": true, "data": [], "pagination": { "page": 1, "limit": 10, "total": 42, "totalPages": 5 } }
 ```
 
-Tickets also return `tiles` / `tabCounts` (aggregated over visibility + base filters, not only the current page). Devices return status tiles over the filtered device set **excluding** the `status` query (so Working / Under repair / Not working cards stay populated while the list is status-filtered). List rows and `pagination.total` still apply `status`.
+Tickets also return `tiles` / `tabCounts` (aggregated over base filters, not only the current page). Devices return status tiles over the filtered device set **excluding** the `status` query (so Working / Under repair / Not working cards stay populated while the list is status-filtered). List rows and `pagination.total` still apply `status`.
 
 Status-card → list contract (frontend): `GET /api/devices?status=Working|Under%20repair|Not%20working&page=1&limit=10` — same Device List API; not tickets.
 
@@ -261,13 +274,13 @@ ORDER BY (slot_number = ''), slot_number, public_id   -- DEVICE_LIST_ORDER_BY
 - Blank labels sort last; `public_id` is the stable tie-break, so `LIMIT/OFFSET` paging never repeats or skips a row when two labels match.
 - `slot_number` is a plain zero-padded `TEXT` (`S1-001` … `S1-010`, `S2-001`), so plain ascending text order is the expected Slot Label order — no natural-sort helper or extra dependency.
 - The single constant feeds both `GET /api/devices` (paginated) and `GET /api/devices/export`, so the CSV matches the list.
-- Ticket list ordering (`ORDER BY t.raised_at DESC`) is **unchanged** — the ticket list has no Slot Label column and its order is ticket chronology, used by the Open / Assigned / Closed tabs.
+- Ticket list ordering (`ORDER BY t.raised_at DESC`) is **unchanged** — the ticket list has no Slot Label column and its order is ticket chronology, used by the Open / Closed tabs.
 
 ## Tickets SQL
 
-1. Base WHERE: visibility + `q` / road / category / assignee  
-2. Aggregate query → tiles + tabCounts  
-3. Page WHERE = base + tab/status SQL  
+1. Base WHERE: `q` / road / category (no visibility or assignee filter since Phase 51)  
+2. Aggregate query → tiles + tabCounts (+ `age` on the open / urp counts) + over3Counts  
+3. Page WHERE = base + tab/status SQL (+ `age=over3` on open / urp)  
 4. `COUNT(*)` → `pagination.total`  
 5. `SELECT ... ORDER BY raised_at DESC LIMIT/OFFSET`
 
@@ -320,13 +333,16 @@ Raise picker stays `GET /api/lookups/issue-categories` (active only).
 | Table / column | Notes |
 |----------------|-------|
 | `ticket_issues` | `(ticket_id, role reported\|found, category_id, subcategory_id, sort_order)`; UNIQUE per ticket+role+sub |
+| `ticket_issues.status` (Phase 49) | `Open` \| `Resolved` + `resolved_at`, `resolved_by_user_id`, `resolved_event_id`; meaningful on `reported` rows only |
+| `ticket_issues.device_id` (Phase 50) | Copy of `tickets.device_id`; backs the open-issue-per-device unique index |
 | `tickets.reported_*` / `found_*` | Primary (first) issue for backward compatibility |
 
 ## API
 
 - Raise / Update / Close: `issues: [{ categoryId, subCategoryId }, …]` preferred; legacy single pair still accepted
-- Detail: `issuesReported` / `issuesFound` arrays `{ categoryId, subCategoryId, category, sub, severity }`
+- Detail: `issuesReported` / `issuesFound` arrays `{ categoryId, subCategoryId, category, sub, severity }`; reported items also carry `{ id, status, resolvedAt, resolvedBy }` (Phase 49)
 - Update with `issues` **replaces** found list; omit leaves found unchanged
+- Update with `resolveIssueIds` resolves those Open reported issues (Phase 49); closing resolves the rest; `workHistory[].resolvedIssues` lists what each event resolved
 
 Site attendant: Device list `vc....` (Sync); Issue master `vce..d`; Add device still denied.
 
@@ -351,6 +367,8 @@ Event `parts` JSONB: `[{ "id", "name", "amount" }, ...]`. Device history reads `
 # Design — Add Update: gates, auto-assign, close with update (Phase 47)
 
 Supersedes the Phase 30 / Phase 42 gates (`assertTicketAssigned`, `visitedBy`, `NOT_ASSIGNED_USER`, "no auto-claim"), which the code no longer uses.
+
+> **Gates 4, 5, 7 (claim / handover) and 8, the holder half of 6, `handoverToUserId` and the `assigneeId` / `autoAssigned` response fields were removed in Phase 51** — see "Main/Sub issue resolution and no assignment" at the end of this file. `closeTicket` behaviour is unchanged.
 
 ## Gates (order)
 
@@ -496,9 +514,11 @@ Two event families share one table but have different recipient rules.
 ### `ticket.raised` (unchanged)
 
 - Recipients: Active users whose current role is `Admin`, `Project manager`, or `Control room` and whose existing `All tickets` permission has `v`
-- The notification link follows existing road scope / raiser / assignee access (`canOpen` may be `false` when the recipient cannot open the ticket). It does not widen ticket list or detail authorization.
+- Since Phase 51 every recipient can open every ticket, so `canOpen` is always `true` and `url` always points at `/tickets/TK-xxxx`.
 
-### `ticket.assigned` / `ticket.reassigned` (new)
+### `ticket.assigned` / `ticket.reassigned` (historical — no longer created since Phase 51)
+
+Existing rows stay listable and readable by their recipients; nothing writes new ones.
 
 - Recipient: **only the newly assigned user**; the previous assignee is never notified
 - The recipient is the assignee, so assignee-scoped ticket access always applies: `canOpen` is always `true` and `url` always points at `/tickets/TK-xxxx`
@@ -509,7 +529,7 @@ Two event families share one table but have different recipient rules.
 | `NEW_TICKET_NOTIFICATION_ROLES` | Admin, Project manager, Control room | `ticket.raised` fan-out |
 | `NOTIFICATION_DELIVERY_ROLES` | the above + Technician, Engineer | Web Push delivery, bell eligibility |
 
-Technician/Engineer are included in delivery because they are the only other roles `assertEligibleAssignee` can assign to. They never receive `ticket.raised`.
+Field roles (Technician / Engineer / Electrician) stay in delivery so their historical assignment notifications remain readable. They never receive `ticket.raised`.
 
 ### Shared authorization rules
 
@@ -519,15 +539,15 @@ Technician/Engineer are included in delivery because they are the only other rol
 
 ## Ticket flow
 
-1. `POST /api/tickets` writes the ticket, raised event, and optional initial assignment.
+1. `POST /api/tickets` writes the ticket and raised event.
 2. Only after those writes succeed, `createNewTicketNotifications(ticketId)` resolves the actual ticket/device/issue/raiser fields.
 3. Recipient rows are inserted in a notification-only transaction with `ON CONFLICT DO NOTHING`.
 4. The ticket route catches and logs notification errors independently; ticket creation still returns its original success response.
 5. Failed ticket creation never calls the notification service.
 
-## Assignment flow
+## Assignment flow (removed in Phase 51)
 
-Notifications are created from the business layer at every point where `tickets.assignee_id` actually changes, always after the owning transaction commits:
+*Historical:* notifications were created from the business layer at every point where `tickets.assignee_id` actually changes, always after the owning transaction commits:
 
 1. The assignment transaction updates `tickets`, writes the `ticket_assignments` trail, and writes the `ticket_events` row.
 2. After it commits, the route calls `createTicketAssignmentNotification({ ticketId, toUserId, kind, assignedByUserId })` inside its own try/catch.
@@ -590,3 +610,102 @@ Browser payload:
 ## Frontend
 
 **FRONTEND INTEGRATION COMPLETE:** the sibling frontend owns the service worker, explicit permission action, VAPID subscription, authenticated read-state relay, and the shared unread badges on the Tickets parent and All Tickets child. No new menu item or realtime transport was added.
+
+---
+
+# Design — Main/Sub issue resolution and no assignment (Phase 51)
+
+## Terms
+
+- **Main Issue** = issue category (`issue_categories`). **Sub Issue** = sub-category (`issue_subcategories`). A ticket's reported issues are `ticket_issues` rows with `role = 'reported'`, each carrying its own Open/Resolved state (Phase 49). No schema change in this phase.
+
+## Request (`POST /api/tickets/:id/updates`)
+
+```json
+{
+  "updateType": "Site visit — not resolved",
+  "visitedBy": "uuid",
+  "workDone": "…",
+  "resolveIssueIds": ["ticket_issues.id"],
+  "resolveCategoryIds": ["issue_categories.id"],
+  "addIssues": [{ "categoryId": "uuid", "subCategoryId": "uuid" }],
+  "closeTicket": false
+}
+```
+
+All three issue arrays are optional and deduped. `issues[]` (found-on-site replace) is still accepted for older clients; the current UI does not send it.
+
+## Resolution semantics (`resolveIssueSelection`, `lib/ticket-issues.ts`)
+
+1. Lock every reported row of the ticket that matches an id in `resolveIssueIds` or a category in `resolveCategoryIds` (`FOR UPDATE`).
+2. Unknown / foreign / found-role issue id, or a category with no reported row on this ticket → `400 INVALID_ISSUES`.
+3. An issue id that is not Open, or a category whose rows are all Resolved → `409 ISSUE_ALREADY_RESOLVED`.
+4. Resolve the union of the Open rows: issue ids + every Open row of each category (already Resolved siblings are skipped, not an error). Set `status = 'Resolved'`, `resolved_at`, `resolved_by_user_id = caller`, `resolved_event_id = this update`.
+5. Any error rolls back the whole update (no event, no added issues, no status change).
+
+A concurrent second resolve of the same category waits on the ticket row lock, then finds nothing Open → `409`.
+
+## Add issues (`appendTicketIssues`)
+
+- Validated like raise (`resolveIssuePairs`: active category, active sub belonging to it) → `400 INVALID_ISSUES`.
+- Sub already on this ticket (Open or Resolved) → `409 ISSUE_ALREADY_ON_TICKET`, `details.issues[] { id, categoryId, subCategoryId, category, sub, status }`.
+- Sub Open on another non-Closed ticket of the device → `409 OPEN_TICKET_EXISTS` with the raise `details` (`ticketId`, `openTicketId`, `issues[]`); a concurrent raise that wins the partial unique index produces the same answer.
+- Inserted as `role = 'reported'`, `status = 'Open'`, `device_id` from the ticket, `sort_order` after the current max — so raised issues stay first.
+- Append runs before resolve inside the same transaction, so an update may add an issue and resolve it by `resolveCategoryIds`.
+
+## Response
+
+`{ id, eventId, status, cost, partsCost, labourCost, parts, resolvedReady, closed, addedIssues[], resolvedIssues[], openIssueCount }`. `assigneeId` / `autoAssigned` were removed.
+
+## Status rules (unchanged)
+
+Every visit sets `Under repair` (`Waiting for spare` for that update type). Resolving every issue does **not** close; only `closeTicket: true` (with `Update ticket` `x`) or `POST /:id/close` closes, resolving the remaining Open issues with the closing event.
+
+## No assignment ("Every Ticket, Every Road")
+
+| Action | Requirement |
+|--------|-------------|
+| See any ticket (list, detail, export, dashboard, devices, reports) | `All tickets` `v` |
+| Add Update / resolve / add issues | `Update ticket` `e` |
+| Close (`closeTicket` or `/close`) | `Update ticket` `x` |
+| Attach photos to an event | Event author, or Admin / Project manager |
+| Assign / reassign | Removed (`POST /:id/assign` → `404`) |
+
+Removed fields: raise `assigneeId` (ignored), update `handoverToUserId`, list `assignee` filter / `assignedTo` / `actionLabel` / `actionPrimary`, detail `assigneeId` / `assignmentTrail`, update response `assigneeId` / `autoAssigned`; list tabs `new` / `asg` → `open`.
+
+## Historical data
+
+No migration. `tickets.assignee_id`, `ticket_assignments` and `ticket.assigned` / `ticket.reassigned` notifications stay as they are and are never written again. `listStatus`, `NOT_ATTENDED_SQL`, `deriveDeviceStatus` and `OPEN_TICKET_RANK_SQL` still treat an Open ticket with a historical assignee as "Under repair". Old `assigned` events stay in `workHistory`. Updating or closing a historically assigned ticket does not touch `assignee_id`.
+
+## Frontend
+
+**FRONTEND CHANGE (done, frontend Phase 51):** grouped Resolve Issues panels → `resolveCategoryIds` / `resolveIssueIds`; Add another issue → `addIssues`; every Assign / Reassign surface, the Assigned tab and the QR assignee gate removed.
+
+---
+
+# Design — Under repair tab and age filter (Phase 52)
+
+## Tabs
+
+| Tab | SQL | Meaning |
+|-----|-----|---------|
+| `open` | `NOT_ATTENDED_SQL` = `status IN ('Open','New') AND assignee_id IS NULL` | Raised, no update yet |
+| `urp` | `UNDER_REPAIR_TAB_SQL` = `status <> 'Closed' AND NOT (NOT_ATTENDED_SQL)` | At least one update: `Under repair`, `Waiting for spare`, legacy Open + historical assignee |
+| `cls` | `status = 'Closed'` | Unchanged |
+
+The rule is status-based, not an event count: every Add Update sets `Under repair` (or `Waiting for spare`), so the stored status already says whether an update happened, and the legacy assignee rule keeps tab, pill and tiles consistent. `tabForStatus(status, assigneeId)` gives each row the same answer.
+
+## Status within a tab
+
+`status` is applied on top of the tab. The Under repair tab uses `All` / `Under repair` / `Waiting for spare`; Open and Closed hold one status each, so the client sends `All`. Older values (`Open + under repair`, `Open, not attended`, `Closed`) still parse.
+
+## Age filter
+
+`age=over3` → `status <> 'Closed' AND raised_at < NOW() - INTERVAL '3 days'` (`OVER_3_DAYS_SQL`), applied on `open` / `urp`, ignored on `cls`. The "Open over 3 days" tile spans both open tabs, so:
+
+- `over3Counts { open, urp }` (base filters) tells the client which tab to select — Open when it has any, otherwise Under repair.
+- `tabCounts.open` / `tabCounts.urp` apply `age` while it is set, so the badges show the split; `tabCounts.cls` and `tiles` never do.
+
+## Frontend
+
+**FRONTEND CHANGE (done, frontend Phase 52):** three tabs; cards → tab + status + age; status select only on Under Repair; sliding tab ink + panel transition.

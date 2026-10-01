@@ -58,7 +58,7 @@
 
 **Tests:**
 - `npm run test:smoke` — password login (mobile + email), validation 400, unauthorized 401, core GET APIs, Admin user create, logout revoke
-- `npm run test:smoke:writes` — device/ticket lifecycle, road create, one-open-ticket rule, issue category/subcategory delete/IN_USE, uploads, user patch, dashboard/report
+- `npm run test:smoke:writes` — device/ticket lifecycle, road create, same-open-issue duplicate rule (Phase 50: different issue → new ticket), issue category/subcategory delete/IN_USE, uploads, user patch, dashboard/report
 
 ## Phase 10 — Postgres cutover + API verification
 
@@ -602,3 +602,119 @@
 - `components/tickets/TicketAddUpdateForm.jsx`: **Close Ticket** Yes/No, default **No**, sends `closeTicket: true` only on Yes; "closes only when resolved" copy replaced; `pickAssignee` → `handoverToUserId`; `409 TICKET_ALREADY_ASSIGNED` → toast + reload.
 - `pages/tickets/TicketDetail.jsx`: Add update + **Resolve** (same form, `Site visit — resolved`) on unassigned tickets for field roles / Admin-PM.
 - `pages/tickets/TicketRaise.jsx`: optional **Assign to** only for All tickets `a` (matches the raise guard above).
+
+## Phase 49 — Per-issue Open/Resolved state on multi-issue tickets
+
+**Status:** Complete
+
+**Objective:** Each **reported** issue of a ticket has its own Open/Resolved state. An Add Update can resolve specific Open issues; resolved issues are never offered again; the ticket lifecycle is unchanged (closing stays explicit).
+
+**Data model (migration `024_ticket_issue_status.sql`):** `ticket_issues` gains `status` (`'Open' | 'Resolved'`, default `Open`), `resolved_at`, `resolved_by_user_id` (→ users, `ON DELETE SET NULL`) and `resolved_event_id` (→ ticket_events, `ON DELETE SET NULL`). Status is only meaningful on `role = 'reported'` rows; found rows keep the default and are ignored everywhere. The migration re-runs the 017 reported backfill for tickets with no reported row (seed / legacy single-issue tickets) and marks reported issues on Closed tickets `Resolved`. `seed.ts` mirrors that backfill because it runs after migrations.
+
+**Add Update (`POST /api/tickets/:id/updates`):** new optional `resolveIssueIds: uuid[]` (deduped) = `issuesReported[].id`. After all existing gates (`resolveUpdateAssignee`, holder, `x` for close, CLOSED) and inside the existing transaction, after the ticket `FOR UPDATE` lock and the event insert, `resolveTicketIssues` (`lib/ticket-issues.ts`) re-reads the rows `FOR UPDATE` and:
+- `400 INVALID_ISSUES` when any id is unknown, not on this ticket, or not a reported issue;
+- `409 ISSUE_ALREADY_RESOLVED` when any id is already Resolved (also the concurrent loser);
+- otherwise sets `Resolved` + `resolved_at` / `resolved_by_user_id` / `resolved_event_id = this event`.
+A failure rolls back the whole update (no event, no claim). The found-on-site `issues[]` picker and its replace behaviour are unchanged.
+
+**Close:** `closeTicket: true` and `POST /:id/close` call `resolveOpenTicketIssues`, which resolves every still-Open reported issue tagged with the closing event, so a Closed ticket never has Open issues. Resolving the last issue does **not** close the ticket (smoke K of Phase 47 still holds).
+
+**API responses:** `issuesReported[]` items add `id`, `status`, `resolvedAt`, `resolvedBy` (existing fields unchanged; `issuesFound` unchanged). `workHistory[]` items add `resolvedIssues[]` (grouped by `resolved_event_id`, so the trail shows which update resolved which issue — no new audit table). The update response adds `resolvedIssues[]` and `openIssueCount`.
+
+**Dashboard (`GET /api/dashboard`):** fleet bar / legend / road-wise / device status / open-over-3-days stay ticket-level (a device stays down until its ticket closes; severity only matters for unassigned tickets and resolving always leaves the ticket assigned). `downReasons` now counts **Open reported issues** on visible non-Closed tickets grouped by sub-category, so resolved issues drop out. New totals `openIssues` and `openTicketsCount`.
+
+**Unchanged:** ticket statuses, list/tabs/tiles/filters/search/pagination/export, reports, device status SQL, notifications (updates send none; resolving adds none), Control room's default `Update ticket` `v.....` (it can resolve only when the matrix grants `e`, and then only on tickets it raised).
+
+**Files:** migration `024`, `src/lib/ticket-issues.ts`, `src/routes/tickets.ts`, `src/routes/dashboard.ts`, `src/db/seed.ts`, `scripts/smoke-issue-resolution.ts`, `package.json` (`test:smoke:issue-resolution`).
+
+**Testing:** `npm run test:smoke:issue-resolution` — A 3 issues Open; B resolve A (B/C Open); C only B/C resolvable + trail shows A; D re-resolve A → 409; E resolve B; F last issue keeps Under repair, explicit close works, close-with-update and the Close page resolve the rest (tagged with the closing event); G QR scan → only Open issues; H Admin (holder pick + assigned); I Control room 403 by default, resolves once `Update ticket e` is granted (restored after); J PM resolves two in one update; K single-issue + legacy backfill + no Open issues on Closed tickets; L foreign field user 403; M other ticket's / unknown id → 400; N dashboard `openIssues` −1, `openTicketsCount` unchanged; O concurrent resolve → one 201, one 409, one event.
+
+**Verification:** `npx tsc --noEmit`, `test:smoke:issue-resolution`, `test:smoke:ticket-flow`, `test:smoke:close`, `test:smoke:writes` pass on the local Postgres DB. `test:smoke` stops at its pre-existing `TK-1099` seed assertion (that ticket is absent from the local DB; identical failure on the pre-change code).
+
+**Frontend (done, frontend Phase 49):** `TicketAddUpdateForm` "Resolve issues" chips (`openIssues` → `resolveIssueIds`, `ISSUE_ALREADY_RESOLVED` → `onConflict`), Detail status pills + View Update "Resolved issues", `/tickets/update` (QR) passes the same `openIssues`, Close page note, Dashboard subtitle from `openIssues` / `openTicketsCount`.
+
+## Phase 50 — Issue-level duplicate tickets (several open tickets per device)
+
+**Status:** Complete
+
+**Objective:** Detect duplicate tickets by **issue**, not by device. The same Open issue on the same device never opens a second ticket; a different issue opens a new ticket even while other tickets are open; a Closed ticket never blocks a raise and is never reopened or modified by one. Device status, road stats and the Dashboard stop assuming one open ticket per device. Supersedes the Phase 17/24 one-open-ticket rule and the 7-day reopen rule.
+
+**Data model (migration `025_open_issue_per_device.sql`):** `ticket_issues.device_id` (FK → devices, backfilled from `tickets.device_id`; a ticket's device never changes, so the copy cannot drift — a partial unique index cannot span two tables). Reported issues still Open on Closed tickets are marked Resolved. `idx_tickets_one_open_per_device` is dropped; new partial unique index `idx_ticket_issues_one_open_issue_per_device ON ticket_issues (device_id, subcategory_id) WHERE role = 'reported' AND status = 'Open'`. `replaceTicketIssues` and the `seed.ts` backfill fill `device_id`.
+
+**Raise (`POST /api/tickets`):** after issue validation, device lookup and the Slot Identifier check, `assertNoOpenIssueConflicts` → `findOpenIssueConflicts` (`lib/ticket-issues.ts`) finds requested sub-categories that are Open reported issues on non-Closed tickets of the device. Any hit → `409 OPEN_TICKET_EXISTS` with `details.ticketId` / `openTicketId` (first duplicate's ticket, unchanged redirect contract) and `details.issues[] { ticketId, id, categoryId, subCategoryId, category, sub }`. A mixed raise is rejected whole. The device-level open check and the 7-day `REOPEN_SAME_TICKET` block are removed. A concurrent same-issue raise violates the index, rolls back the whole raise transaction (ticket, event, assignment) and re-runs the pre-check, so it answers the same `409` pointing at the winner. Notifications unchanged: new tickets notify, `409`s and updates do not.
+
+**Updates:** unchanged (Phase 49). Several authorized users resolve different issues of the same ticket; User B still needs the existing update authorization (holder, raiser, Admin/PM, or claim of an unassigned ticket). Resolving an issue removes it from the index, so it can be raised again as a new ticket.
+
+**Scan (`/scan`, `/slot-mac`):** adds `openTickets: [{ id, status, assigneeId, age, issues[] }]` — every non-Closed ticket, oldest first, with only its Open reported issues (`loadOpenDeviceTickets`, not visibility filtered, like `openTicketId`). `openTicketId` / `openTicketIssue` / `openTicketAge` describe the worst ticket; the "Open ticket(s)" fact lists all.
+
+**Device status:** shared `openTicketLateralSql(visFilter)` (`lib/device-status.ts`) returns the **worst** open ticket per device (ranked like `deriveDeviceStatus`, ties → latest raise) plus `open_ticket_count` / `first_open_at`. Used by Dashboard fleet + road-wise stats (a device counts once), Device list `derived_status` (+ `openTicketCount` on rows), Device detail (status; days-down from the earliest open raise) and scan. Roads `down` = `COUNT(DISTINCT device_id)`.
+
+**Files:** migration `025`, `src/lib/ticket-issues.ts`, `src/lib/device-status.ts`, `src/routes/tickets.ts`, `src/routes/devices.ts`, `src/routes/dashboard.ts`, `src/routes/roads.ts`, `src/db/seed.ts`, `scripts/smoke-multi-ticket-raise.ts`, `scripts/smoke-writes.ts`, smoke fixture cleanups (`smoke-inprocess`, `smoke-ticket-update-flow`), `package.json` (`test:smoke:multi-ticket`).
+
+**Testing:** `npm run test:smoke:multi-ticket` — 1 different issue → new ticket, TK1 untouched; 2 same Open issue → 409 with `openTicketId` + `details.issues`, no ticket / notification; 3 mixed raise → 409, nothing created; 4 holder resolves A+B, scan shows only C, Admin (User B) resolves C, foreign technician 403, no new ticket; 5 all resolved keeps the ticket open, close then raise → new ticket, Closed ticket unchanged (no 7-day reopen); 6 issue resolved on an open ticket → new ticket; 7 concurrent same issue → one 201 + one 409 / one ticket, different issues → both 201; 8 scan `openTickets` with Open issues only; 9 two open tickets → device counted once, worst status, `openTicketsCount` +2, `openIssues` +2, road `down` +1; 10 new ticket notifies, update / 409 do not; 11 unknown device 404, invalid issue 400; 12 old index gone, new index present, every row has `device_id`. `smoke-writes` keeps same-issue duplicate/race 409 and adds a different-issue 201.
+
+**Verification:** `npx tsc --noEmit` / `npm run build`, `test:smoke:multi-ticket`, `test:smoke:issue-resolution`, `test:smoke:ticket-flow`, `test:smoke:close`, `test:smoke:writes` pass on the local Postgres DB. `test:smoke` still stops at its pre-existing `TK-1099` seed-data assertion (and later at missing `TK-1078`), unrelated to this phase.
+
+**Frontend (done, frontend Phase 50):** Raise has no device-level block; it lists open tickets with their Open issues (Update Ticket / Open), pre-checks same-issue duplicates (all on one ticket → Update Ticket; otherwise names them) and handles `409 details.issues`. QR Update auto-opens a single open ticket, offers a picker for several, and links to raise a different issue. `scanDevice.js` builds facts from `openTickets`.
+
+## Phase 51 — Main/Sub issue resolution and removal of ticket assignment
+
+**Status:** Complete
+
+**Objective:** (1) Add Update resolves the ticket's raised issues by **Main Issue** (category — resolves all of its Open sub issues) or by single **Sub Issue**, and can append new Open issues to the same ticket. (2) Remove the ticket Assign / Reassign / auto-assign workflow end to end: tickets have no holder, every user with `All tickets` `v` sees every ticket on every road, `Update ticket` `e` updates any open ticket, `x` closes. No migration; historical assignee data stays readable.
+
+**Add Update (`POST /api/tickets/:id/updates`):**
+- New optional `resolveCategoryIds: uuid[]` (deduped) beside the existing `resolveIssueIds`. `resolveIssueSelection` (`lib/ticket-issues.ts`, replaces `resolveTicketIssues`) locks the matching reported rows `FOR UPDATE` and resolves the union. Unknown issue id, or a category with no reported row on this ticket → `400 INVALID_ISSUES`. Issue id not Open, or a category with no Open sub left → `409 ISSUE_ALREADY_RESOLVED`. A partly resolved category resolves only its remaining Open subs. One bad id rejects the whole request.
+- New optional `addIssues: [{ categoryId, subCategoryId }]` (validated like raise: active + category/sub pair) appended by `appendTicketIssues` as Open **reported** issues, `sort_order` after the existing ones. A sub already on this ticket in any status → `409 ISSUE_ALREADY_ON_TICKET` (`details.issues` with status). A sub Open on another ticket of the same device → `409 OPEN_TICKET_EXISTS` (same `details` as raise, via the shared `assertNoOpenIssueConflicts`). A concurrent raise that wins the partial unique index rolls the update back and is answered with the same `409`.
+- Order inside the one transaction: `SELECT … FOR UPDATE` on the ticket → append → optional legacy found replace (`issues[]`, kept for older clients) → event insert → resolve selection → resolve the rest when `closeTicket` → status update. Any rejection writes nothing.
+- Response adds `addedIssues[]`; drops `assigneeId` / `autoAssigned`. Status rules unchanged: every visit → `Under repair` (`Waiting for spare` holds), only `closeTicket: true` closes (needs `x`). Resolving every issue never auto-closes.
+
+**Assignment removal:**
+- Deleted `POST /api/tickets/:id/assign` (→ `404`), `resolveUpdateAssignee` / auto-claim, `handoverToUserId`, `assertHolder`, `assertCanAddUpdate`, `assertEligibleAssignee`, `TICKET_NOT_ASSIGNED` / `NOT_HOLDER` / `TICKET_ALREADY_ASSIGNED` / `INVALID_ASSIGNEE` paths, the assignment trail query and the `ticket_assignments` inserts. Raise drops `assigneeId` (a stray value is ignored by zod) and always creates `Open`.
+- Visibility filter removed from tickets list/detail/export, dashboard, devices (list, detail, scan, history overlays), reports and the device-status lateral (`openTicketLateralSql(alias)` has no `visFilter`). `lib/ticket-access.ts` keeps only `isTicketPrivilegedRole` / `isFieldRole`.
+- List: tabs `open` (every non-Closed) and `cls`; `tabCounts { open, cls }`; the `assignee` filter, `assignedTo`, `actionLabel`, `actionPrimary` are gone. Detail drops `assigneeId`, `assignmentTrail` and the "Assigned to" fact.
+- Close / close-preview keep `Update ticket` `x`; no holder check. Photo attach (`PATCH …/raised|updates/:eventId/photos`) = event author or Admin/PM (`403 FORBIDDEN` otherwise), replacing the holder check.
+- Notifications: `createTicketAssignmentNotification` removed; `ticket.raised` recipients no longer compute road access (`canOpen: true`). `NOTIFICATION_DELIVERY_ROLES` keeps `FIELD_ROLES` so historical `ticket.assigned` rows stay deliverable / readable.
+- `/api/lookups/technicians` = `FIELD_ROLES` (Work report person filter, Visited by).
+
+**Historical data:** `tickets.assignee_id`, `ticket_assignments` and old `ticket.assigned` / `ticket.reassigned` notifications are untouched and never written again. The legacy display rule (Open + assignee → "Under repair") stays in `listStatus`, `deriveDeviceStatus`, `OPEN_TICKET_RANK_SQL` and the list tiles (`NOT_ATTENDED_SQL`). Old `assigned` events stay in work history. A historically assigned ticket is updated / closed by anyone with the permission; its `assignee_id` is not changed.
+
+**Files:** `src/lib/ticket-issues.ts`, `src/lib/ticket-access.ts`, `src/lib/device-status.ts`, `src/lib/notifications.ts`, `src/lib/permissions.ts` (default role notes only — seed-time text, live `roles.note` rows unchanged), `src/routes/tickets.ts`, `src/routes/dashboard.ts`, `src/routes/devices.ts`, `src/routes/reports.ts`, `src/routes/lookups.ts`, `scripts/smoke-issue-groups.ts` (new), `scripts/smoke-no-assignment.ts` (new), rewritten `smoke-ticket-update-flow.ts`, `smoke-writes.ts`, `smoke-inprocess.ts`, `smoke-issue-resolution.ts`, `smoke-multi-ticket-raise.ts`; deleted `probe-assignment-notifications.ts`, `cleanup-assignment-notification-probe.ts`; `package.json` (`test:smoke:issue-groups`, `test:smoke:no-assignment`).
+
+**Testing:**
+- `npm run test:smoke:issue-groups` (spec §19): 1 main issue + 3 subs all Open; 2 main issue resolves all its subs, other main issue stays Open; 3/4 one sub resolved, siblings Open; 5/16 re-resolve sub or fully resolved main → 409, partly resolved main resolves only Open subs; 6/7 User A resolves a sub, User B's scan shows only the rest and resolves by main, resolver recorded per issue; 13 `addIssues` persisted Open after the raised ones, resolvable later, add + resolve in one update, one event; 13b same-ticket duplicate → `ISSUE_ALREADY_ON_TICKET`, other open ticket → `OPEN_TICKET_EXISTS`, no event; 14 mismatched pair / main not on ticket / unknown main → 400, nothing resolved; 15 other ticket's issue → 400; 17 QR path; 18 Admin; 19 Control room 403 until `e` granted (restored); 20 PM resolve + add; 21 dashboard `openIssues` −3 / +1, `openTicketsCount` unchanged until explicit close, no auto-close; concurrent main resolve → one 201, one 409.
+- `npm run test:smoke:no-assignment` (spec §23.12 1–11): raise Open + unassigned (stray `assigneeId` ignored); every role with `All tickets` `v` lists / opens any ticket, no assignment fields, `tab=asg` → 400; users A, B, C update in turn, author recorded, `assignee_id` stays NULL, no `ticket_assignments`; resolving never assigns; concurrent updates both 201; no assignment notifications; historical assigned ticket loads, keeps its `assigned` event, shows Under repair, is updated / closed by non-assignees with `assignee_id` untouched; Site attendant 403 on update / close; photo attach author-only; `POST /assign` → 404.
+- Updated: `smoke-issue-resolution` (L: other technician 201, Site attendant 403), `smoke-multi-ticket` (case 4 User B is another technician), `smoke-ticket-update-flow` (raise / any-user update / close flag / concurrency / QR), `smoke-writes` (assign 404 + ticket-scoped mark-read on `ticket.raised`), `smoke-inprocess` (every ticket, every road; no longer depends on seed `TK-1099` / `TK-1078`).
+
+**Verification:** `npx tsc --noEmit -p .`; `test:smoke:issue-groups`, `test:smoke:no-assignment`, `test:smoke:issue-resolution`, `test:smoke:multi-ticket`, `test:smoke:ticket-flow`, `test:smoke:writes`, `test:smoke:close`, `test:smoke:users`, `test:smoke:roles` pass on the local Postgres DB. `test:smoke` passes every ticket check and now stops later, at "tech device-sync should be authorized": the local DB has `Device list` `c` off for Technician / Engineer (permission-matrix drift from migration `014`, unrelated to this phase).
+
+**Frontend (done, frontend Phase 51):** Add Update "Resolve Issues" groups the raised issues by Main Issue in collapsible panels (`TicketResolveIssues`), progressive **Another Issue**, hidden-until-opened **Add another issue** (reuses `TicketIssueRows`) → `resolveCategoryIds` / `resolveIssueIds` / `addIssues`. All Assign / Reassign UI, the Assigned tab / column / filter, the raise **Assign to**, the QR assignee gate and the holder picker are removed.
+
+## Phase 52 — Under repair tab, clickable list cards, age filter
+
+**Status:** Complete
+
+**Objective:** Split the All Tickets list into three tabs so a raised ticket and a ticket already being worked on are no longer mixed: **Open** (raised, no update yet), **Under repair** (at least one update) and **Closed** (unchanged). Give the frontend what it needs to make the summary cards select a tab + filter, including the "Open over 3 days" card that spans two tabs.
+
+**Tab rules (`GET /api/tickets`, `routes/tickets.ts`):**
+- `tab=open` → `NOT_ATTENDED_SQL` (`status IN ('Open','New') AND assignee_id IS NULL`) — the same set as the "Open, not attended" tile.
+- `tab=urp` → `UNDER_REPAIR_TAB_SQL` (`status <> 'Closed' AND NOT (NOT_ATTENDED_SQL)`): stored `Under repair`, `Waiting for spare`, and legacy Open + historical assignee (already shown as Under repair). Every Add Update moves the status to `Under repair` / `Waiting for spare`, so "at least one update" = this set.
+- `tab=cls` → `status = 'Closed'`. Schema `tab: z.enum(['open','urp','cls'])`; `tab=asg` stays `400`.
+- Row `tab` comes from `tabForStatus(status, assigneeId)` with the same rules.
+- `status` keeps every existing value and now narrows within the tab (`Under repair` excludes `Waiting for spare` and vice versa; `All` = whole tab).
+
+**Age filter:** optional `age=over3` (`z.enum(['over3'])`, anything else → `400`) adds `status <> 'Closed' AND raised_at < NOW() - INTERVAL '3 days'` on the `open` / `urp` tabs; ignored on `cls`.
+
+**Response:**
+- `tabCounts { open, urp, cls }` — base filters (road / category / `q`); the `open` / `urp` counts also apply `age` so the tab badges show the over-3-days split while that filter is on.
+- New `over3Counts { open, urp }` — over-3-days tickets per tab (base filters only), so the client picks the tab for the "Open over 3 days" card.
+- `tiles` unchanged and still base filters only, so card numbers stay put when a card or tab is clicked.
+- `/export` unchanged (no tab logic).
+
+**Files:** `src/routes/tickets.ts`; `scripts/smoke-no-assignment.ts` (Phase 52 block + historical-assignee lookup moved to `tab=urp`); `scripts/smoke-inprocess.ts` (`tabCounts { open, urp, cls }`, every-ticket checks list without a tab).
+
+**Testing:** `npm run test:smoke:no-assignment` adds: a new ticket is in `open` and not `urp`; after one update it moves to `urp` and leaves `open`; a Waiting for spare update keeps it in `urp` with its own status; `status=Under repair` excludes it then; a ticket raised 5 days ago is listed by `age=over3` and counted in `over3Counts.open` / `tabCounts.open`; a ticket raised today is excluded; `age=week` → `400`; `tabCounts` / `over3Counts` shapes.
+
+**Verification:** `npx tsc --noEmit -p .`; `test:smoke:no-assignment`, `test:smoke:issue-groups`, `test:smoke:writes`, `test:smoke:ticket-flow`, `test:smoke:issue-resolution`, `test:smoke:close`, `test:smoke:multi-ticket` pass. `test:smoke` passes every ticket check and stops at the pre-existing device-sync permission drift.
+
+**Frontend (done, frontend Phase 52):** All Tickets shows Open / Under Repair / Closed tabs, the four cards select tab + status + age, the status filter only appears on Under Repair, and tab switches slide (ink bar + panel).

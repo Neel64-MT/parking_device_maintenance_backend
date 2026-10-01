@@ -1,11 +1,11 @@
 /**
- * Remove devices that have neither a Slot Id (`slot_id`) nor a MAC address
- * (`slot_identifier`) — unbound devices the UI shows as "—" in both columns —
- * together with all of their tickets.
+ * Remove devices that have neither a Slot Id (slot_id) nor a MAC address
+ * (slot_identifier) — they are not linked to SmartPark and the device list shows
+ * "—" in both columns — together with all of their tickets.
  *
  * Dry run by default; pass --apply to delete.
- *   npx tsx scripts/cleanup-pd-devices.ts
- *   npx tsx scripts/cleanup-pd-devices.ts --apply
+ *   npx tsx scripts/cleanup-unlinked-devices.ts
+ *   npx tsx scripts/cleanup-unlinked-devices.ts --apply
  */
 import { query, withTransaction, closeDb } from '../src/db/pool.js'
 
@@ -16,8 +16,11 @@ const MATCHED_DEVICE_IDS = `SELECT id FROM devices WHERE ${DEVICE_MATCH}`
 const MATCHED_TICKET_IDS = `SELECT id FROM tickets WHERE device_id IN (${MATCHED_DEVICE_IDS})`
 
 async function main() {
-  const devices = await query<{ public_id: string; qr_code: string }>(
-    `SELECT public_id, qr_code FROM devices WHERE ${DEVICE_MATCH} ORDER BY public_id`,
+  const devices = await query<{ public_id: string; slot_number: string | null; road: string | null }>(
+    `SELECT d.public_id, d.slot_number, r.name AS road
+     FROM devices d LEFT JOIN roads r ON r.id = d.road_id
+     WHERE ${DEVICE_MATCH.replace(/slot_/g, 'd.slot_')}
+     ORDER BY d.public_id`,
   )
   const tickets = await query<{ public_id: string; status: string; device: string }>(
     `SELECT t.public_id, t.status, d.public_id AS device
@@ -29,8 +32,10 @@ async function main() {
     `SELECT count(*)::int AS n FROM devices WHERE NOT (${DEVICE_MATCH})`,
   )
 
-  console.log(`devices with no Slot Id and no MAC: ${devices.rows.length}`)
-  console.log(`  ${devices.rows.map((d) => d.public_id).join(', ')}`)
+  console.log(`devices with no Slot Id and no MAC address: ${devices.rows.length}`)
+  for (const d of devices.rows) {
+    console.log(`  ${d.public_id}  slot ${d.slot_number ?? '—'}  ${d.road ?? '—'}`)
+  }
   console.log(`tickets on those devices: ${tickets.rows.length}`)
   for (const t of tickets.rows) console.log(`  ${t.public_id} [${t.status}] device ${t.device}`)
   console.log(`devices that will be kept: ${otherDevices.rows[0].n}`)

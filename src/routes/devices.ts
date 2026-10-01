@@ -9,13 +9,12 @@ import {
   assertRoadAccessUnlessFieldWork,
   authorize,
   requireAuth,
-  type AuthUser,
   type AuthedRequest,
 } from '../middleware/auth.js'
 import { nextPublicId, qrFromDeviceId } from '../lib/ids.js'
 import { deviceDisplayId, deviceLookupWhere } from '../lib/device-ref.js'
-import { deriveDeviceStatus, statusTone } from '../lib/device-status.js'
-import { appendTicketVisibilitySql } from '../lib/ticket-access.js'
+import { deriveDeviceStatus, openTicketLateralSql, statusTone } from '../lib/device-status.js'
+import { loadOpenDeviceTickets, type OpenDeviceTicket } from '../lib/ticket-issues.js'
 import { limitSchema, pageSchema, paginationMeta, sqlOffset } from '../lib/pagination.js'
 import {
   DeviceSyncClientError,
@@ -45,7 +44,17 @@ type ScanRow = Record<string, unknown> & {
   issue_name?: string | null
   severity?: string | null
   tickets_6m?: number
+  open_tickets?: OpenDeviceTicket[]
   id: string
+}
+
+function ageLabel(raisedAt: string | Date | null | undefined): string | null {
+  if (!raisedAt) return null
+  const days = Math.max(
+    0,
+    Math.floor((Date.now() - new Date(raisedAt).getTime()) / (1000 * 60 * 60 * 24)),
+  )
+  return days === 1 ? '1 day' : `${days} days`
 }
 
 function buildScanPayload(
@@ -59,16 +68,19 @@ function buildScanPayload(
   })
   const lat = row.latitude != null ? String(row.latitude) : null
   const lng = row.longitude != null ? String(row.longitude) : null
-  let openTicketAge: string | null = null
-  if (row.open_ticket_raised_at) {
-    const days = Math.max(
-      0,
-      Math.floor(
-        (Date.now() - new Date(row.open_ticket_raised_at).getTime()) / (1000 * 60 * 60 * 24),
-      ),
-    )
-    openTicketAge = days === 1 ? '1 day' : `${days} days`
-  }
+  const openTicketAge = ageLabel(row.open_ticket_raised_at)
+  const openTickets = (row.open_tickets ?? []).map((t) => ({
+    id: t.id,
+    status: t.status,
+    assigneeId: t.assigneeId,
+    age: ageLabel(t.raisedAt),
+    issues: t.issues,
+  }))
+  const openTicketsFact = openTickets.length
+    ? openTickets
+        .map((t) => `${t.id} — ${t.issues.map((i) => i.sub).join(', ') || 'Open'}`)
+        .join('; ')
+    : null
   const deviceName = row.model ? String(row.model) : `Parking device ${row.public_id}`
   const statusDate = row.open_ticket_raised_at
     ? new Date(row.open_ticket_raised_at).toISOString().slice(0, 10)
@@ -89,6 +101,7 @@ function buildScanPayload(
     openTicketId,
     openTicketAge,
     openTicketIssue: openTicketId ? row.issue_name || 'Open' : null,
+    openTickets,
     latitude: lat,
     longitude: lng,
     macId: extras?.macId ?? null,
@@ -104,8 +117,9 @@ function buildScanPayload(
     facts: [
       { label: 'Installed', value: row.installed_on },
       {
-        label: 'Open ticket',
-        value: openTicketId ? `${openTicketId} — ${row.issue_name || 'Open'}` : 'None',
+        label: openTickets.length > 1 ? 'Open tickets' : 'Open ticket',
+        value:
+          openTicketsFact ?? (openTicketId ? `${openTicketId} — ${row.issue_name || 'Open'}` : 'None'),
       },
       { label: 'Tickets in 6 months', value: String(row.tickets_6m ?? 0) },
       { label: 'Road / slot', value: `${row.road_name} · ${row.slot_number}` },
@@ -120,32 +134,27 @@ function buildScanPayload(
 async function loadScanRowByWhere(
   whereSql: string,
   params: unknown[],
-  user: AuthUser,
 ): Promise<ScanRow | null> {
-  const visibility = appendTicketVisibilitySql(user, params)
-  const visFilter = visibility ? `AND ${visibility}` : ''
   const result = await query<ScanRow>(
     `SELECT d.*, r.name AS road_name,
        ot.public_id AS open_ticket_id, ot.status AS open_ticket_status,
        ot.assignee_id, ot.raised_at AS open_ticket_raised_at,
-       COALESCE(fs.name, rs.name) AS issue_name,
-       COALESCE(fs.severity, rs.severity) AS severity,
+       ot.issue_name, ot.severity,
        (SELECT COUNT(*)::int FROM tickets t
-        WHERE t.device_id = d.id AND t.raised_at >= NOW() - INTERVAL '6 months'
-        ${visFilter}) AS tickets_6m
+        WHERE t.device_id = d.id AND t.raised_at >= NOW() - INTERVAL '6 months') AS tickets_6m
      FROM devices d
      JOIN roads r ON r.id = d.road_id
-     LEFT JOIN LATERAL (
-       SELECT * FROM tickets t WHERE t.device_id = d.id AND t.status <> 'Closed'
-       ORDER BY t.raised_at DESC LIMIT 1
-     ) ot ON TRUE
-     LEFT JOIN issue_subcategories fs ON fs.id = ot.found_subcategory_id
-     LEFT JOIN issue_subcategories rs ON rs.id = ot.reported_subcategory_id
+     ${openTicketLateralSql()}
      WHERE ${whereSql}
      LIMIT 1`,
     params,
   )
-  return result.rows[0] || null
+  const row = result.rows[0]
+  if (!row) return null
+  // The scanner must see every open issue on the device to decide between updating an
+  // existing ticket and raising a new one.
+  row.open_tickets = await loadOpenDeviceTickets(row.id)
+  return row
 }
 
 /** Create/PATCH response: prefer Slot Id for `id`, keep `publicId` for legacy. */
@@ -186,8 +195,8 @@ const listSchema = z.object({
   limit: limitSchema,
 })
 
-/** Shared FROM/WHERE for device list (optional roadIds + search + ticket visibility on open ticket). */
-function buildDeviceListBase(filters: z.infer<typeof listSchema>, user: AuthUser, roadIds?: string[]) {
+/** Shared FROM/WHERE for device list (optional roadIds + search). */
+function buildDeviceListBase(filters: z.infer<typeof listSchema>, roadIds?: string[]) {
   const params: unknown[] = []
   const where: string[] = []
 
@@ -206,34 +215,23 @@ function buildDeviceListBase(filters: z.infer<typeof listSchema>, user: AuthUser
     where.push(`r.name = $${params.length}`)
   }
 
-  const visibility = appendTicketVisibilitySql(user, params)
-  const visFilter = visibility ? `AND ${visibility}` : ''
-
   const derivedStatusSql = `
     CASE
       WHEN ot.status IS NULL OR ot.status = 'Closed' THEN 'Working'
       WHEN ot.status IN ('Waiting for spare', 'Under repair') THEN 'Under repair'
       WHEN ot.assignee_id IS NOT NULL THEN 'Under repair'
-      WHEN COALESCE(fs.severity, rs.severity) = 'Minor' THEN 'Working'
+      WHEN ot.severity = 'Minor' THEN 'Working'
       ELSE 'Not working'
     END`
 
   const tickets6mSql = `
     (SELECT COUNT(*)::int FROM tickets t
-     WHERE t.device_id = d.id AND t.raised_at >= NOW() - INTERVAL '6 months'
-     ${visFilter})`
+     WHERE t.device_id = d.id AND t.raised_at >= NOW() - INTERVAL '6 months')`
 
   const fromSql = `
     FROM devices d
     JOIN roads r ON r.id = d.road_id
-    LEFT JOIN LATERAL (
-      SELECT t.* FROM tickets t
-      WHERE t.device_id = d.id AND t.status NOT IN ('Closed')
-      ${visFilter}
-      ORDER BY t.raised_at DESC LIMIT 1
-    ) ot ON TRUE
-    LEFT JOIN issue_subcategories fs ON fs.id = ot.found_subcategory_id
-    LEFT JOIN issue_subcategories rs ON rs.id = ot.reported_subcategory_id`
+    ${openTicketLateralSql()}`
 
   const baseWhere = where.length ? `WHERE ${where.join(' AND ')}` : ''
 
@@ -261,8 +259,9 @@ function buildDeviceListBase(filters: z.infer<typeof listSchema>, user: AuthUser
       ot.status AS open_ticket_status,
       ot.assignee_id AS open_assignee_id,
       ot.raised_at AS open_raised_at,
-      COALESCE(fs.name, rs.name) AS issue_name,
-      COALESCE(fs.severity, rs.severity) AS severity,
+      ot.issue_name,
+      ot.severity,
+      COALESCE(ot.open_ticket_count, 0) AS open_ticket_count,
       ${tickets6mSql} AS tickets_6m,
       ${derivedStatusSql} AS derived_status
     ${fromSql}
@@ -287,13 +286,11 @@ const DEVICE_LIST_ORDER_BY = `ORDER BY (slot_number = ''), slot_number, public_i
 
 async function deviceListQuery(
   filters: z.infer<typeof listSchema>,
-  user: AuthUser,
   roadIds?: string[],
   opts?: { paginate: boolean },
 ) {
   const { cteBody, tileParams, pageParams, tileWhere, pageWhere } = buildDeviceListBase(
     filters,
-    user,
     roadIds,
   )
   const paginate = opts?.paginate !== false
@@ -346,7 +343,7 @@ router.get('/', authorize('Device list', 'v'), async (req: AuthedRequest, res) =
   try {
     const filters = listSchema.parse(req.query)
     // Device list is city-wide for all roles (no assigned_roads filter).
-    const result = await deviceListQuery(filters, req.user!, undefined, { paginate: true })
+    const result = await deviceListQuery(filters, undefined, { paginate: true })
 
     const pageRows = result.rows.map((row) => {
       const status = (row.derived_status as 'Working' | 'Under repair' | 'Not working') ||
@@ -375,6 +372,7 @@ router.get('/', authorize('Device list', 'v'), async (req: AuthedRequest, res) =
         statusTone: statusTone(status),
         issue: row.issue_name || null,
         ticketId: row.open_ticket_id || null,
+        openTicketCount: Number(row.open_ticket_count || 0),
         ticketNote: daysOpen != null ? `${daysOpen} days open` : null,
         tickets6m: row.tickets_6m,
         ticketsBad: row.tickets_6m >= 3,
@@ -402,7 +400,7 @@ router.get('/export', authorize('Device list', 'v'), async (req: AuthedRequest, 
   try {
     const filters = listSchema.parse(req.query)
     // Export matches list: city-wide for all roles.
-    const result = await deviceListQuery(filters, req.user!, undefined, { paginate: false })
+    const result = await deviceListQuery(filters, undefined, { paginate: false })
     const header = 'Device ID,QR,Road,Slot,Status,Tickets6m\n'
     const lines = result.rows.map((r) => {
       const status =
@@ -448,7 +446,6 @@ router.get('/scan', authorize('Scan QR', 'v'), async (req: AuthedRequest, res) =
           OR UPPER(TRIM(d.slot_number)) = $1
           OR CAST(d.slot_id AS TEXT) = $1`,
       params,
-      req.user!,
     )
     if (!row) throw new ApiError(404, 'No device matches that code', 'NOT_FOUND')
     assertRoadAccessUnlessFieldWork(req.user!, row.road_id)
@@ -517,7 +514,6 @@ router.post('/slot-mac', authorize('Scan QR', 'v'), async (req: AuthedRequest, r
     const row = await loadScanRowByWhere(
       `LOWER(TRIM(d.slot_identifier)) = LOWER(TRIM($1))`,
       params,
-      req.user!,
     )
     if (!row) {
       throw new ApiError(
@@ -619,17 +615,11 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
     const d = device.rows[0]
 
     const ticketParams: unknown[] = [d.id]
-    const visibility = appendTicketVisibilitySql(req.user!, ticketParams)
-    const visFilter = visibility ? `AND ${visibility}` : ''
 
     const open = await query(
-      `SELECT t.*, COALESCE(fs.severity, rs.severity) AS severity
-       FROM tickets t
-       LEFT JOIN issue_subcategories fs ON fs.id = t.found_subcategory_id
-       LEFT JOIN issue_subcategories rs ON rs.id = t.reported_subcategory_id
-       WHERE t.device_id = $1 AND t.status <> 'Closed'
-       ${visFilter}
-       ORDER BY t.raised_at DESC LIMIT 1`,
+      `SELECT ot.* FROM devices d
+       ${openTicketLateralSql()}
+       WHERE d.id = $1 AND ot.id IS NOT NULL`,
       ticketParams,
     )
     const status = deriveDeviceStatus({
@@ -647,7 +637,6 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
        LEFT JOIN issue_categories fc ON fc.id = t.found_category_id
        LEFT JOIN issue_subcategories fs ON fs.id = t.found_subcategory_id
        WHERE t.device_id = $1
-       ${visFilter}
        ORDER BY t.raised_at DESC`,
       ticketParams,
     )
@@ -660,7 +649,6 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
        LEFT JOIN issue_subcategories fs ON fs.id = t.found_subcategory_id
        LEFT JOIN issue_subcategories rs ON rs.id = t.reported_subcategory_id
        WHERE t.device_id = $1 AND jsonb_array_length(e.parts) > 0
-       ${visFilter}
        ORDER BY e.created_at DESC`,
       ticketParams,
     )
@@ -697,8 +685,9 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
         )
         return s + days
       }, 0)
+    // Down since the earliest open ticket — overlapping open tickets are not double-counted.
     const openDays = open.rows[0]
-      ? Math.max(0, (Date.now() - new Date(open.rows[0].raised_at).getTime()) / 86400000)
+      ? Math.max(0, (Date.now() - new Date(open.rows[0].first_open_at).getTime()) / 86400000)
       : 0
     const totalDown = closedDays + openDays
     const installed = d.installed_on ? new Date(d.installed_on) : new Date()
@@ -711,7 +700,6 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
        LEFT JOIN issue_categories fc ON fc.id = t.found_category_id
        LEFT JOIN issue_categories rc ON rc.id = t.reported_category_id
        WHERE t.device_id = $1
-       ${visFilter}
        GROUP BY COALESCE(fc.name, rc.name)
        ORDER BY n DESC`,
       ticketParams,

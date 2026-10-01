@@ -70,7 +70,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     },
   },
   'Control room': {
-    note: 'Raises and routes tickets across all roads, but never closes one.',
+    note: 'Raises and watches tickets across all roads, but never closes one.',
     scope: 'all_roads',
     p: {
       Dashboard: 'v.....',
@@ -89,7 +89,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     },
   },
   Technician: {
-    note: 'Scan/raise any road; update/close only tickets they hold or raised. Cannot assign or reassign. May run Device Sync. List stays assignee/raiser-scoped.',
+    note: 'Scan/raise any road; sees every ticket and may update or close any open ticket. May run Device Sync.',
     scope: 'assigned_roads',
     p: {
       Dashboard: '......',
@@ -108,7 +108,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     },
   },
   Engineer: {
-    note: 'Field engineer: same ticket hold/update rules as Technician; eligible for Visited By. Cannot assign or reassign. May run Device Sync.',
+    note: 'Field engineer: same ticket rules as Technician; eligible for Visited By. May run Device Sync.',
     scope: 'assigned_roads',
     p: {
       Dashboard: '......',
@@ -127,7 +127,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     },
   },
   Electrician: {
-    note: 'Field electrician: same ticket hold/update rules as Technician and Engineer; may claim an unassigned ticket by adding an update. Cannot assign or reassign. May run Device Sync.',
+    note: 'Field electrician: same ticket rules as Technician and Engineer. May run Device Sync.',
     scope: 'assigned_roads',
     p: {
       Dashboard: '......',
@@ -146,7 +146,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     },
   },
   'Site attendant': {
-    note: 'Can scan and raise tickets on any road; list stays raiser-scoped. May run Device Sync and manage Issue master. Cannot update, assign, or close tickets.',
+    note: 'Can scan and raise tickets on any road; sees every ticket. May run Device Sync and manage Issue master. Cannot update or close tickets.',
     scope: 'assigned_roads',
     p: {
       Dashboard: '......',

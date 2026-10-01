@@ -648,6 +648,18 @@ async function seed() {
     )
   }
 
+  // Seed runs after migrations, so mirror the 017/024 backfill: every ticket gets its
+  // reported issue row, and issues on Closed tickets start Resolved.
+  await query(
+    `INSERT INTO ticket_issues (ticket_id, device_id, role, category_id, subcategory_id, sort_order, status, resolved_at)
+     SELECT t.id, t.device_id, 'reported', t.reported_category_id, t.reported_subcategory_id, 0,
+            CASE WHEN t.status = 'Closed' THEN 'Resolved' ELSE 'Open' END,
+            CASE WHEN t.status = 'Closed' THEN t.closed_at ELSE NULL END
+     FROM tickets t
+     WHERE t.reported_category_id IS NOT NULL AND t.reported_subcategory_id IS NOT NULL
+     ON CONFLICT (ticket_id, role, subcategory_id) DO NOTHING`,
+  )
+
   console.log('Seed complete')
   console.log(`Demo login: 9825012345 or alkesh.patel@yopmail.com / ${DEMO_PASSWORD}`)
   await closeDb()
