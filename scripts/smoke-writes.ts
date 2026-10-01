@@ -720,7 +720,7 @@ async function main() {
   assert(unassignedTicket.status === 201, 'unassigned ticket raise failed')
   const unassignedTicketId = unassignedTicket.body.data.id as string
 
-  // Even an Admin must assign first.
+  // Admin/PM must pick an assignee in the same request; they are never auto-assigned.
   const adminUpdateUnassigned = await call(`/api/tickets/${unassignedTicketId}/updates`, {
     method: 'POST',
     headers: auth,
@@ -737,9 +737,30 @@ async function main() {
   )
   assert(
     stillUnassigned.rows[0]?.assignee_id == null,
-    'rejected update must not auto-assign the ticket',
+    'rejected update must not assign the ticket',
   )
-  console.log('OK unassigned ticket rejects Add Update without auto-claiming')
+  const adminUpdateWithPick = await call(`/api/tickets/${unassignedTicketId}/updates`, {
+    method: 'POST',
+    headers: auth,
+    body: JSON.stringify({
+      updateType: 'Site visit — not resolved',
+      workDone: 'Admin assigns while updating',
+      handoverToUserId: tech.id,
+    }),
+  })
+  assert(
+    adminUpdateWithPick.status === 201 && adminUpdateWithPick.body.data?.assigneeId === tech.id,
+    `Admin update with assignee must succeed, got ${adminUpdateWithPick.status} ${JSON.stringify(adminUpdateWithPick.body).slice(0, 200)}`,
+  )
+  const nowAssigned = await query<{ assignee_id: string | null; status: string }>(
+    `SELECT assignee_id, status FROM tickets WHERE public_id = $1`,
+    [unassignedTicketId],
+  )
+  assert(
+    nowAssigned.rows[0]?.assignee_id === tech.id && nowAssigned.rows[0]?.status !== 'Closed',
+    'Admin pick must assign the ticket and keep it open',
+  )
+  console.log('OK Admin update on unassigned ticket requires an assignee pick')
 
   // Parts master create/update (Issue c/e or Technician) + amounts on list/lookups
   const partA = await call('/api/parts', {

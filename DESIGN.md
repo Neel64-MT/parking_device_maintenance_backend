@@ -159,7 +159,7 @@ Before insert on `POST /api/tickets`, query non-`Closed` tickets for the device.
 
 DB backstop: partial unique index `idx_tickets_one_open_per_device` on `tickets(device_id) WHERE status <> 'Closed'` (migration `012`). Concurrent insert races map unique-violation to the same `OPEN_TICKET_EXISTS` payload.
 
-Flow: QR → scan → (`openTicketId` ? update existing via `POST /api/tickets/:id/updates` : `POST /api/tickets`). Frontend should redirect to `openTicketId` instead of creating another ticket.
+Flow: QR → scan → (`openTicketId` ? update existing via `POST /api/tickets/:id/updates` : `POST /api/tickets`). Frontend should redirect to `openTicketId` instead of creating another ticket. An unassigned open ticket reached this way is auto-assigned to the field-role user who adds the update (same endpoint, no QR-specific path).
 
 When `devices.slot_id` is set (unique), one open ticket per device UUID equals one open ticket per Slot Id.
 
@@ -348,35 +348,56 @@ Event `parts` JSONB: `[{ "id", "name", "amount" }, ...]`. Device history reads `
 
 ---
 
-# Design — Add Update restrictions (Phase 30)
+# Design — Add Update: gates, auto-assign, close with update (Phase 47)
+
+Supersedes the Phase 30 / Phase 42 gates (`assertTicketAssigned`, `visitedBy`, `NOT_ASSIGNED_USER`, "no auto-claim"), which the code no longer uses.
 
 ## Gates (order)
 
 1. Auth + `authorize('Update ticket','e')`
-2. Ticket exists (`404 NO_TICKETS_AVAILABLE` if not)
-3. `assertTicketAssigned` → `409 TICKET_NOT_ASSIGNED` / `Ticket not assigned`
-4. `assertCanAddUpdate` → Admin or `assignee_id === me` else `403 NOT_ASSIGNED_USER` / `This ticket is assigned to another user` + `details.assignedTo`
-5. Zod body including required `visitedBy` UUID
-6. `assertValidVisitedBy` — Active user with role Technician or Engineer
-7. Existing parts/cost/transaction (no auto-claim of unassigned tickets)
-
-List visibility (`assertTicketAccess`) is not applied on Add Update so QR user B receives `NOT_ASSIGNED_USER` rather than a generic road Forbidden.
+2. Zod body
+3. Ticket exists (`404 NO_TICKETS_AVAILABLE`), not Closed (`409 CLOSED`)
+4. `resolveUpdateAssignee`:
+   - Assigned → `assertTicketAccess` + `assertCanAddUpdate` (Admin/PM, assignee or raiser; else `403 NOT_HOLDER` / `FORBIDDEN`). The assignee is kept.
+   - Unassigned + field role (`FIELD_ROLES`: Technician, Engineer, Electrician) → claim for the updater, whether or not they raised it.
+   - Unassigned + Admin/PM → `handoverToUserId` required (`409 TICKET_NOT_ASSIGNED` "Select an assignee to update an unassigned ticket"), validated by `assertEligibleAssignee` (`400 INVALID_ASSIGNEE`).
+   - Unassigned + other role → `assertTicketAccess`, then `409 TICKET_NOT_ASSIGNED`.
+5. Field role claiming while sending `handoverToUserId` for another user → `assertCanAssignTickets` (`403`).
+6. `closeTicket: true` → `Update ticket` `x` (`403 FORBIDDEN`) + `assertHolder` on the effective assignee (`403 NOT_HOLDER`).
+7. Transaction: `SELECT … FOR UPDATE` re-check (`409 CLOSED` / `409 TICKET_ALREADY_ASSIGNED`), claim + `ticket_assignments`, one visit event, parts/cost, status, optional handover.
+8. After commit: `ticket.assigned` notification for a claim, `ticket.reassigned` for a handover (failures logged, never fail the update).
 
 ## Request
 
 ```json
-{ "updateType": "Site visit — not resolved", "cost": 1000, "parts": ["uuid"], "visitedBy": "user-uuid" }
+{
+  "updateType": "Site visit — resolved",
+  "workDone": "Replaced limit switch",
+  "cost": 1000,
+  "parts": ["uuid"],
+  "handoverToUserId": "uuid (Admin/PM on an unassigned ticket; handover on an assigned one)",
+  "closeTicket": false
+}
 ```
 
-`visitedBy` is stored in `ticket_events.meta` as `{ "visitedBy": "<uuid>" }` (detail `workHistory[].meta`).
+`closeTicket` is optional; omitted or `false` never closes. `true` stores the visit event with `status_label = 'Closed'` and `meta = { "closedTicket": true }`, and sets `tickets.status = 'Closed'`, `closed_at = NOW()`.
+
+## Response
+
+Existing fields (`id`, `eventId`, `status`, `cost`, `partsCost`, `labourCost`, `parts`, `resolvedReady`) plus `assigneeId`, `autoAssigned`, `closed`.
+
+## Resolve
+
+Resolve = update type `Site visit — resolved` (`visit_resolved`, `resolvedReady: true`). No `Resolved` status exists; resolved keeps the ticket `Under repair` unless `closeTicket: true`.
 
 ## Roles
 
-- **Engineer** — seeded/migrated (`013_engineer_role.sql`); Technician-like permissions; included in `GET /api/lookups/technicians`.
+- **Engineer** — `013_engineer_role.sql`. **Electrician** — `022_electrician_role.sql`; both mirror Technician ticket permissions and are in `GET /api/lookups/technicians`.
+- `023_field_roles_raise_ticket.sql` guarantees `Raise ticket` `v`+`c` for all three field roles.
 
 ## Frontend
 
-**FRONTEND CHANGE REQUIRED:** require Visited By (Technician/Engineer UUID); toast business errors from `error`; map `details[].field === "visitedBy"` under the field; hide/disable Add Update when unassigned or when caller is not Admin/assignee (API still enforces).
+**FRONTEND CHANGE REQUIRED:** allow field roles to open Add Update on an unassigned ticket (remove the client-side unassigned/not-assignee gate in `TicketUpdate.jsx`); add a Close Ticket Yes/No control defaulting to No that sends `closeTicket`; show an assignee picker for Admin/PM on unassigned tickets (send as `handoverToUserId`); toast `TICKET_ALREADY_ASSIGNED` and reload.
 
 ---
 

@@ -137,16 +137,23 @@ Canonical `tickets.status` values (exactly four; never `New`):
 
 **FRONTEND CHANGE REQUIRED:** PartChips must send part UUIDs (not names). The update/close `cost` field must be labour / non-part charges only — do not pre-add part prices into `cost`. PartMaster Delete → `DELETE /api/parts/:id`; on `IN_USE` offer deactivate. Image zoom/crop stay FE-only. IssueMaster: add `createIssueCategory`, `createIssueSubcategory`, `deleteIssueCategory` in `issues.js`; Delete unused category → `DELETE /api/issues/categories/:id`; on `IN_USE` offer deactivate.
 
-### Add Update restrictions (Phase 30)
+### Add Update: auto-assign and close with update (Phase 47)
 
-- Unassigned tickets (`assignee_id` null) cannot receive `POST /api/tickets/:id/updates` → `409` / `TICKET_NOT_ASSIGNED` / `error: "Ticket not assigned"`. This applies to **every** role, including Admin/PM — a ticket must be assigned before it can be worked. The updater is never silently made the assignee.
-- Only **Admin** or the **current assignee** may Add Update. User B (QR scan or otherwise) on a ticket assigned to A → `403` / `NOT_ASSIGNED_USER` / `error: "This ticket is assigned to another user"` with `details.assignedTo` (assignee display name). Project manager and raiser do **not** bypass unless they are the assignee. List visibility is not applied on this path so the toast message is not replaced by a generic road Forbidden.
-- `visitedBy` is required (UUID). Missing/invalid → `400` / `VALIDATION_ERROR` with `details[].field = "visitedBy"`. Must be an Active **Technician** or **Engineer**. Stored in `ticket_events.meta.visitedBy`.
-- **Engineer** role exists (Technician-like permissions); lookups `/api/lookups/technicians` include Engineers.
+- **Field roles** (`FIELD_ROLES`: Technician, Engineer, **Electrician** — new role, migration `022`) can raise tickets (`023` guarantees `Raise ticket` `v`+`c`). `assigneeId` on raise stays optional; when sent it must be an eligible field worker (`400 INVALID_ASSIGNEE`).
+- `POST /api/tickets/:id/updates` on an **unassigned** ticket:
+  - field role → the ticket is assigned to the authenticated updater (their user id), even if they did not raise it — this is how the QR flow (`openTicketId` → update) works;
+  - Admin/PM → must send `handoverToUserId` (eligible assignee), else `409` / `TICKET_NOT_ASSIGNED` / "Select an assignee to update an unassigned ticket";
+  - other roles → `409 TICKET_NOT_ASSIGNED`.
+- On an **assigned** ticket the assignee never changes automatically; access stays Admin/PM, assignee or raiser (others `403`).
+- New optional `closeTicket: boolean` (default `false`). Only `true` closes: needs `Update ticket` `x` + ticket holder (`403 NOT_HOLDER` otherwise); the ticket becomes `Closed` with `closed_at`, and the single update event (`status_label: "Closed"`) appears in `workHistory`. Omitted/`false` keeps the ticket open.
+- Resolve = `updateType: "Site visit — resolved"` (`resolvedReady: true`); it does **not** close unless `closeTicket: true`. No `Resolved` status.
+- Claim + update + close run in one transaction with a row lock; a concurrent claim loses with `409` / `TICKET_ALREADY_ASSIGNED`.
+- A claim sends the existing `ticket.assigned` notification after commit.
+- Response adds `assigneeId`, `autoAssigned`, `closed`; existing fields unchanged.
 - One Add Update request produces exactly one work-history entry. If the on-site issue changes, the found issue is stored on that visit entry (and in `ticket_issues`); the API must not add a second `Issue reclassified` entry.
-- `resolvedReady` is `true` only for `updateType: "Site visit — resolved"`. `"Site visit — not resolved"` returns `resolvedReady: false` and is stored as a `visit_open` event.
+- Photos may still be attached (`PATCH …/updates/:eventId/photos`) to the author's own closing update after the ticket closed.
 
-**FRONTEND CHANGE REQUIRED:** Send `visitedBy` on Add Update; toast `Ticket not assigned` / `This ticket is assigned to another user` from `error`; show field error under Visited By from `details`.
+**FRONTEND CHANGE REQUIRED:** remove the client-side "no assignee / not assigned to you" gate for field roles in `TicketUpdate.jsx`; add Close Ticket Yes/No (default No) sending `closeTicket`; Admin/PM assignee picker on unassigned tickets sent as `handoverToUserId`; toast `TICKET_ALREADY_ASSIGNED` and reload.
 
 ### Work report (Phase 31)
 

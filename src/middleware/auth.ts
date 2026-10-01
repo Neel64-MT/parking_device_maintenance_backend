@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express'
 import { ApiError, handleApiError } from '../lib/api-error.js'
 import { denyToken, isTokenDenied, verifyAccessToken } from '../lib/auth.js'
 import { query } from '../db/pool.js'
+import { isFieldRoleName } from '../lib/permissions.js'
 import type { PermissionFlag, RoadScope, ScreenName } from '../types/api.js'
 
 export type AuthUser = {
@@ -168,13 +169,10 @@ export function assertRoadAccess(user: AuthUser, roadId: string) {
   }
 }
 
-/** Site attendant / Technician / Engineer may scan and raise on any road; other roles still use road scope. */
+/** Site attendant and field roles (FIELD_ROLES) may scan and raise on any road; other roles still use road scope. */
 export function assertRoadAccessUnlessFieldWork(user: AuthUser, roadId: string) {
-  if (
-    user.roleName === 'Site attendant' ||
-    user.roleName === 'Technician' ||
-    user.roleName === 'Engineer'
-  ) {
+  if (user.roleName === 'Site attendant' || isFieldRoleName(user.roleName)) {
     return
-  }  assertRoadAccess(user, roadId)
+  }
+  assertRoadAccess(user, roadId)
 }

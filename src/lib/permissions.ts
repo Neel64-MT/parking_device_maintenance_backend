@@ -18,6 +18,17 @@ export const SCREENS: ScreenName[] = [
 
 export const PERM_FLAGS: PermissionFlag[] = ['v', 'c', 'e', 'a', 'x', 'd']
 
+/**
+ * Field staff who attend devices on site: may raise, hold, update and close tickets,
+ * and may claim an unassigned ticket by adding an update. Single source for every
+ * role-name check that means "field worker".
+ */
+export const FIELD_ROLES = ['Technician', 'Engineer', 'Electrician'] as const
+
+export function isFieldRoleName(roleName: string) {
+  return (FIELD_ROLES as readonly string[]).includes(roleName)
+}
+
 /** Role permission codes from frontend users.js */
 export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_roads' | 'assigned_roads'; p: Record<string, string> }> = {
   Admin: {
@@ -98,6 +109,25 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
   },
   Engineer: {
     note: 'Field engineer: same ticket hold/update rules as Technician; eligible for Visited By. Cannot assign or reassign. May run Device Sync.',
+    scope: 'assigned_roads',
+    p: {
+      Dashboard: '......',
+      'Raise ticket': 'vc....',
+      'Update ticket': 'vce.x.',
+      'All tickets': 'v.....',
+      'Work report': '......',
+      'Device list': 'vc....',
+      'Add device': '......',
+      'Device history': 'v.....',
+      'Scan QR': 'v.....',
+      'Issue master': 'v....d',
+      'Road master': '......',
+      Users: '......',
+      'Roles & permissions': '......',
+    },
+  },
+  Electrician: {
+    note: 'Field electrician: same ticket hold/update rules as Technician and Engineer; may claim an unassigned ticket by adding an update. Cannot assign or reassign. May run Device Sync.',
     scope: 'assigned_roads',
     p: {
       Dashboard: '......',

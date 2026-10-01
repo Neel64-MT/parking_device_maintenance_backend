@@ -155,12 +155,13 @@ Client scans QR / enters device code
                openTicketId?, openTicketAge?, openTicketIssue?,
                latitude, longitude (+ legacy id/facts)
   → If openTicketId set → open existing ticket → POST /api/tickets/:id/updates
+       (unassigned → field-role scanner is auto-assigned; closeTicket optional)
   → Else POST /api/tickets { deviceId, ... }  (Raise ticket c)
        → if device has no slot_identifier: 400 SLOT_IDENTIFIER_REQUIRED
        → if another open ticket: 409 OPEN_TICKET_EXISTS { openTicketId, ticketId }
 ```
 
-Reuse only — no `/devices/by-qr` or `/tickets/by-slot` endpoints. Device `latitude` / `longitude` are TEXT. Scan `openTicketId` is **not** ticket-visibility filtered (Raise vs Update must be reliable); 6-month ticket count remains visibility-scoped. Scan and raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician bypass); device create/PATCH and assign still use `assertRoadAccess`. FE must not call SmartPark directly (`DEVICE_SYNC_API_TOKEN` stays server-side).
+Reuse only — no `/devices/by-qr` or `/tickets/by-slot` endpoints. Device `latitude` / `longitude` are TEXT. Scan `openTicketId` is **not** ticket-visibility filtered (Raise vs Update must be reliable); 6-month ticket count remains visibility-scoped. Scan and raise use `assertRoadAccessUnlessFieldWork` (Site attendant + `FIELD_ROLES` bypass); device create/PATCH and assign still use `assertRoadAccess`. FE must not call SmartPark directly (`DEVICE_SYNC_API_TOKEN` stays server-side).
 
 ### Manual device create / edit (fallback when Sync is down)
 
@@ -222,11 +223,14 @@ No hard delete, no schema change, no new role permission. `loadAuthUser` already
 POST /api/tickets (no assignee) → Open
 POST /api/tickets (with assignee) or POST .../assign → Under repair
 POST .../updates (Waiting for spare) → Waiting for spare
-POST .../updates (other visit) → Under repair
+POST .../updates (other visit, incl. "Site visit — resolved") → Under repair
+POST .../updates { closeTicket: true } → Closed
 POST .../close → Closed
 ```
 
-Assign (`POST /api/tickets/:id/assign`): `{ assigneeId, reason? }` → Active **Technician / Engineer** only (`400 INVALID_ASSIGNEE`). **Neither Project manager nor Control room may hold a ticket** — a PM routes and closes, Control room raises and routes; neither attends. The role list is the shared `ASSIGNABLE_ROLES` constant in [`src/lib/ticket-access.ts`](src/lib/ticket-access.ts), consumed by both `assertEligibleAssignee` and `GET /api/lookups/technicians`, so the Hand to dropdown and the API cannot drift apart. It is intentionally narrower than `canAssignTickets` (Control room / Admin / PM), which governs who may *perform* an assign. Same assignee → `200 Already assigned` (no trail growth). Else transactional `assignee_id` + `ticket_assignments` + `ticket_events`; response `{ id, assigneeId, assigneeName, assignmentTrail }`. Detail `assignmentTrail` uses the same shape. Hand-to options: `GET /api/lookups/technicians` → `{ id, label, name, role, roads }`, where `label` is display-only and reads **`Name (Role)`** (`Jignesh Solanki (Technician)`). Road scope is deliberately **not** in the label — the old format appended `, <road>` only when the road was not "All roads", so entries silently changed shape and a missing road was ambiguous between "works everywhere" and "not shown". `roads` is still returned separately for any caller that needs scope. `name` is the wire value for assignee filters; `id` is what assign submits. Only the Assign/Reassign dropdowns consume `label`; `Work report` uses `name`.
+Resolve is the `Site visit — resolved` update type (`visit_resolved`, `resolvedReady: true`); there is no `Resolved` status. A ticket closes only on `closeTicket: true` or `POST .../close`.
+
+Assign (`POST /api/tickets/:id/assign`): `{ assigneeId, reason? }` → Active field role (**Technician / Engineer / Electrician**, `FIELD_ROLES`) only (`400 INVALID_ASSIGNEE`). **Neither Project manager nor Control room may hold a ticket** — a PM routes and closes, Control room raises and routes; neither attends. The role list is the shared `ASSIGNABLE_ROLES` constant in [`src/lib/ticket-access.ts`](src/lib/ticket-access.ts), consumed by both `assertEligibleAssignee` and `GET /api/lookups/technicians`, so the Hand to dropdown and the API cannot drift apart. It is intentionally narrower than `canAssignTickets` (Control room / Admin / PM), which governs who may *perform* an assign. Same assignee → `200 Already assigned` (no trail growth). Else transactional `assignee_id` + `ticket_assignments` + `ticket_events`; response `{ id, assigneeId, assigneeName, assignmentTrail }`. Detail `assignmentTrail` uses the same shape. Hand-to options: `GET /api/lookups/technicians` → `{ id, label, name, role, roads }`, where `label` is display-only and reads **`Name (Role)`** (`Jignesh Solanki (Technician)`). Road scope is deliberately **not** in the label — the old format appended `, <road>` only when the road was not "All roads", so entries silently changed shape and a missing road was ambiguous between "works everywhere" and "not shown". `roads` is still returned separately for any caller that needs scope. `name` is the wire value for assignee filters; `id` is what assign submits. Only the Assign/Reassign dropdowns consume `label`; `Work report` uses `name`.
 
 Stored values: `Open` | `Under repair` | `Waiting for spare` | `Closed`. Do not write `New`.
 
@@ -303,35 +307,43 @@ POST /api/tickets/:id/updates|close
 
 **FRONTEND CHANGE REQUIRED:** send part UUIDs; keep `cost` labour-only.
 
-## Add Update restrictions (Phase 30)
+## Add Update (Phase 47: auto-assign + close with update)
 
 ```text
-POST /api/tickets/:id/updates
+POST /api/tickets/:id/updates   { updateType, …, handoverToUserId?, closeTicket? }
   → auth + authorize(Update ticket, e)
-  → ticket lookup
-  → assertTicketAssigned (assignee_id required)
-  → assertCanAddUpdate (Admin OR assignee_id === me)
-  → Zod body (visitedBy required)
-  → assertValidVisitedBy (Active Technician|Engineer)
-  → parts/cost transaction (no auto-claim)
+  → ticket lookup (404 NO_TICKETS_AVAILABLE) → 409 CLOSED
+  → resolveUpdateAssignee
+       assigned            → assertTicketAccess + assertCanAddUpdate (Admin/PM, assignee, raiser)
+       unassigned + field  → claim for the updater (QR: need not be the raiser)
+       unassigned + Admin/PM → handoverToUserId required + assertEligibleAssignee
+                               (missing → 409 TICKET_NOT_ASSIGNED)
+       unassigned + other  → assertTicketAccess → 409 TICKET_NOT_ASSIGNED
+  → closeTicket=true → Update ticket x + assertHolder(effective assignee)
+  → withTransaction
+       SELECT … FOR UPDATE, re-check status/assignee (lost race → 409 TICKET_ALREADY_ASSIGNED)
+       claim: tickets.assignee_id + ticket_assignments (from NULL)
+       one visit event (status_label 'Closed' + meta.closedTicket when closing)
+       parts/cost, status (Closed + closed_at when closeTicket)
+       handover (assigned tickets only, Admin/PM/Control room)
+  → after commit: ticket.assigned notification on claim; ticket.reassigned on handover
 ```
-
-Add Update does **not** use list visibility (`assertTicketAccess`). Authorization is `Update ticket` `e` plus Admin-or-assignee so QR user B gets `NOT_ASSIGNED_USER` instead of a generic road/visibility Forbidden.
 
 | Code | When |
 |------|------|
-| `TICKET_NOT_ASSIGNED` | `assignee_id` is null |
-| `NOT_ASSIGNED_USER` | Caller is not Admin and not assignee (includes QR user B) |
-| `VALIDATION_ERROR` | Missing/invalid `visitedBy` (`details[].field`) |
+| `TICKET_NOT_ASSIGNED` | Unassigned ticket and caller is Admin/PM without `handoverToUserId`, or a non-field role |
+| `TICKET_ALREADY_ASSIGNED` | Another user claimed the ticket between the checks and the row lock |
+| `NOT_HOLDER` | Assigned ticket and caller is neither Admin/PM, assignee nor raiser; or `closeTicket` by a non-holder |
+| `FORBIDDEN` | `closeTicket` without `Update ticket` `x`; field role handing over while claiming; no ticket access |
 
-Helper: [`src/lib/visited-by.ts`](src/lib/visited-by.ts). Engineer role: migration `013_engineer_role.sql`.
+Response adds `assigneeId`, `autoAssigned`, `closed`. Field roles: `FIELD_ROLES` in [`src/lib/permissions.ts`](src/lib/permissions.ts). Engineer role: migration `013_engineer_role.sql`; Electrician: `022_electrician_role.sql`.
 
 ## Work report (Phase 31)
 
 ```text
 GET /api/reports/work
   → authorize(Work report, v)
-  → ticket_events by Technician|Engineer actors
+  → ticket_events by FIELD_ROLES actors (Technician|Engineer|Electrician)
   → visibility filter
   → person / road (rd.name) / date filters
   → people[] + view-shaped tickets tuples
@@ -439,10 +451,10 @@ Two separate role lists exist, because the two events have different business ru
 | List | Roles | Used by |
 |---|---|---|
 | `NEW_TICKET_NOTIFICATION_ROLES` | Admin, Project manager, Control room | `ticket.raised` **fan-out** (unchanged) |
-| `NOTIFICATION_DELIVERY_ROLES` | the above **+ Technician, Engineer** | Web Push delivery + frontend bell eligibility |
+| `NOTIFICATION_DELIVERY_ROLES` | the above **+ `FIELD_ROLES`** (Technician, Engineer, Electrician) | Web Push delivery + frontend bell eligibility |
 
 Field roles are added to the delivery list because they are the only other roles that `assertEligibleAssignee` can assign a ticket to, so an assignee is never un-alertable. They still do **not** receive `ticket.raised` alerts. `Site attendant` and `AMC officer` are excluded from both, because they are never eligible assignees.
 
-### No silent auto-claim
+### Assignment on update (Phase 47, supersedes "no silent auto-claim")
 
-An unassigned ticket is rejected for Add Update with `409 / TICKET_NOT_ASSIGNED` for **every** role, including Admin/PM, so a ticket must be routed by an assigner before it can be worked. The previous auto-claim (silently setting `assignee_id` to the updater) was removed.
+An Add Update on an unassigned ticket assigns it inside the update transaction: a field role (`FIELD_ROLES`) claims it for themselves, and Admin/PM must name the assignee via `handoverToUserId` (otherwise `409 TICKET_NOT_ASSIGNED`). The claim is written to `ticket_assignments` (`Auto-assigned on update` / `Assigned on update`) and, after commit, fires the same `ticket.assigned` notification as a first assign, keyed on the update's event id. An already-assigned ticket is never reassigned by an update except through an explicit Admin/PM/Control room handover.

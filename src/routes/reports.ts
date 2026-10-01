@@ -5,6 +5,7 @@ import { ok } from '../lib/respond.js'
 import { query } from '../db/pool.js'
 import { authorize, hasPermission, requireAuth, type AuthedRequest } from '../middleware/auth.js'
 import { appendTicketVisibilitySql } from '../lib/ticket-access.js'
+import { FIELD_ROLES } from '../lib/permissions.js'
 import {
   buildWorkReportPeople,
   daysInPeriodInclusive,
@@ -29,11 +30,11 @@ type WorkFilters = z.infer<typeof filtersSchema>
 
 function buildWorkWhere(filters: WorkFilters, user: AuthedRequest['user']) {
   const { from, to } = resolveWorkReportRange(filters.view as WorkReportView, filters.from, filters.to)
-  const params: unknown[] = [from.toISOString(), to.toISOString()]
+  const params: unknown[] = [from.toISOString(), to.toISOString(), [...FIELD_ROLES]]
   const where: string[] = [
     `e.created_at >= $1`,
     `e.created_at < ($2::timestamptz + INTERVAL '1 day')`,
-    `r.name IN ('Technician', 'Engineer')`,
+    `r.name = ANY($3::text[])`,
   ]
   if (filters.person && filters.person !== 'Everyone') {
     params.push(filters.person)

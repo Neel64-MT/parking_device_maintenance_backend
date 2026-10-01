@@ -4,6 +4,7 @@ import { query, withTransaction } from '../db/pool.js'
 import { ApiError } from './api-error.js'
 import { deviceDisplayId } from './device-ref.js'
 import { paginationMeta, type AllowedPageLimit } from './pagination.js'
+import { FIELD_ROLES } from './permissions.js'
 import type {
   AppNotification,
   PushConfig,
@@ -21,14 +22,13 @@ export const NEW_TICKET_NOTIFICATION_ROLES = [
  * Roles that may hold a delivered notification (in-app + browser push).
  * The raised-alert list above is a business rule and stays narrow; this list
  * adds the roles that can actually be made a ticket assignee
- * (see ASSIGNABLE_ROLES in lib/ticket-access.ts: Technician, Engineer)
+ * (FIELD_ROLES in lib/permissions.ts: Technician, Engineer, Electrician)
  * so an assignee is never un-alertable. Site attendant / AMC officer are excluded
  * because they are never eligible assignees.
  */
 export const NOTIFICATION_DELIVERY_ROLES = [
   ...NEW_TICKET_NOTIFICATION_ROLES,
-  'Technician',
-  'Engineer',
+  ...FIELD_ROLES,
 ] as const
 
 export type AssignmentNotificationKind = 'assigned' | 'reassigned'

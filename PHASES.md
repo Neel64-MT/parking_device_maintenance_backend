@@ -560,3 +560,45 @@
 `npm run test:smoke:users` - hard delete removes the row (not deactivated), the account leaves every status-filtered list, a second delete is `404`, an already-Inactive account can be hard-deleted, and the last-Active-Admin guard still holds.
 
 **Done when:** `npm run build`, `npm run test:smoke:roles` and `npm run test:smoke:users` pass, and the frontend `npm run lint` / `npm run build` pass.
+
+## Phase 47 — Field roles raise, auto-assign on update, close with update
+
+**Status:** Complete
+
+**Objective:** Technician, Engineer and a new Electrician role can raise tickets; assignment stays optional at raise; an Add Update on an unassigned ticket assigns it; an update can explicitly close the ticket. Supersedes the Phase 42 "no silent auto-claim" rule.
+
+**Roles:**
+- New `Electrician` role (migration `022_electrician_role.sql`), same permission matrix as Engineer; `DEFAULT_ROLE_PERMS` + seed user (`Vikram Parmar`, 9824077315).
+- `FIELD_ROLES = ['Technician', 'Engineer', 'Electrician']` in `src/lib/permissions.ts` is now the single field-role list, reused by `ASSIGNABLE_ROLES`, `NOTIFICATION_DELIVERY_ROLES`, `assertRoadAccessUnlessFieldWork`, the work report person filter, `authorizeIssueSubUpdate` and `assertValidVisitedBy`.
+- Migration `023_field_roles_raise_ticket.sql` restores `Raise ticket` `v`+`c` for the three field roles (the local DB had drifted to no Technician raise permission). Other flags are untouched; the matrix remains editable.
+
+**Raise (`POST /api/tickets`):** `assigneeId` was already optional (unassigned → `Open`). When given it now requires the same gates as `POST /:id/assign` — `All tickets` `a` + `assertCanAssignTickets` (`403` otherwise, so field roles raise unassigned) — and passes `assertEligibleAssignee` (`400 INVALID_ASSIGNEE` otherwise).
+
+**Add Update (`POST /api/tickets/:id/updates`) — `resolveUpdateAssignee`:**
+- Assigned ticket → unchanged `assertTicketAccess` + `assertCanAddUpdate`; the assignee is never changed automatically.
+- Unassigned + field role → the updater claims it (need not be the raiser; this is what makes the QR flow work). Trail row `Auto-assigned on update`.
+- Unassigned + Admin/PM → must send `handoverToUserId` (eligible assignee); otherwise `409 TICKET_NOT_ASSIGNED` "Select an assignee to update an unassigned ticket". Trail row `Assigned on update`.
+- Unassigned + any other role → existing access check then `409 TICKET_NOT_ASSIGNED`.
+- A field role sending `handoverToUserId` for someone else while claiming → `403` (cannot assign).
+
+**Close with update:** optional `closeTicket: boolean` (default `false`). `true` requires `Update ticket` `x` and the holder check on the effective assignee (after any claim). The single visit event gets `status_label = 'Closed'` + `meta.closedTicket = true`; the ticket gets `status = 'Closed'`, `closed_at = NOW()`. One POST still creates exactly one event. Resolve stays the `Site visit — resolved` update type (no new status) and closes only with `closeTicket: true`.
+
+**Concurrency / transaction:** inside the existing `withTransaction`, `SELECT … FOR UPDATE` locks the ticket and re-checks status + assignee. A lost race → `409 TICKET_ALREADY_ASSIGNED`, rolled back. Claim, event, parts, cost and close commit together.
+
+**Notifications:** a field user's **self-assign on update is silent** — no `ticket.assigned` row, so no Web Push and no frontend sound. A claim only notifies when the saver is an assigner (`canAssignTickets`: Admin / Project manager / Control room — i.e. the Admin/PM holder pick), via the existing `createTicketAssignmentNotification` (`ticket.assigned`, keyed on the update event) after commit, wrapped in try/catch. Assign / Reassign, raise-with-assignee and handover notifications are unchanged (each already requires an assigner).
+
+**Other:** `PATCH /:id/updates/:eventId/photos` accepts photos on the author's own closing event after the ticket closed (upload-after-save). Work report day rows label an event `Closed` when `status_label = 'Closed'`.
+
+**Response additions:** `assigneeId`, `autoAssigned`, `closed` (existing fields unchanged).
+
+**Files:** `src/routes/tickets.ts`, `src/lib/permissions.ts`, `src/lib/ticket-access.ts`, `src/lib/notifications.ts`, `src/lib/visited-by.ts`, `src/lib/work-report.ts`, `src/middleware/auth.ts`, `src/routes/issues.ts`, `src/routes/reports.ts`, `src/db/seed.ts`, migrations `022`/`023`, `scripts/smoke-ticket-update-flow.ts`, `scripts/smoke-writes.ts`, `package.json` (`test:smoke:ticket-flow`).
+
+**Testing:** `npm run test:smoke:ticket-flow` — A/B/C each field role raises; D unassigned raise; E raise with assignee + ineligible rejected + field role raising with `assigneeId` → `403` (no ticket created); F non-raiser field user auto-assigned (assignee + event actor = updater, one trail row); G assigned ticket keeps assignee; H foreign field user 403, no reassign; I/K `closeTicket` false/omitted (even resolved) stays open; J `closeTicket: true` closes with one event in `workHistory`, photo attach still works, further updates 409; L auto-assign + close; M two parallel updates → one winner, one assignee, one trail row; N scan `openTicketId` → update auto-assigns; O no `ticket.assigned` for a field self-assign, one for raise-with-assignee and one for the Admin pick on update; Admin pick 409 without / success with `handoverToUserId`; raiser-not-holder close 403 `NOT_HOLDER`; field handover while claiming 403.
+
+**Verification:** on a fresh isolated PGlite DB (`db:setup`), `test:smoke:ticket-flow`, `test:smoke:writes`, `test:smoke:close`, `test:smoke:roles`, `test:smoke:users` pass. `test:smoke` fails later at its pre-existing device-sync assertion (the script itself sets Technician `Device list` create to false, then expects Technician device sync to be authorized) — unrelated to this phase. On the local Postgres DB `test:smoke:writes` still fails at the pre-existing Inactive Control room login.
+
+**Frontend (done, frontend Phase 47):**
+- `pages/tickets/TicketUpdate.jsx` `gateAssigneeUpdate` allows an unassigned ticket for field roles (backend assigns it) and Admin/PM (holder picker).
+- `components/tickets/TicketAddUpdateForm.jsx`: **Close Ticket** Yes/No, default **No**, sends `closeTicket: true` only on Yes; "closes only when resolved" copy replaced; `pickAssignee` → `handoverToUserId`; `409 TICKET_ALREADY_ASSIGNED` → toast + reload.
+- `pages/tickets/TicketDetail.jsx`: Add update + **Resolve** (same form, `Site visit — resolved`) on unassigned tickets for field roles / Admin-PM.
+- `pages/tickets/TicketRaise.jsx`: optional **Assign to** only for All tickets `a` (matches the raise guard above).

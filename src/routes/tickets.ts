@@ -7,10 +7,20 @@ import {
   assertRoadAccess,
   assertRoadAccessUnlessFieldWork,
   authorize,
+  hasPermission,
   requireAuth,
   type AuthedRequest,
 } from '../middleware/auth.js'
-import { appendTicketVisibilitySql, assertCanAssignTickets, assertTicketAccess, ASSIGNABLE_ROLES, isTicketPrivilegedRole } from '../lib/ticket-access.js'
+import {
+  appendTicketVisibilitySql,
+  assertCanAssignTickets,
+  assertTicketAccess,
+  assertTicketViewAccess,
+  ASSIGNABLE_ROLES,
+  canAssignTickets,
+  isFieldRole,
+  isTicketPrivilegedRole,
+} from '../lib/ticket-access.js'
 import { nextPublicId } from '../lib/ids.js'
 import { deviceDisplayId, deviceLookupWhere } from '../lib/device-ref.js'
 import { limitSchema, pageSchema, paginationMeta, sqlOffset } from '../lib/pagination.js'
@@ -352,6 +362,15 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
         { ticketId: recent.rows[0].public_id },
       )
     }
+    if (body.assigneeId) {
+      // Assignment stays optional at raise; choosing an assignee is an assign action
+      // (same gates as POST /:ticketId/assign), so field roles can only raise unassigned.
+      if (!hasPermission(req.user!, 'All tickets', 'a')) {
+        throw new ApiError(403, 'Forbidden', 'FORBIDDEN')
+      }
+      assertCanAssignTickets(req.user!)
+      await assertEligibleAssignee(body.assigneeId)
+    }
     const publicId = await nextPublicId('TK', 4)
     const status = body.assigneeId ? 'Under repair' : 'Open'
     let ticketUuid: string
@@ -485,7 +504,7 @@ router.get('/:ticketId', authorize('All tickets', 'v'), async (req: AuthedReques
     )
     if (!result.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
     const t = result.rows[0]
-    assertTicketAccess(req.user!, t)
+    assertTicketViewAccess(req.user!, t)
 
     const ticketIssueLists = await loadTicketIssues(t.id)
 
@@ -633,22 +652,8 @@ function assertHolder(req: AuthedRequest, assigneeId: string | null) {
 }
 
 /**
- * Add Update requires a ticket that is already assigned (Phase 30 / DESIGN step 3).
- * An unassigned ticket must be routed by an assigner first — this applies to every
- * role including Admin/PM. There is deliberately NO auto-claim here: silently
- * assigning the ticket to whoever posted the first update hides the routing step
- * and hides it from the control room.
- */
-function assertTicketAssigned(ticket: { assignee_id: string | null }) {
-  if (!ticket.assignee_id) {
-    throw new ApiError(409, 'Ticket not assigned', 'TICKET_NOT_ASSIGNED')
-  }
-}
-
-/**
- * Site updates: authorize('Update ticket','e') already ran.
- * assertTicketAssigned has already rejected unassigned tickets, so the holder
- * check below can assume there is a real assignee.
+ * Site updates on an assigned ticket: authorize('Update ticket','e') already ran.
+ * Only reached when the ticket has a real assignee (see resolveUpdateAssignee).
  */
 function assertCanAddUpdate(
   req: AuthedRequest,
@@ -658,6 +663,49 @@ function assertCanAddUpdate(
   if (ticket.assignee_id === req.user!.id) return
   if (ticket.raised_by_user_id === req.user!.id) return
   throw new ApiError(403, 'Only the ticket holder can perform this action', 'NOT_HOLDER')
+}
+
+type UpdateAssignee = {
+  /** Assignee once this update is saved. */
+  assigneeId: string
+  /** Set when the update must first assign an unassigned ticket. */
+  claim: { reason: string } | null
+}
+
+/**
+ * Who holds the ticket after an Add Update.
+ * - Assigned ticket: existing access + holder rules; the assignee is never changed here.
+ * - Unassigned + field role: the updater claims it (QR flow — no need to have raised it).
+ * - Unassigned + Admin/PM: must pick an eligible assignee (`handoverToUserId`) in the same request.
+ * - Unassigned + any other role: existing access check, then 409 TICKET_NOT_ASSIGNED.
+ */
+async function resolveUpdateAssignee(
+  req: AuthedRequest,
+  ticket: { road_id: string; assignee_id: string | null; raised_by_user_id: string | null },
+  pickedAssigneeId: string | null,
+): Promise<UpdateAssignee> {
+  const user = req.user!
+  if (ticket.assignee_id) {
+    assertTicketAccess(user, ticket)
+    assertCanAddUpdate(req, ticket)
+    return { assigneeId: ticket.assignee_id, claim: null }
+  }
+  if (isFieldRole(user)) {
+    return { assigneeId: user.id, claim: { reason: 'Auto-assigned on update' } }
+  }
+  if (isTicketPrivilegedRole(user)) {
+    if (!pickedAssigneeId) {
+      throw new ApiError(
+        409,
+        'Select an assignee to update an unassigned ticket',
+        'TICKET_NOT_ASSIGNED',
+      )
+    }
+    await assertEligibleAssignee(pickedAssigneeId)
+    return { assigneeId: pickedAssigneeId, claim: { reason: 'Assigned on update' } }
+  }
+  assertTicketAccess(user, ticket)
+  throw new ApiError(409, 'Ticket not assigned', 'TICKET_NOT_ASSIGNED')
 }
 
 router.post('/:ticketId/assign', authorize('All tickets', 'a'), async (req: AuthedRequest, res) => {
@@ -789,7 +837,10 @@ const updateSchema = z.object({
   cost: z.coerce.number().nonnegative().default(0),
   parts: z.array(z.string().uuid()).default([]),
   photos: z.array(z.string()).default([]),
+  /** Assigned ticket: hand over (Admin/PM/Control room). Unassigned ticket: Admin/PM's pick. */
   handoverToUserId: z.string().uuid().nullable().optional(),
+  /** Close the ticket with this update. Only an explicit `true` closes; omitted = keep open. */
+  closeTicket: z.boolean().default(false),
 })
 
 router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: AuthedRequest, res) => {
@@ -806,9 +857,18 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
     }
     const t = ticket.rows[0]
     if (t.status === 'Closed') throw new ApiError(409, 'Ticket is closed', 'CLOSED')
-    assertTicketAccess(req.user!, t)
-    assertTicketAssigned(t)
-    assertCanAddUpdate(req, t)
+    const assignee = await resolveUpdateAssignee(req, t, body.handoverToUserId || null)
+    // On an unassigned ticket handoverToUserId was consumed as the Admin/PM pick above.
+    const handoverToUserId = assignee.claim ? null : body.handoverToUserId || null
+    if (assignee.claim && body.handoverToUserId && body.handoverToUserId !== assignee.assigneeId) {
+      assertCanAssignTickets(req.user!)
+    }
+    if (body.closeTicket) {
+      if (!hasPermission(req.user!, 'Update ticket', 'x')) {
+        throw new ApiError(403, 'Forbidden', 'FORBIDDEN')
+      }
+      assertHolder(req, assignee.assigneeId)
+    }
 
     const foundInputs = normalizeIssueList(body)
     const foundIssues = foundInputs.length ? await resolveIssuePairs(foundInputs) : null
@@ -819,10 +879,49 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
 
     const isResolved = isResolvedUpdate(body.updateType)
     const eventType = updateEventType(body.updateType)
-    // A waiting-spare visit holds the ticket; every other visit returns it to Under repair.
-    const newStatus = body.updateType === 'Waiting for spare' ? 'Waiting for spare' : 'Under repair'
+    // Close only on an explicit closeTicket. Otherwise a waiting-spare visit holds the
+    // ticket and every other visit (including "resolved") returns it to Under repair.
+    const newStatus = body.closeTicket
+      ? 'Closed'
+      : body.updateType === 'Waiting for spare'
+        ? 'Waiting for spare'
+        : 'Under repair'
 
-    const eventId = await withTransaction(async (client) => {
+    const { eventId, claimed } = await withTransaction(async (client) => {
+      // Row lock serialises concurrent updates on this ticket; re-check what the
+      // pre-transaction gates saw so two users cannot both claim an unassigned ticket.
+      const locked = await client.query<{ status: string; assignee_id: string | null }>(
+        `SELECT status, assignee_id FROM tickets WHERE id = $1 FOR UPDATE`,
+        [t.id],
+      )
+      const current = locked.rows[0]
+      if (!current || current.status === 'Closed') {
+        throw new ApiError(409, 'Ticket is closed', 'CLOSED')
+      }
+      let claim = assignee.claim
+      if (current.assignee_id !== t.assignee_id) {
+        // A retried claim that already committed for the same user is not a conflict.
+        if (!claim || current.assignee_id !== assignee.assigneeId) {
+          throw new ApiError(
+            409,
+            'Ticket was just assigned to another user',
+            'TICKET_ALREADY_ASSIGNED',
+          )
+        }
+        claim = null
+      }
+      if (claim) {
+        await client.query(
+          `UPDATE tickets SET assignee_id = $2, updated_at = NOW() WHERE id = $1`,
+          [t.id, assignee.assigneeId],
+        )
+        await client.query(
+          `INSERT INTO ticket_assignments (ticket_id, from_user_id, to_user_id, reason)
+           VALUES ($1,NULL,$2,$3)`,
+          [t.id, assignee.assigneeId, claim.reason],
+        )
+      }
+
       if (foundIssues && primaryFound) {
         // One update request must create exactly one timeline entry. The visit event inserted
         // below already stores the on-site issue, so no extra "reclassified" event is written.
@@ -836,14 +935,15 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
       const inserted = await client.query(
         `INSERT INTO ticket_events (
            ticket_id, event_type, title, body, status_label, actor_user_id,
-           category_id, subcategory_id, cost, next_visit_at, not_fixed_reason, work_done, photos, parts
-         ) VALUES ($1,$2,$3,$4,'Still open',$5,$6,$7,$8,$9,$10,$11,$12,$13)
+           category_id, subcategory_id, cost, next_visit_at, not_fixed_reason, work_done, photos, parts, meta
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
          RETURNING id`,
         [
           t.id,
           eventType,
           body.updateType,
           body.workDone || body.updateType,
+          body.closeTicket ? 'Closed' : 'Still open',
           req.user!.id,
           primaryFound?.categoryId || body.categoryId || null,
           primaryFound?.subcategoryId || body.subCategoryId || null,
@@ -853,44 +953,69 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
           body.workDone || null,
           JSON.stringify(body.photos),
           JSON.stringify(snapshots),
+          JSON.stringify(body.closeTicket ? { closedTicket: true } : {}),
         ],
       )
       const id = inserted.rows[0].id as string
       await insertEventParts(client, id, snapshots)
 
       await client.query(
-        `UPDATE tickets SET status = $2, total_cost = total_cost + $3, updated_at = NOW() WHERE id = $1`,
+        `UPDATE tickets SET
+           status = $2,
+           total_cost = total_cost + $3,
+           closed_at = CASE WHEN $2 = 'Closed' THEN NOW() ELSE closed_at END,
+           updated_at = NOW()
+         WHERE id = $1`,
         [t.id, newStatus, eventCost],
       )
 
-      if (body.handoverToUserId) {
+      if (handoverToUserId) {
         assertCanAssignTickets(req.user!)
         await client.query(`UPDATE tickets SET assignee_id = $2 WHERE id = $1`, [
           t.id,
-          body.handoverToUserId,
+          handoverToUserId,
         ])
         await client.query(
           `INSERT INTO ticket_assignments (ticket_id, from_user_id, to_user_id, reason)
            VALUES ($1,$2,$3,'Handover on update')`,
-          [t.id, req.user!.id, body.handoverToUserId],
+          [t.id, req.user!.id, handoverToUserId],
         )
       }
-      // No auto-claim: assertTicketAssigned already rejected unassigned tickets,
-      // so an unassigned ticket can never be silently taken over by the updater.
 
-      return id
+      return { eventId: id, claimed: Boolean(claim) }
     })
+
+    // A claim assigns the ticket for the first time. Only an assigner's pick (Admin/PM
+    // choosing a holder) notifies — a field user's self-assign on update is silent
+    // (no notification, push, or sound). Keyed on this update's event so a retried
+    // update cannot double-notify.
+    if (claimed && canAssignTickets(req.user!)) {
+      try {
+        await createTicketAssignmentNotification({
+          ticketId: t.id,
+          toUserId: assignee.assigneeId,
+          kind: 'assigned',
+          assignedByUserId: req.user!.id,
+          eventId,
+        })
+      } catch (notificationError) {
+        console.error(
+          `[notifications] failed after assignment on update of ${t.public_id}:`,
+          notificationError,
+        )
+      }
+    }
 
     // Handover moves the ticket to a new holder — notify them once the write commits.
     // Wrapped so a notification failure never fails the update.
-    if (body.handoverToUserId) {
+    if (handoverToUserId) {
       try {
         // The handover rides on this update's own ticket_event, so that event id is
         // the notification's identity: a retried update cannot double-notify, while a
         // later update that hands the ticket over again is a distinct event and does.
         await createTicketAssignmentNotification({
           ticketId: t.id,
-          toUserId: body.handoverToUserId,
+          toUserId: handoverToUserId,
           kind: 'reassigned',
           assignedByUserId: req.user!.id,
           eventId,
@@ -914,8 +1039,11 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
         labourCost: body.cost,
         parts: snapshots,
         resolvedReady: isResolved,
+        assigneeId: handoverToUserId || assignee.assigneeId,
+        autoAssigned: claimed,
+        closed: body.closeTicket,
       },
-      'Update saved',
+      body.closeTicket ? 'Update saved and ticket closed' : 'Update saved',
     )
   } catch (error) {
     return handleApiError(res, error)
@@ -987,15 +1115,21 @@ router.patch(
         throw new ApiError(404, 'No tickets available', 'NO_TICKETS_AVAILABLE')
       }
       const t = ticket.rows[0]
-      if (t.status === 'Closed') throw new ApiError(409, 'Ticket is closed', 'CLOSED')
       assertTicketAccess(req.user!, t)
       assertCanAddUpdate(req, t)
 
       const event = await query(
-        `SELECT id, photos FROM ticket_events WHERE id = $1 AND ticket_id = $2`,
+        `SELECT id, photos, status_label, actor_user_id FROM ticket_events WHERE id = $1 AND ticket_id = $2`,
         [req.params.eventId, t.id],
       )
       if (!event.rowCount) throw new ApiError(404, 'Update not found', 'NOT_FOUND')
+      // Photos upload after the update saves, so the author of a close-with-update
+      // may still attach to that closing event once the ticket is Closed.
+      const isOwnClosingEvent =
+        event.rows[0].status_label === 'Closed' && event.rows[0].actor_user_id === req.user!.id
+      if (t.status === 'Closed' && !isOwnClosingEvent) {
+        throw new ApiError(409, 'Ticket is closed', 'CLOSED')
+      }
 
       const existing = Array.isArray(event.rows[0].photos) ? event.rows[0].photos : []
       const photos = [...existing, ...body.photos]
