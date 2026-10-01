@@ -54,7 +54,7 @@ async function roadRows(filters: z.infer<typeof listSchema>) {
   const sql = `
     SELECT r.*,
       (SELECT COUNT(*)::int FROM devices d WHERE d.road_id = r.id) AS devices,
-      (SELECT COUNT(*)::int FROM tickets t
+      (SELECT COUNT(DISTINCT t.device_id)::int FROM tickets t
          JOIN devices d ON d.id = t.device_id
          WHERE d.road_id = r.id AND t.status NOT IN ('Closed')) AS down
     FROM roads r

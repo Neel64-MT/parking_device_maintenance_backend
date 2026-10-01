@@ -797,4 +797,5 @@ curl -X POST http://localhost:5000/api/users \
 - Use **PostgreSQL** via the `pg` driver with thin repository functions — do not add Prisma/Nest unless explicitly approved.
 - Adapt `handleApiError` / `withLogger` for Express (`Request`/`Response`/`NextFunction`); return JSON via `res.status(...).json(...)`.
 - Prefer `.env` / `.env.local` for secrets; never commit real credentials.
+- List tabs and tiles must share one SQL predicate per bucket (e.g. `NOT_ATTENDED_SQL`, `UNDER_REPAIR_TAB_SQL` in `routes/tickets.ts`, Phase 52) and the row's `tab` field must use the same rule; compute tab counts and tiles in one aggregate with `COUNT(*) FILTER (WHERE …)`, and validate new list params with `z.enum` so unknown values return `400`.
 

@@ -10,6 +10,7 @@ export type WorkReportEventRow = {
   ticket_public_id: string
   ticket_status: string
   event_type: string
+  status_label?: string | null
   cost: string | number | null
   work_done: string | null
   title: string | null
@@ -148,7 +149,7 @@ function buildDayTickets(events: WorkReportEventRow[]): string[][] {
     `${e.road_name} · ${e.slot_number}`,
     e.issue_name || '—',
     e.work_done || e.title || e.body || '',
-    e.event_type === 'closed' ? 'Closed' : 'In progress',
+    e.event_type === 'closed' || e.status_label === 'Closed' ? 'Closed' : 'In progress',
   ])
 }
 

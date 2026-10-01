@@ -14,7 +14,12 @@
     "test:smoke:users": "tsx scripts/smoke-users.ts",
     "test:smoke:roles": "tsx scripts/smoke-roles.ts",
     "test:smoke:writes": "tsx scripts/smoke-writes.ts",
-    "test:smoke:close": "tsx scripts/smoke-close.ts"
+    "test:smoke:close": "tsx scripts/smoke-close.ts",
+    "test:smoke:ticket-flow": "tsx scripts/smoke-ticket-update-flow.ts",
+    "test:smoke:issue-resolution": "tsx scripts/smoke-issue-resolution.ts",
+    "test:smoke:multi-ticket": "tsx scripts/smoke-multi-ticket-raise.ts",
+    "test:smoke:issue-groups": "tsx scripts/smoke-issue-groups.ts",
+    "test:smoke:no-assignment": "tsx scripts/smoke-no-assignment.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",

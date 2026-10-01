@@ -3,7 +3,7 @@ import { handleApiError } from '../lib/api-error.js'
 import { ok } from '../lib/respond.js'
 import { query } from '../db/pool.js'
 import { authorize, requireAuth } from '../middleware/auth.js'
-import { ASSIGNABLE_ROLES } from '../lib/ticket-access.js'
+import { FIELD_ROLES } from '../lib/permissions.js'
 
 const router = Router()
 
@@ -21,6 +21,7 @@ router.get('/roads', authorize('Device list', 'v'), async (_req, res) => {
   }
 })
 
+/** Active field staff — Work report "Person" filter and Add Update "Visited by". */
 router.get('/technicians', authorize('All tickets', 'v'), async (_req, res) => {
   try {
     const result = await query(
@@ -34,7 +35,7 @@ router.get('/technicians', authorize('All tickets', 'v'), async (_req, res) => {
          AND r.name = ANY($1::text[])
        GROUP BY u.id, u.full_name, r.name
        ORDER BY u.full_name`,
-      [ASSIGNABLE_ROLES],
+      [[...FIELD_ROLES]],
     )
     return ok(
       res,
