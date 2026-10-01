@@ -272,6 +272,33 @@ Defaults: `page=1`, `limit=10`. Allowed limits: `10|25|50|100`.
 
 Routes: [`src/routes/tickets.ts`](src/routes/tickets.ts), [`src/routes/devices.ts`](src/routes/devices.ts). Export CSVs stay full-set (unpaginated).
 
+## Slot View (Phase 53)
+
+```text
+GET /api/slot-view?q&page&limit          (authorize Slot View v)
+  → FROM tickets t JOIN devices d JOIN roads r [WHERE q]
+  → COUNT(DISTINCT t.device_id)              → pagination.total
+  → GROUP BY d.id, r.name, COUNT(t.id)       → ticketCount (tickets, not issues)
+  → slotLabelOrderBy('d', { natural: true }) → LIMIT/OFFSET
+
+GET /api/slot-view/:slotId               (authorize Slot View v)
+  → devices WHERE deviceLookupWhere (404 NOT_FOUND) + COUNT(tickets)
+  → loadOpenDeviceTickets(device.id)         → Open reported issues of non-Closed tickets
+  → dedupe by subCategoryId, keep ticket refs → unresolvedIssues
+
+GET /api/tickets?device=:slotId          (existing list, All tickets v, device filter, no tab = all statuses)
+  → Slot View "Tickets" section
+```
+
+| Piece | Location |
+|-------|----------|
+| Router | [`src/routes/slot-view.ts`](src/routes/slot-view.ts) mounted at `/api/slot-view` in `src/app.ts` |
+| Slot Label order (plain / natural) | `slotLabelOrderBy` in [`src/lib/device-ref.ts`](src/lib/device-ref.ts) |
+| Open issues per device | `loadOpenDeviceTickets` in [`src/lib/ticket-issues.ts`](src/lib/ticket-issues.ts) |
+| Slot tickets | `device` query param on `GET /api/tickets` ([`src/routes/tickets.ts`](src/routes/tickets.ts)) |
+
+No schema change: tickets link to slots only through `tickets.device_id`; existing indexes cover the grouping and the Open-issue lookup.
+
 ## Parts master & visit cost
 
 ```text

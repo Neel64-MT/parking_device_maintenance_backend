@@ -12,7 +12,7 @@ import {
   type AuthedRequest,
 } from '../middleware/auth.js'
 import { nextPublicId, qrFromDeviceId } from '../lib/ids.js'
-import { deviceDisplayId, deviceLookupWhere } from '../lib/device-ref.js'
+import { deviceDisplayId, deviceLookupWhere, slotLabelOrderBy } from '../lib/device-ref.js'
 import { deriveDeviceStatus, openTicketLateralSql, statusTone } from '../lib/device-status.js'
 import { loadOpenDeviceTickets, type OpenDeviceTicket } from '../lib/ticket-issues.js'
 import { limitSchema, pageSchema, paginationMeta, sqlOffset } from '../lib/pagination.js'
@@ -276,13 +276,8 @@ function buildDeviceListBase(filters: z.infer<typeof listSchema>, roadIds?: stri
   }
 }
 
-/**
- * Device list / export order: Slot Label (`devices.slot_number`) ascending.
- * Sorted in SQL so the order holds across every page (LIMIT/OFFSET), not just
- * within a page. Blank labels go last, `public_id` is the stable tie-break so
- * paginating never repeats or skips a row when two labels are equal.
- */
-const DEVICE_LIST_ORDER_BY = `ORDER BY (slot_number = ''), slot_number, public_id`
+/** Device list / export order: Slot Label ascending (see `slotLabelOrderBy`). */
+const DEVICE_LIST_ORDER_BY = slotLabelOrderBy()
 
 async function deviceListQuery(
   filters: z.infer<typeof listSchema>,

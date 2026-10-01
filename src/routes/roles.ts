@@ -148,7 +148,8 @@ router.patch('/:id/permissions', authorize('Roles & permissions', 'e'), async (r
 })
 
 /**
- * Delete a role. Requires Roles & permissions `d` (Admin).
+ * Delete a role. Requires Roles & permissions `d` (Admin). The Admin role itself is
+ * never deletable (`403 ADMIN_ROLE_PROTECTED`), even with no users on it.
  * A role can only be removed while no *live* account is assigned to it. Inactive
  * accounts are deliberately ignored: they cannot sign in, and they must not keep a
  * role alive forever. The users→roles FK is `ON DELETE SET NULL` (migration 021), so
@@ -160,8 +161,11 @@ router.delete('/:id', authorize('Roles & permissions', 'd'), async (req, res) =>
   try {
     const roleId = req.params.id
 
-    const role = await query('SELECT id FROM roles WHERE id = $1', [roleId])
+    const role = await query<{ id: string; name: string }>('SELECT id, name FROM roles WHERE id = $1', [roleId])
     if (!role.rowCount) throw new ApiError(404, 'Role not found', 'NOT_FOUND')
+    if (role.rows[0].name === 'Admin') {
+      throw new ApiError(403, 'The Admin role cannot be deleted.', 'ADMIN_ROLE_PROTECTED')
+    }
 
     // Pending and Active accounts block; only Inactive ones are ignored.
     const assigned = await query<{ n: number }>(

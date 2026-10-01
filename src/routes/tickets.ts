@@ -89,6 +89,8 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
       status: z.string().optional(),
       category: z.string().optional(),
       age: z.enum(['over3']).optional(),
+      /** One slot (Slot View): public_id, UUID or Slot Id, resolved server-side. */
+      device: z.string().trim().min(1).optional(),
       page: pageSchema,
       limit: limitSchema,
     })
@@ -97,6 +99,10 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
     const baseWhere: string[] = []
 
     // Every ticket on every road is visible to anyone with All tickets `v`.
+    if (filters.device) {
+      baseParams.push(filters.device)
+      baseWhere.push(deviceLookupWhere('d', baseParams.length))
+    }
     if (filters.road && filters.road !== 'All roads') {
       baseParams.push(filters.road)
       baseWhere.push(`r.name = $${baseParams.length}`)

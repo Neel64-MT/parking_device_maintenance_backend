@@ -202,6 +202,18 @@ Supersedes the Phase 51 two-tab list (`open` = every non-Closed).
 
 **FRONTEND CHANGE REQUIRED (done, frontend Phase 52):** three tabs, clickable summary cards (tab + status + age), Under-Repair-only status filter, sliding tab transition.
 
+### Slot View (Phase 53)
+
+A slot-centric, read-only view of existing ticket data. Gate: new permission screen `Slot View` `v` (backend `authorize` on every route). Default: Admin and Project manager only; any role can be granted or revoked in Roles & permissions. Migration `026_slot_view_permission.sql` adds the row for every existing role.
+
+- `GET /api/slot-view?q=&page=&limit=` — only slots with at least one ticket (any status). Row `{ id, uuid, slotId, slotLabel, road, ticketCount }`. `ticketCount` counts tickets, never issues (a ticket with 3 issues = 1). Natural Slot Label ascending (`3-2` before `3-12`), SQL pagination (10/25/50/100), `q` on Slot Label / Slot Id / road.
+- `GET /api/slot-view/:slotId` (Slot Id, `PD-xxxx` or UUID; unknown → `404 NOT_FOUND`) — `{ slot, ticketCount, unresolvedIssues }`. Unresolved = reported Sub Issues whose persisted status is `Open`, one entry per Sub Issue (by `subCategoryId`) with the ticket(s) holding it. Resolved Sub Issues never appear; a Main Issue stays while any of its Sub Issues is Open.
+- `GET /api/tickets?device=<slot>` — the slot's tickets in the normal list shape; without `tab` every status (Closed included) is listed.
+- Slot ↔ ticket ↔ issue relationships are resolved server-side (`tickets.device_id`); nothing is taken from the client. The ticket section keeps the `All tickets` `v` gate of `GET /api/tickets`.
+- Smoke: `npm run test:smoke:slot-view`.
+
+**FRONTEND CHANGE REQUIRED (done, frontend Phase 53):** sidebar Slot View after Dashboard (gated on `Slot View` v), Slot list and Slot detail pages, Slot View row in the Roles & permissions matrix.
+
 ### Work report (Phase 31)
 
 - `GET /api/reports/work?view=&from=&to=&person=&road=` — people-centric payload matching WorkReport UI; actors Technician + Engineer; road filter on `roads.name`; `days` / `daysInPeriod` from calendar; `tickets` view-shaped (day / week|range / month).

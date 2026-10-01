@@ -798,4 +798,6 @@ curl -X POST http://localhost:5000/api/users \
 - Adapt `handleApiError` / `withLogger` for Express (`Request`/`Response`/`NextFunction`); return JSON via `res.status(...).json(...)`.
 - Prefer `.env` / `.env.local` for secrets; never commit real credentials.
 - List tabs and tiles must share one SQL predicate per bucket (e.g. `NOT_ATTENDED_SQL`, `UNDER_REPAIR_TAB_SQL` in `routes/tickets.ts`, Phase 52) and the row's `tab` field must use the same rule; compute tab counts and tiles in one aggregate with `COUNT(*) FILTER (WHERE …)`, and validate new list params with `z.enum` so unknown values return `400`.
+- Read-only aggregate views (e.g. Slot View, Phase 53): start from the table being counted (`FROM tickets … GROUP BY d.id`) so empty groups never appear, paginate the grouped rows in SQL (`COUNT(DISTINCT …)` for the total), and reuse existing lib loaders (`loadOpenDeviceTickets`) and list endpoints (`GET /api/tickets?device=`) instead of new queries.
+- A feature that only some roles should see gets its own permission screen (e.g. `Slot View`, Phase 53), not a role-name check: add it to `ScreenName`, `SCREENS` and every `DEFAULT_ROLE_PERMS` role, back-fill existing roles with a migration (`ON CONFLICT DO NOTHING`), and gate routes with `authorize(screen, 'v')` so Admins manage it in Roles & permissions.
 
