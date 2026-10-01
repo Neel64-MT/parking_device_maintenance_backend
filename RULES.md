@@ -20,7 +20,7 @@
 - `DELETE /api/users/:id` must reject self-deletion (`400` / `SELF_DELETE_FORBIDDEN` / "You cannot delete your own account."), an unknown user (`404`), and removing the last Active Admin (`409` / `LAST_ADMIN` via the shared `assertNotLastActiveAdmin`). An already-Inactive account **is** deletable — do not restore the old `ALREADY_INACTIVE` guard. Do not add a second Admin-vs-PM check — reuse `user-access.ts`.
 - `PATCH /api/users/:id` must reject an unknown `roleId` (`400` / `ROLE_NOT_FOUND`) instead of letting the FK raise, and must refuse `status: 'Active'` when the resulting role is NULL (`409` / `ROLE_REQUIRED` / "Select a role for this user before activating the account."). `roleId` is omitted when unchanged, so a role-less account cannot be reactivated until a role is actually chosen.
 - Do not add User list pagination, extra user endpoints, or a client-side role filter for visibility; the existing `Users` matrix flag decides delete authorization.
-- `DELETE /api/roles/:id` requires `Roles & permissions` `d` (Admin is the only seeded role with it). A role can only be deleted while **no Active or Pending account** is assigned to it; otherwise reject with `409` / `ROLE_IN_USE` / "Role is assigned to users. Please change their role before deleting it." (plus `details.users` = the count of those accounts). **Inactive accounts are deliberately ignored** — they cannot sign in and must not keep a role alive forever. Read the count inside the request so a role assigned after the page loaded is still rejected. Unknown role → `404` / `NOT_FOUND`. `role_permissions` cascades.
+- `DELETE /api/roles/:id` requires `Roles & permissions` `d` (Admin is the only seeded role with it). A role can only be deleted while **no Active or Pending account** is assigned to it; otherwise reject with `409` / `ROLE_IN_USE` / "Role is assigned to users. Please change their role before deleting it." (plus `details.users` = the count of those accounts). **Inactive accounts are deliberately ignored** — they cannot sign in and must not keep a role alive forever. Read the count inside the request so a role assigned after the page loaded is still rejected. Unknown role → `404` / `NOT_FOUND`. The **Admin role is never deletable** — reject with `403` / `ADMIN_ROLE_PROTECTED` / "The Admin role cannot be deleted." before the user count, even with no users on it. `role_permissions` cascades.
 - Migration 021 (`users_role_set_null`) makes `users.role_id` nullable and re-points the FK at `ON DELETE SET NULL`, which is what lets an Inactive account survive its role as a role-less account. That state is only safe because activation is gated (`ROLE_REQUIRED`) — `requireAuth` resolves permissions through a join on roles, so an Active user with no role could not be authorised. Never drop the NOT NULL/ON DELETE SET NULL pair, and never let an Active account hold a NULL role.
 - Soft-deactivate issue categories/sub-categories that have been used on tickets; hard-delete only when unused (`Issue master` `d`: Admin, Project manager, Technician, Engineer, Electrician). Category delete: `DELETE /api/issues/categories/:id` — tickets/events on category or its subs → `409 IN_USE`.
 - Soft-deactivate parts used on ticket visits; hard-delete unused via `DELETE /api/parts/:id` (same Issue master `d`). Used → `409 IN_USE`.
@@ -108,6 +108,8 @@
 - Do not accept or overwrite `slot_id` on manual Add/Edit device — Slot Id is **not editable**; only Device Sync sets it.
 - Manual create/PATCH may update `slot_identifier` (MAC) and `qr_code` (`qrNumber`) when Device Sync is unavailable; empty MAC clears `slot_identifier` on PATCH when the field is sent.
 - Keep Device Sync code concise; reuse Express + `pg` patterns; avoid unnecessary APIs, libraries, abstractions, and refactoring.
+- Slot View (Phase 53): list only slots that have tickets by aggregating from `tickets` (never list every device and filter); count tickets, never `ticket_issues` rows. Unresolved issues = reported rows with persisted `status = 'Open'` (reuse `loadOpenDeviceTickets`), deduplicated by `subcategory_id`, never by display text. Slot tickets go through `GET /api/tickets?device=` — do not add a second ticket list query or row mapper. Gate every Slot View route with `authorize('Slot View', 'v')` — never a role-name check; who sees it is decided in Roles & permissions (defaults: Admin and Project manager).
+- Slot Label ordering goes through `slotLabelOrderBy` in `lib/device-ref.ts`; Slot View passes `{ natural: true }` (synced labels are not zero-padded). Never sort slot rows in JS after a paginated query.
 
 ## What to avoid
 
@@ -124,7 +126,9 @@
 
 ### Screens
 
-`Dashboard`, `Raise ticket`, `Update ticket`, `All tickets`, `Work report`, `Device list`, `Add device`, `Device history`, `Scan QR`, `Issue master`, `Road master`, `Users`, `Roles & permissions`
+`Dashboard`, `Slot View`, `Raise ticket`, `Update ticket`, `All tickets`, `Work report`, `Device list`, `Add device`, `Device history`, `Scan QR`, `Issue master`, `Road master`, `Users`, `Roles & permissions`
+
+Adding a screen: `ScreenName`, `SCREENS`, every role in `DEFAULT_ROLE_PERMS`, the frontend `PERM_SCREENS` / `DEFAULT_ROLE_PERMS`, and a migration that inserts a row for every existing role (`ON CONFLICT DO NOTHING`, e.g. `026_slot_view_permission.sql`). A missing row reads as `......`.
 
 ### Flags
 

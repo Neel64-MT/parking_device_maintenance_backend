@@ -2,6 +2,7 @@ import type { PermissionFlag, ScreenName } from '../types/api.js'
 
 export const SCREENS: ScreenName[] = [
   'Dashboard',
+  'Slot View',
   'Raise ticket',
   'Update ticket',
   'All tickets',
@@ -36,6 +37,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     scope: 'all_roads',
     p: {
       Dashboard: 'v.....',
+      'Slot View': 'v.....',
       'Raise ticket': 'vc....',
       'Update ticket': 'vce.x.',
       'All tickets': 'vceaxd',
@@ -55,6 +57,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     scope: 'all_roads',
     p: {
       Dashboard: 'v.....',
+      'Slot View': 'v.....',
       'Raise ticket': 'vc....',
       'Update ticket': 'vce.x.',
       'All tickets': 'vcea.x',
@@ -74,6 +77,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     scope: 'all_roads',
     p: {
       Dashboard: 'v.....',
+      'Slot View': '......',
       'Raise ticket': 'vc....',
       'Update ticket': 'v.....',
       'All tickets': 'vc.a..',
@@ -93,6 +97,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     scope: 'assigned_roads',
     p: {
       Dashboard: '......',
+      'Slot View': '......',
       'Raise ticket': 'vc....',
       'Update ticket': 'vce.x.',
       'All tickets': 'v.....',
@@ -112,6 +117,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     scope: 'assigned_roads',
     p: {
       Dashboard: '......',
+      'Slot View': '......',
       'Raise ticket': 'vc....',
       'Update ticket': 'vce.x.',
       'All tickets': 'v.....',
@@ -131,6 +137,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     scope: 'assigned_roads',
     p: {
       Dashboard: '......',
+      'Slot View': '......',
       'Raise ticket': 'vc....',
       'Update ticket': 'vce.x.',
       'All tickets': 'v.....',
@@ -150,6 +157,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     scope: 'assigned_roads',
     p: {
       Dashboard: '......',
+      'Slot View': '......',
       'Raise ticket': 'vc....',
       'Update ticket': '......',
       'All tickets': 'v.....',
@@ -169,6 +177,7 @@ export const DEFAULT_ROLE_PERMS: Record<string, { note: string; scope: 'all_road
     scope: 'all_roads',
     p: {
       Dashboard: 'v.....',
+      'Slot View': '......',
       'Raise ticket': '......',
       'Update ticket': '......',
       'All tickets': 'v.....',

@@ -20,6 +20,7 @@ export type PermissionFlag = 'v' | 'c' | 'e' | 'a' | 'x' | 'd'
 
 export type ScreenName =
   | 'Dashboard'
+  | 'Slot View'
   | 'Raise ticket'
   | 'Update ticket'
   | 'All tickets'

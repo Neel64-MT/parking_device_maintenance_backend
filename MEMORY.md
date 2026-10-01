@@ -41,9 +41,11 @@
 - Phase 51 - Main/Sub issue resolution + no ticket assignment: Add Update `resolveCategoryIds[]` (Main Issue → all its Open subs) beside `resolveIssueIds[]` via `resolveIssueSelection`; `addIssues[]` appended Open by `appendTicketIssues` (`409 ISSUE_ALREADY_ON_TICKET` / `OPEN_TICKET_EXISTS`); response `addedIssues[]`. Assignment removed end to end: `POST /:id/assign` deleted (404), raise ignores `assigneeId`, no auto-claim / handover / holder / `ticket_assignments` writes / assignment notifications; every `All tickets v` user sees every ticket; `Update ticket e` updates any open ticket, `x` closes; photo attach = author or Admin/PM; list tabs `open` / `cls`. No migration; historical assignee data untouched (legacy Under repair display kept). Smoke: `npm run test:smoke:issue-groups`, `npm run test:smoke:no-assignment`
 - Phase 52 - Under repair tab: list tabs `open` (raised, no update — `NOT_ATTENDED_SQL`) / `urp` (at least one update — `UNDER_REPAIR_TAB_SQL`, incl. Waiting for spare + legacy Open + assignee) / `cls`; `tabForStatus(status, assigneeId)`; `status` narrows within the tab; optional `age=over3` on open / urp; response `tabCounts { open, urp, cls }` (open / urp respect `age`) + `over3Counts { open, urp }`; tiles unchanged. Smoke: `npm run test:smoke:no-assignment` (Phase 52 block)
 
+- Phase 53 - Slot View: `src/routes/slot-view.ts` at `/api/slot-view` (own screen `Slot View v`; defaults Admin + Project manager only, migration `026_slot_view_permission.sql`, managed per role in Roles & permissions). `GET /` = ticketed slots only (tickets base table, `GROUP BY` device, `ticketCount` per ticket, natural Slot Label order, SQL pagination, `q`); `GET /:slotId` = slot header + `ticketCount` + `unresolvedIssues` (Open reported Sub Issues via `loadOpenDeviceTickets`, one per `subCategoryId`, with their tickets; 404 unknown slot). `GET /api/tickets?device=` lists one slot's tickets (all statuses without `tab`). `slotLabelOrderBy(alias, { natural })` in `lib/device-ref.ts`. Smoke: `npm run test:smoke:slot-view`
+
 ## Currently Working On
 
-- (idle - Phase 52 Under repair tab complete)
+- (idle - Phase 53 Slot View complete)
 
 ## Pending
 
@@ -126,7 +128,8 @@
 - PM Users permission: `vce...` (approve Pending via existing PATCH); Roles matrix remains view-only
 - No separate signup-request table
 - Control room sees every ticket like every other role (Phase 51)
-- Device list / export order (Phase 41): Slot Label ascending via `DEVICE_LIST_ORDER_BY` (`ORDER BY (slot_number = ''), slot_number, public_id`) in `src/routes/devices.ts`; SQL-side so it survives pagination.
+- Device list / export order (Phase 41): Slot Label ascending via `DEVICE_LIST_ORDER_BY` (`ORDER BY (slot_number = ''), slot_number, public_id`) in `src/routes/devices.ts`; SQL-side so it survives pagination. Since Phase 53 the string comes from `slotLabelOrderBy()` in `lib/device-ref.ts` (same output).
+- Slot View (Phase 53): its own matrix screen `Slot View` (only `v` used), granted by default to Admin and Project manager only; other roles get an all-off row (migration `026`) so the toggle exists in Roles & permissions. `GET /api/tickets?device=` keeps `All tickets v`. Slot = `devices` row; ticket count = tickets (never issues), every status. "Unresolved issue" = reported Sub Issue with persisted `status = 'Open'`, unique per `subcategory_id`, grouped by Main Issue in the UI. Slot View order is natural (`slotLabelOrderBy(alias, { natural: true })`) because synced labels are not zero-padded; the Device list kept plain text order (not changed without a request). Slot tickets come from `GET /api/tickets?device=` rather than a second ticket query.
 
 ## Known Issues
 
@@ -136,3 +139,4 @@
 - `npm run test:smoke` no longer depends on seed tickets `TK-1099` / `TK-1078` (Phase 51 rewrote that section). It now stops at "tech device-sync should be authorized": the local DB has `Device list` `can_create = false` for Technician / Engineer, contrary to migration `014` — permission-matrix data drift, not a code bug; left untouched.
 - Role notes in `roles.note` are written once at seed time; the live DB still carries the pre-Phase 51 "hold / assign" wording for Technician / Engineer / Electrician / Site attendant / Control room (`DEFAULT_ROLE_PERMS` notes were updated; no migration per Phase 51 policy). Edit them in Roles & permissions if needed.
 - Users list `openTickets` per user still counts open tickets with that `assignee_id` — historical only since Phase 51 (new tickets never contribute).
+- Device list order is plain text on `slot_number`; with non-padded synced labels it shows `3-12` before `3-2`. Slot View (Phase 53) uses the natural order; switching the Device list is one argument (`slotLabelOrderBy('', { natural: true })`) but was left for an explicit decision.

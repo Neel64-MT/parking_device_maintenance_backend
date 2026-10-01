@@ -709,3 +709,57 @@ The rule is status-based, not an event count: every Add Update sets `Under repai
 ## Frontend
 
 **FRONTEND CHANGE (done, frontend Phase 52):** three tabs; cards → tab + status + age; status select only on Under Repair; sliding tab ink + panel transition.
+
+---
+
+# Design — Slot View (Phase 53)
+
+## Endpoints
+
+| Endpoint | Gate | Returns |
+|----------|------|---------|
+| `GET /api/slot-view?q&page&limit` | `Slot View` `v` | `data: [{ id, uuid, slotId, slotLabel, road, ticketCount }]`, `pagination` |
+| `GET /api/slot-view/:slotId` | `Slot View` `v` | `data: { slot: { id, uuid, slotId, slotLabel, road }, ticketCount, unresolvedIssues[] }` |
+| `GET /api/tickets?device=:slotId` | `All tickets` `v` | existing list shape, filtered to one slot; no `tab` = every status |
+
+`id` = `deviceDisplayId` (Slot Id, else `PD-xxxx`); `:slotId` / `device` accept Slot Id, `public_id` or UUID (`deviceLookupWhere`).
+
+## Permission
+
+| Role | `Slot View` default |
+|------|---------------------|
+| Admin, Project manager | `v.....` |
+| Every other role (built-in or custom) | `......` |
+
+`SCREENS` / `DEFAULT_ROLE_PERMS` carry the defaults for seeds and new roles; migration `026_slot_view_permission.sql` back-fills existing roles. Changes made in Roles & permissions (`PATCH /api/roles/:id/permissions`) apply on the next request.
+
+## Slot list query
+
+```sql
+SELECT d.id, d.public_id, d.slot_id, d.slot_number, r.name AS road_name,
+       COUNT(t.id)::int AS ticket_count
+FROM tickets t
+JOIN devices d ON d.id = t.device_id
+JOIN roads r ON r.id = d.road_id
+[WHERE LOWER(d.slot_number) LIKE $1 OR CAST(d.slot_id AS TEXT) LIKE $1 OR LOWER(d.public_id) LIKE $1 OR LOWER(r.name) LIKE $1]
+GROUP BY d.id, r.name
+ORDER BY (d.slot_number = ''), <natural key>, d.slot_number, d.public_id
+LIMIT $n OFFSET $m
+```
+
+- Tickets are the base table, so a device without tickets cannot appear; there is no `ticket_issues` join, so the count is tickets.
+- Natural key: `string_agg` over `regexp_matches(slot_number, '[0-9]+|[^0-9]+', 'g') WITH ORDINALITY`, digit runs `lpad`-ed to 20 — `3-2` < `3-12` < `3-121`, `S1-002` < `S1-010`. Plain `slot_number` and `public_id` stay as tie-breaks.
+
+## Unresolved issues
+
+| Rule | Implementation |
+|------|----------------|
+| Only persisted Open | `loadOpenDeviceTickets` joins `ticket_issues` with `role = 'reported' AND status = 'Open'` |
+| Issue = Main + Sub pair | entry keeps `categoryId` / `category` and `subCategoryId` / `sub`; Open is per Sub Issue |
+| Unique per slot | `Map` keyed by `subCategoryId`; DB backstop `idx_ticket_issues_one_open_issue_per_device` |
+| Ticket refs | `tickets: [{ id, uuid }]` per entry (normally one, since an Open sub lives on one ticket) |
+| Closed tickets | contribute nothing — closing resolves every Open issue (Phase 49) |
+
+## Frontend
+
+**FRONTEND CHANGE (done, frontend Phase 53):** sidebar Slot View (after Dashboard, `Slot View` v) and a Slot View row in the Roles & permissions matrix; `/slot-view` list; `/slot-view/:slotId` with Unresolved issues (grouped by Main Issue) and Tickets (`TicketTable`, `listTickets({ device })`).
