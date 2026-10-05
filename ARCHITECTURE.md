@@ -470,7 +470,9 @@ POST /api/tickets succeeds
   → one `ticket.raised` row per recipient (unique event key)
   → `/tickets/TK-xxxx` link always openable (canOpen: true — every ticket is visible since Phase 51)
   → setImmediate Web Push delivery when VAPID is configured
+       → skip recipients with users.push_notifications_enabled = FALSE (Phase 54)
        → send to every active browser subscription for that recipient
+         (notification.silent = NOT users.play_notification_sound)
        → 404/410 → delete expired subscription
        → success → set notifications.push_sent_at
 ```
@@ -486,6 +488,32 @@ Notification persistence runs after ticket creation and is wrapped separately by
 | Config | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` |
 
 No WebSocket, SSE, service worker, external queue, or second permission system is introduced. Web Push reuses the existing in-process `setImmediate` background pattern. The frontend owns browser permission and must provide its own service worker; the backend only stores the resulting subscription and sends encrypted Web Push payloads. The sibling frontend Phase 39 integration now consumes these APIs, relays notification IDs for authenticated read-state updates, and renders the shared unread badges.
+
+### Notification preferences: browser permission vs application preference (Phase 54)
+
+There are two independent layers. The backend owns only the second:
+
+| Layer | Owner | Stored | Effect |
+|-------|-------|--------|--------|
+| Browser permission (`granted` / `default` / `denied`) | The user's browser | Nowhere on the server | Whether that one browser can show a notification |
+| Application preference (`push_notifications_enabled`, `play_notification_sound`) | This API, per user | `users` (migration `027`, default `TRUE`) | Whether the user gets push at all, and whether it asks for sound |
+
+- **Read:** `loadAuthUser` selects both columns in its existing query (no extra round trip). `toClientUser` exposes them as `notificationPreferences` on login and `/me`.
+- **Write:** `PATCH /api/auth/me/notification-preferences` (`requireAuth`, strict Zod, `COALESCE` partial update). The user is always `req.user.id`, so nobody can change another user's preferences.
+- **Enforce:** `deliverNotificationPush` adds `u.push_notifications_enabled = TRUE` to the single recipient/subscription JOIN, so the check costs no extra queries and is user-level. Every row in `push_subscriptions` for that user (desktop, laptop, any browser) is skipped together. The client can never re-enable delivery by itself.
+- **Sound:** `u.play_notification_sound` is selected in the same query and becomes `notification.silent` / `data.playSound` in the payload. It never affects whether a push is sent.
+- **Subscriptions:** turning push OFF does not delete subscriptions (no churn; turning it back ON works straight away). Logout deletes only that browser's row through the existing `DELETE /push-subscriptions/:id`. `404`/`410` cleanup is unchanged.
+- Suppressed notifications keep `push_sent_at = NULL` and are not replayed later; the in-app row and unread count still work.
+
+| Piece | Location |
+|-------|----------|
+| Migration | `src/db/migrations/027_user_notification_preferences.sql` |
+| Read / client shape | `src/middleware/auth.ts` (`loadAuthUser`), `src/routes/auth.ts` (`toClientUser`) |
+| Write | `src/routes/auth.ts` `PATCH /me/notification-preferences` |
+| Enforcement | `src/lib/notifications.ts` `deliverNotificationPush` |
+| Smoke | `scripts/smoke-notification-preferences.ts` (`npm run test:smoke:notification-prefs`) |
+
+Deploy order: run `npm run db:migrate` before starting the new build. `loadAuthUser` reads the new columns on every authenticated request.
 
 ## Ticket-scoped read state (assignment notifications removed in Phase 51)
 

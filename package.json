@@ -20,7 +20,8 @@
     "test:smoke:multi-ticket": "tsx scripts/smoke-multi-ticket-raise.ts",
     "test:smoke:issue-groups": "tsx scripts/smoke-issue-groups.ts",
     "test:smoke:no-assignment": "tsx scripts/smoke-no-assignment.ts",
-    "test:smoke:slot-view": "tsx scripts/smoke-slot-view.ts"
+    "test:smoke:slot-view": "tsx scripts/smoke-slot-view.ts",
+    "test:smoke:notification-prefs": "tsx scripts/smoke-notification-preferences.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",

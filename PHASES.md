@@ -743,3 +743,23 @@ A failure rolls back the whole update (no event, no claim). The found-on-site `i
 **Verification:** `npm run db:migrate` (applies `026`); `npx tsc --noEmit -p .`; `test:smoke:slot-view`, `test:smoke:roles`, `test:smoke:users`, `test:smoke:multi-ticket`, `test:smoke:issue-resolution`, `test:smoke:ticket-flow`, `test:smoke:issue-groups` pass on the local Postgres DB. (`test:smoke` stops at "tech device-sync should be authorized": the local DB has Technician / Engineer `Device list` `c` switched off in the matrix — data drift, unrelated to this phase.)
 
 **Frontend (done, frontend Phase 53):** Sidebar **Slot View** after Dashboard, gated on the `Slot View` screen, with its own row in the Roles & permissions matrix; `/slot-view` list and `/slot-view/:slotId` detail (Unresolved issues + Tickets via the shared `TicketTable`).
+
+## Phase 54 — Notification preferences (Push Notifications / Play Notification Sound)
+
+**Status:** Complete
+
+**Objective:** Store each user's application-level push preferences and make the delivery pipeline respect them. Browser permission stays browser-owned.
+
+**Behavior:**
+- Migration `027_user_notification_preferences.sql`: `users.push_notifications_enabled` and `users.play_notification_sound`, both `BOOLEAN NOT NULL DEFAULT TRUE`. Existing users keep the current behaviour (subscribed users received push with sound). No new table.
+- `loadAuthUser` selects both columns in its existing query. `toClientUser` adds `notificationPreferences { pushNotificationsEnabled, playNotificationSound }` to the login and `/me` user.
+- `PATCH /api/auth/me/notification-preferences` (`requireAuth`): strict body with optional booleans and at least one required; unknown keys such as `userId` → `400`. `COALESCE` partial update of `req.user.id` only. Returns the client user.
+- `deliverNotificationPush`: `AND u.push_notifications_enabled = TRUE` plus `u.play_notification_sound` in the one recipient/subscription JOIN, so it adds no queries and covers every subscription the user holds. Payload `notification.silent = !play_notification_sound`, `data.playSound`. Suppressed rows keep `push_sent_at = NULL`; in-app rows, unread count and read APIs are unchanged; `404`/`410` cleanup is unchanged.
+
+**Files:** `src/db/migrations/027_user_notification_preferences.sql` (new), `src/middleware/auth.ts`, `src/routes/auth.ts`, `src/lib/notifications.ts`, `src/types/api.ts`, `scripts/smoke-notification-preferences.ts` (new), `package.json` (`test:smoke:notification-prefs`).
+
+**Testing:** `npm run test:smoke:notification-prefs`. It checks that the columns are NOT NULL with TRUE defaults; login and `/me` expose the preferences; no token → 401; body `userId` / empty / non-boolean → 400; changing your own preferences leaves other users untouched; the preference persists across a new login; push OFF with two subscriptions → sender never called, `push_sent_at` stays NULL, unread count still counts the row; push ON + sound OFF → both devices get `silent: true`; sound ON → `silent: false`; push OFF + sound ON → no delivery and sound preserved; `410` removes subscriptions. The script inserts and removes its own rows and restores the original preferences.
+
+**Verification:** `npm run db:migrate` (applies `027`); `npx tsc --noEmit -p .`; `test:smoke:notification-prefs`, `test:smoke:writes`, `test:smoke:multi-ticket` and `test:smoke:no-assignment` pass (`test:smoke` stops at the known device-sync permission drift, the same on a clean tree).
+
+**Frontend (done, frontend Phase 54):** Settings → Notifications panel (Push Notifications, Browser Permission status, Play Notification Sound), push controls removed from the bell, logout keeps the browser subscription, and the service worker honours `silent`.

@@ -587,15 +587,19 @@ Browser payload:
     "title": "New ticket raised",
     "body": "New ticket TK-1042 has been raised for Slot 42 on Science City.",
     "tag": "notification.<uuid>",
+    "silent": false,
     "data": { "url": "/tickets/TK-1042" }
   },
   "data": {
     "notificationId": "<uuid>",
     "type": "ticket.raised",
-    "ticketId": "TK-1042"
+    "ticketId": "TK-1042",
+    "playSound": true
   }
 }
 ```
+
+`silent` / `playSound` come from the recipient's `users.play_notification_sound` (Phase 54). Recipients with `push_notifications_enabled = FALSE` get no payload at all.
 
 ## Web Push lifecycle
 
@@ -606,6 +610,29 @@ Browser payload:
 - Push service `404` / `410` deletes the expired subscription. Other errors are logged without endpoint/key contents.
 - `push_sent_at` is set after at least one push is accepted, preventing a later delivery pass from sending that notification again.
 - Without VAPID configuration, persistent in-app notifications still work and push delivery is skipped.
+
+## Notification preferences (Phase 54)
+
+```text
+users.push_notifications_enabled BOOLEAN NOT NULL DEFAULT TRUE
+users.play_notification_sound    BOOLEAN NOT NULL DEFAULT TRUE
+
+PATCH /api/auth/me/notification-preferences   (requireAuth, own user only)
+  { "pushNotificationsEnabled"?: boolean, "playNotificationSound"?: boolean }   strict, ≥1 key
+  → 200 client user incl. notificationPreferences
+  → 400 VALIDATION_ERROR (empty body, non-boolean, unknown key such as userId)
+  → 401 without a token
+```
+
+| Push | Sound | Delivery |
+|------|-------|----------|
+| `FALSE` | any | None, on any device (filtered in the `deliverNotificationPush` JOIN) |
+| `TRUE` | `FALSE` | Sent with `notification.silent: true` |
+| `TRUE` | `TRUE` | Sent with `notification.silent: false` |
+
+- Defaults keep today's behaviour for existing users.
+- `push_subscriptions` rows survive Push OFF, so turning it back ON needs no new subscription.
+- Suppressed rows keep `push_sent_at = NULL` and are not replayed.
 
 ## Frontend
 

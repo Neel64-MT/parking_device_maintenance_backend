@@ -53,6 +53,7 @@ type PushSubscriptionRow = {
   endpoint: string
   p256dh: string
   auth: string
+  play_notification_sound: boolean
 }
 
 export type NotificationPushSender = (
@@ -390,7 +391,11 @@ function pushErrorStatus(error: unknown) {
   return typeof status === 'number' ? status : null
 }
 
-/** Testable delivery helper. Production scheduling uses the default web-push sender. */
+/**
+ * Testable delivery helper. Production scheduling uses the default web-push sender.
+ * `users.push_notifications_enabled = FALSE` suppresses push to every subscription the
+ * user holds, regardless of browser permission; the in-app notification row is kept.
+ */
 export async function deliverNotificationPush(
   notificationIds: string[],
   sendPush: NotificationPushSender = (subscription, payload, options) =>
@@ -401,7 +406,8 @@ export async function deliverNotificationPush(
   const result = await query<PushSubscriptionRow>(
     `SELECT n.id AS notification_id, n.type AS notification_type,
             n.title, n.message, n.data,
-            ps.id AS subscription_id, ps.endpoint, ps.p256dh, ps.auth
+            ps.id AS subscription_id, ps.endpoint, ps.p256dh, ps.auth,
+            u.play_notification_sound
      FROM notifications n
      JOIN users u ON u.id = n.recipient_user_id
      JOIN roles r ON r.id = u.role_id
@@ -410,6 +416,7 @@ export async function deliverNotificationPush(
      WHERE n.id = ANY($1::uuid[])
        AND n.push_sent_at IS NULL
        AND u.status = 'Active'
+       AND u.push_notifications_enabled = TRUE
        AND rp.screen = 'All tickets'
        AND rp.can_view = TRUE
        AND r.name IN (${rolePlaceholders(2, NOTIFICATION_DELIVERY_ROLES)})`,
@@ -421,11 +428,13 @@ export async function deliverNotificationPush(
   for (const row of result.rows) {
     const data = parseData(row.data)
     const url = typeof data.url === 'string' ? data.url : null
+    const playSound = row.play_notification_sound !== false
     const payload = JSON.stringify({
       notification: {
         title: row.title,
         body: row.message,
         tag: `notification.${row.notification_id}`,
+        silent: !playSound,
         data: { url },
       },
       data: {
@@ -433,6 +442,7 @@ export async function deliverNotificationPush(
         type: row.notification_type,
         url,
         ...data,
+        playSound,
       },
     })
 

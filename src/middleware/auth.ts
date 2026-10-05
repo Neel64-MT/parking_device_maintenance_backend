@@ -18,6 +18,8 @@ export type AuthUser = {
   roadIds: string[]
   roadNames: string[]
   permissions: Record<string, string>
+  pushNotificationsEnabled: boolean
+  playNotificationSound: boolean
   jti: string
   tokenExp: number
 }
@@ -47,9 +49,12 @@ export async function loadAuthUser(
     role_name: string
     scope: RoadScope
     password_version: number
+    push_notifications_enabled: boolean
+    play_notification_sound: boolean
   }>(
     `SELECT u.id, u.full_name, u.email, u.mobile, u.status, u.role_id,
             COALESCE(u.password_version, 0) AS password_version,
+            u.push_notifications_enabled, u.play_notification_sound,
             r.name AS role_name, r.scope
      FROM users u
      JOIN roles r ON r.id = u.role_id
@@ -106,6 +111,8 @@ export async function loadAuthUser(
     roadIds: roads.rows.map((r) => r.road_id),
     roadNames: roads.rows.map((r) => r.name),
     permissions,
+    pushNotificationsEnabled: row.push_notifications_enabled !== false,
+    playNotificationSound: row.play_notification_sound !== false,
     jti,
     tokenExp: exp,
   }
