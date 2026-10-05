@@ -11,6 +11,11 @@
 - Notification list/read/update APIs always scope by authenticated `recipient_user_id`. Browser permission stays in the browser; backend stores only Push API subscriptions.
 - Reuse `web-push` + VAPID and the existing `setImmediate` background pattern. Do not add WebSocket/SSE, a queue library, or duplicate realtime infrastructure.
 - Push `404` / `410` removes the expired subscription. Other push errors are logged without endpoint/key contents and do not fail ticket creation.
+- **Never send Web Push to a user whose `users.push_notifications_enabled` is `FALSE` (Phase 54).** Enforce it in the `deliverNotificationPush` recipient query, never only in the frontend, and apply it to every subscription the user holds (all browsers and devices). Keep it inside the existing single JOIN; do not add per-recipient queries.
+- Browser permission and the application preference are separate. Never store or trust a client-reported browser permission; `push_notifications_enabled` / `play_notification_sound` are the only stored notification preferences.
+- `play_notification_sound` only sets the payload's `notification.silent` / `data.playSound`; it must never decide whether a push is delivered.
+- Users change only their own preferences through `PATCH /api/auth/me/notification-preferences`. The target is always `req.user.id`. Keep the schema strict (no `userId` or other keys) and never add a path or body user id.
+- Turning push OFF must not delete `push_subscriptions` rows. Existing users keep the `TRUE` defaults from migration `027`; do not reset preferences in seeds or migrations.
 - Ticket raise/update/close prefer `issues[]`; keep the legacy single category/subcategory pair accepted. `ticket_issues` stores ordered reported/found rows while scalar fields retain the primary pair.
 - Multi-issue raise returns `eventId`; raised photos attach through `PATCH /api/tickets/:ticketId/raised/:eventId/photos`.
 - Store secrets only in environment variables (`.env` / `.env.local`).

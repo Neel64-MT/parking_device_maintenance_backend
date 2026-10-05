@@ -43,9 +43,13 @@
 
 - Phase 53 - Slot View: `src/routes/slot-view.ts` at `/api/slot-view` (own screen `Slot View v`; defaults Admin + Project manager only, migration `026_slot_view_permission.sql`, managed per role in Roles & permissions). `GET /` = ticketed slots only (tickets base table, `GROUP BY` device, `ticketCount` per ticket, natural Slot Label order, SQL pagination, `q`); `GET /:slotId` = slot header + `ticketCount` + `unresolvedIssues` (Open reported Sub Issues via `loadOpenDeviceTickets`, one per `subCategoryId`, with their tickets; 404 unknown slot). `GET /api/tickets?device=` lists one slot's tickets (all statuses without `tab`). `slotLabelOrderBy(alias, { natural })` in `lib/device-ref.ts`. Smoke: `npm run test:smoke:slot-view`
 
+- Phase 54 - Notification preferences: migration `027_user_notification_preferences.sql` adds `users.push_notifications_enabled` / `play_notification_sound` (`BOOLEAN NOT NULL DEFAULT TRUE`). `loadAuthUser` reads both and `toClientUser` returns `notificationPreferences` on login / `/me`. `PATCH /api/auth/me/notification-preferences` (own user, strict Zod, `COALESCE` partial update) returns the client user. `deliverNotificationPush` filters `u.push_notifications_enabled = TRUE` in its single JOIN and sends `notification.silent = !play_notification_sound` + `data.playSound`. Smoke: `npm run test:smoke:notification-prefs`
+
+- Phase 55 (frontend only) - Notifications "View all" page: the bell keeps `GET /api/notifications?page=1&limit=10`, and the new frontend `/notifications` page pages the same endpoint with `page` / `limit` / `unreadOnly`. No backend change; the existing `authorize('All tickets', 'v')`, ownership and pagination rules apply.
+
 ## Currently Working On
 
-- (idle - Phase 53 Slot View complete)
+- (idle - Phase 55 needed no backend change; Phase 54 notification preferences complete; edited `src/db/migrations/027_user_notification_preferences.sql`, `src/middleware/auth.ts`, `src/routes/auth.ts`, `src/lib/notifications.ts`, `src/types/api.ts`, `scripts/smoke-notification-preferences.ts`, `package.json`)
 
 ## Pending
 
@@ -93,6 +97,8 @@
 - `FIELD_ROLES` (`lib/permissions.ts`) = Technician / Engineer / Electrician; single source for notification delivery, road bypass, work report actors, Visited By, technicians lookup, issue sub-edit
 - Two separate role lists, deliberately not merged: `NEW_TICKET_NOTIFICATION_ROLES` (Admin/PM/CR) governs `ticket.raised` fan-out; `NOTIFICATION_DELIVERY_ROLES` (those + `FIELD_ROLES`) governs Web Push delivery and frontend bell eligibility — field roles stay in it so historical `ticket.assigned` rows remain readable; they still get no new-ticket alerts. Site attendant / AMC officer are in neither
 - Ticket-open read: `POST /api/notifications/ticket/:ticketId/read` marks the caller's unread rows for that ticket and returns `{ updated }`; `0` means nothing unread so no row is rewritten. Scoped by `recipient_user_id` so users cannot mark others' notifications. Registered before `PATCH /:id/read` so the literal `ticket` segment is not captured by `:id`
+- Notification preferences (Phase 54): stored on `users`, not in a new table, because they are one-per-user and `loadAuthUser` already reads that row. The defaults are `TRUE` because every subscribed user already received push with sound. Browser permission is never stored. Push OFF is enforced in the delivery query for every device and keeps `push_subscriptions` rows (no churn); suppressed rows keep `push_sent_at = NULL` and are not replayed. Sound only sets `silent`. The endpoint lives under `/api/auth/me` (the user's own settings, like `PATCH /me`) and needs only `requireAuth`. The Settings panel is shown only to notification-eligible users.
+- Deploy: run `npm run db:migrate` before the Phase 54 build. `loadAuthUser` selects the new columns on every authenticated request
 - Notification `UPDATE`s must use `RETURNING` — the PGlite pool derives `rowCount` from returned rows, so a bare `UPDATE` always reports 0 on that driver
 - `assertValidVisitedBy` (currently not wired into Add Update) accepts Active `FIELD_ROLES`
 - Engineer and Electrician roles: Technician-like permissions; field-work road bypass like Technician

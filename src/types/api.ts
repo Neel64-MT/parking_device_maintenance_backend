@@ -56,6 +56,12 @@ export interface PushConfig {
   registered: boolean
 }
 
+/** Application-level notification preferences, stored per user (not per browser). */
+export interface NotificationPreferences {
+  pushNotificationsEnabled: boolean
+  playNotificationSound: boolean
+}
+
 export interface PushSubscriptionSummary {
   id: string
   createdAt: Date | string

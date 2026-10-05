@@ -252,6 +252,26 @@ A slot-centric, read-only view of existing ticket data. Gate: new permission scr
 - `updated: 0` means nothing was unread, so no row is rewritten. The unread badge reflects the change on the next `/unread-count` poll.
 - This makes opening a ticket directly (not only via the bell) clear its unread notification, while leaving every other ticket's notifications untouched.
 
+### Notification preferences (Phase 54)
+
+Two per-user application preferences, stored on `users` (migration `027_user_notification_preferences.sql`):
+
+| Column | API field | Default | Meaning |
+|--------|-----------|---------|---------|
+| `push_notifications_enabled` | `pushNotificationsEnabled` | `TRUE` | Whether this user receives browser Web Push at all |
+| `play_notification_sound` | `playNotificationSound` | `TRUE` | Whether a delivered push asks for sound |
+
+- Both default to `TRUE`, so existing users keep today's behaviour (every subscribed user received push with sound) and nobody has to re-enable anything after deployment.
+- `POST /api/auth/login` and `GET /api/auth/me` return `user.notificationPreferences`. No extra request is needed after login.
+- `PATCH /api/auth/me/notification-preferences` (`requireAuth`) with `{ pushNotificationsEnabled?, playNotificationSound? }`. The schema is strict: at least one boolean, and unknown keys such as `userId` get `400 VALIDATION_ERROR`. The target is always the authenticated user; there is no user id in the path or body. Returns the client user, like `PATCH /me`.
+- **Delivery:** `deliverNotificationPush` only selects users with `push_notifications_enabled = TRUE`. This is in the one existing JOIN query, so it adds no extra queries and applies to **every** subscription the user holds (all browsers and devices), whatever the browser permission or saved subscriptions.
+- Suppressed rows keep `push_sent_at = NULL`. They are not replayed when push is turned back on. The in-app notification row, list, unread count and mark-read are unaffected.
+- **Sound:** the payload carries `notification.silent = !play_notification_sound` and `data.playSound`. The sound preference never decides whether a push is delivered.
+- Browser permission is client state and is never stored. Turning push OFF keeps `push_subscriptions` rows; the delivery filter blocks them.
+- Smoke: `npm run test:smoke:notification-prefs`.
+
+**FRONTEND CHANGE REQUIRED (done, frontend Phase 54):** push controls moved from the bell popover to a Settings → Notifications panel. Logout keeps the browser subscription and drops only its server record.
+
 ### Signup approval requirements
 
 - `POST /api/auth/signup` creates `Pending` users.
