@@ -45,9 +45,11 @@
 
 - Phase 54 - Notification preferences: migration `027_user_notification_preferences.sql` adds `users.push_notifications_enabled` / `play_notification_sound` (`BOOLEAN NOT NULL DEFAULT TRUE`). `loadAuthUser` reads both and `toClientUser` returns `notificationPreferences` on login / `/me`. `PATCH /api/auth/me/notification-preferences` (own user, strict Zod, `COALESCE` partial update) returns the client user. `deliverNotificationPush` filters `u.push_notifications_enabled = TRUE` in its single JOIN and sends `notification.silent = !play_notification_sound` + `data.playSound`. Smoke: `npm run test:smoke:notification-prefs`
 
+- Phase 55 (frontend only) - Notifications "View all" page: the bell keeps `GET /api/notifications?page=1&limit=10`, and the new frontend `/notifications` page pages the same endpoint with `page` / `limit` / `unreadOnly`. No backend change; the existing `authorize('All tickets', 'v')`, ownership and pagination rules apply.
+
 ## Currently Working On
 
-- (idle - Phase 54 notification preferences complete; edited `src/db/migrations/027_user_notification_preferences.sql`, `src/middleware/auth.ts`, `src/routes/auth.ts`, `src/lib/notifications.ts`, `src/types/api.ts`, `scripts/smoke-notification-preferences.ts`, `package.json`)
+- (idle - Phase 55 needed no backend change; Phase 54 notification preferences complete; edited `src/db/migrations/027_user_notification_preferences.sql`, `src/middleware/auth.ts`, `src/routes/auth.ts`, `src/lib/notifications.ts`, `src/types/api.ts`, `scripts/smoke-notification-preferences.ts`, `package.json`)
 
 ## Pending
 
