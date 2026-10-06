@@ -719,6 +719,8 @@ A failure rolls back the whole update (no event, no claim). The found-on-site `i
 
 **Frontend (done, frontend Phase 52):** All Tickets shows Open / Under Repair / Closed tabs, the four cards select tab + status + age, the status filter only appears on Under Repair, and tab switches slide (ink bar + panel).
 
+**Follow-up (user request):** `GET /api/tickets` `tiles` gains a 5th entry `{ value: tab_cls, label: 'Closed', tone: 'ok' }` (same count as `tabCounts.cls`) so the Closed tab has its own active card. No query change. `npm run build` passes.
+
 ## Phase 53 — Slot View (slot-centric tickets + unresolved issues)
 
 **Status:** Complete

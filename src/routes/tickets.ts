@@ -250,6 +250,7 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
         { value: String(a.under_repair), label: 'Under repair', tone: 'warn' },
         { value: String(a.waiting_spare), label: 'Waiting for spare', tone: 'warn' },
         { value: String(a.open_over_3), label: 'Open over 3 days', tone: 'bad' },
+        { value: String(a.tab_cls), label: 'Closed', tone: 'ok' },
       ],
       tabCounts: {
         open: a.tab_open,
