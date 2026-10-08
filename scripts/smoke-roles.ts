@@ -198,6 +198,19 @@ async function main() {
     console.log('OK D — a seeded role with users is rejected by the same guard')
   }
 
+  // --- K. The Admin role can never be deleted ------------------------------
+  {
+    const adminRoleId = await roleIdByName(admin.auth, 'Admin')
+    const res = await call(`/api/roles/${adminRoleId}`, { method: 'DELETE', headers: admin.auth })
+    assert(
+      res.status === 403 && res.body.code === 'ADMIN_ROLE_PROTECTED',
+      `Admin role delete must be 403 ADMIN_ROLE_PROTECTED, got ${res.status} ${res.body.code}`,
+    )
+    const still = await query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM roles WHERE id = $1`, [adminRoleId])
+    assert(still.rows[0].n === 1, 'Admin role must still exist')
+    console.log('OK K — the Admin role cannot be deleted')
+  }
+
   // --- F. Nothing changed after the failed deletes -----------------------
   {
     const role = await query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM roles WHERE id = $1`, [

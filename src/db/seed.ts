@@ -392,6 +392,7 @@ async function seed() {
     { name: 'Jignesh Solanki', mobile: '9428033471', role: 'Technician', roads: ['CG Road', 'Sindhu Bhavan Road'] },
     { name: 'Mahesh Thakor', mobile: '9712955620', role: 'Technician', roads: ['Makarba'] },
     { name: 'Priya Desai', mobile: '9876501122', role: 'Engineer', roads: ['Science City'] },
+    { name: 'Vikram Parmar', mobile: '9824077315', role: 'Electrician', roads: ['Science City'] },
     { name: 'Nilesh Chauhan', mobile: '9016374408', role: 'Site attendant', roads: ['Science City'] },
     { name: 'Kiran Bhatt', mobile: '9377720914', role: 'Site attendant', roads: ['CG Road'] },
     { name: 'Control Room — Shift A', mobile: '7990011002', role: 'Control room', roads: [] },
@@ -646,6 +647,18 @@ async function seed() {
       ],
     )
   }
+
+  // Seed runs after migrations, so mirror the 017/024 backfill: every ticket gets its
+  // reported issue row, and issues on Closed tickets start Resolved.
+  await query(
+    `INSERT INTO ticket_issues (ticket_id, device_id, role, category_id, subcategory_id, sort_order, status, resolved_at)
+     SELECT t.id, t.device_id, 'reported', t.reported_category_id, t.reported_subcategory_id, 0,
+            CASE WHEN t.status = 'Closed' THEN 'Resolved' ELSE 'Open' END,
+            CASE WHEN t.status = 'Closed' THEN t.closed_at ELSE NULL END
+     FROM tickets t
+     WHERE t.reported_category_id IS NOT NULL AND t.reported_subcategory_id IS NOT NULL
+     ON CONFLICT (ticket_id, role, subcategory_id) DO NOTHING`,
+  )
 
   console.log('Seed complete')
   console.log(`Demo login: 9825012345 or alkesh.patel@yopmail.com / ${DEMO_PASSWORD}`)

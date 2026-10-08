@@ -4,8 +4,7 @@ import { handleApiError } from '../lib/api-error.js'
 import { ok } from '../lib/respond.js'
 import { query } from '../db/pool.js'
 import { authorize, requireAuth, type AuthedRequest } from '../middleware/auth.js'
-import { deriveDeviceStatus } from '../lib/device-status.js'
-import { appendTicketVisibilitySql } from '../lib/ticket-access.js'
+import { deriveDeviceStatus, openTicketLateralSql } from '../lib/device-status.js'
 import { deviceDisplayId } from '../lib/device-ref.js'
 
 const router = Router()
@@ -28,22 +27,14 @@ router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => 
       roadFilter = `AND r.name = $${params.length}`
     }
 
-    const visibility = appendTicketVisibilitySql(req.user!, params)
-    const visFilter = visibility ? `AND ${visibility}` : ''
-
+    // Every ticket on every road counts for every viewer (tickets have no holder).
+    // One row per device: a device with several open tickets counts once, by its worst ticket.
     const devices = await query(
       `SELECT d.id, d.road_id, r.name AS road_name, r.stretch_from, r.stretch_to,
-              ot.status AS open_status, ot.assignee_id,
-              COALESCE(fs.severity, rs.severity) AS severity
+              ot.status AS open_status, ot.assignee_id, ot.severity
        FROM devices d
        JOIN roads r ON r.id = d.road_id
-       LEFT JOIN LATERAL (
-         SELECT * FROM tickets t WHERE t.device_id = d.id AND t.status <> 'Closed'
-         ${visFilter}
-         ORDER BY t.raised_at DESC LIMIT 1
-       ) ot ON TRUE
-       LEFT JOIN issue_subcategories fs ON fs.id = ot.found_subcategory_id
-       LEFT JOIN issue_subcategories rs ON rs.id = ot.reported_subcategory_id
+       ${openTicketLateralSql()}
        WHERE 1=1 ${roadFilter}`,
       params,
     )
@@ -64,24 +55,32 @@ router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => 
     const total = devices.rowCount || 0
     const pct = (n: number) => (total ? `${((n / total) * 100).toFixed(1)}%` : '0%')
 
-    const downReasons = await query(
-      `SELECT COALESCE(fs.name, rs.name) AS name,
-              COALESCE(fc.name, rc.name) AS category,
-              COUNT(*)::int AS n
-       FROM tickets t
+    // Issue-level: each still-Open reported issue on an open ticket counts once, so a
+    // partly resolved ticket only contributes the issues that keep the device down.
+    const openIssueJoins = `
+       FROM ticket_issues ti
+       JOIN tickets t ON t.id = ti.ticket_id
        JOIN devices d ON d.id = t.device_id
-       JOIN roads r ON r.id = d.road_id
-       LEFT JOIN issue_subcategories fs ON fs.id = t.found_subcategory_id
-       LEFT JOIN issue_categories fc ON fc.id = t.found_category_id
-       LEFT JOIN issue_subcategories rs ON rs.id = t.reported_subcategory_id
-       LEFT JOIN issue_categories rc ON rc.id = t.reported_category_id
-       WHERE t.status <> 'Closed' ${roadFilter} ${visFilter}
+       JOIN roads r ON r.id = d.road_id`
+    const openIssueWhere = `
+       WHERE ti.role = 'reported' AND ti.status = 'Open'
+         AND t.status <> 'Closed' ${roadFilter}`
+    const downReasons = await query(
+      `SELECT s.name AS name, c.name AS category, COUNT(*)::int AS n
+       ${openIssueJoins}
+       JOIN issue_subcategories s ON s.id = ti.subcategory_id
+       JOIN issue_categories c ON c.id = ti.category_id
+       ${openIssueWhere}
        GROUP BY 1, 2
        ORDER BY n DESC
        LIMIT 10`,
       params,
     )
     const maxReason = downReasons.rows[0]?.n || 1
+    const openIssueTotal = await query(
+      `SELECT COUNT(*)::int AS n ${openIssueJoins} ${openIssueWhere}`,
+      params,
+    )
 
     const roadStatus = await query(
       `SELECT r.name, r.stretch_from, r.stretch_to,
@@ -122,25 +121,26 @@ router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => 
       `SELECT t.public_id AS id, d.public_id AS device_public_id, d.slot_id,
               r.name AS road, d.slot_number AS slot, COALESCE(rs.name, t.description) AS issue,
               rc.name AS "issueDetail", t.reporter_type AS "reportedBy",
-              t.raised_at, t.status, au.full_name
+              t.raised_at, t.status
        FROM tickets t
        JOIN devices d ON d.id = t.device_id
        JOIN roads r ON r.id = d.road_id
-       LEFT JOIN users au ON au.id = t.assignee_id
        LEFT JOIN issue_subcategories rs ON rs.id = COALESCE(t.found_subcategory_id, t.reported_subcategory_id)
        LEFT JOIN issue_categories rc ON rc.id = COALESCE(t.found_category_id, t.reported_category_id)
-       WHERE t.status <> 'Closed' ${roadFilter} ${visFilter}
+       WHERE t.status <> 'Closed' ${roadFilter}
        ORDER BY t.raised_at ASC
        LIMIT 8`,
       params,
     )
 
     const openOver3 = await query(
-      `SELECT COUNT(*)::int AS n FROM tickets t
+      `SELECT COUNT(*) FILTER (WHERE t.raised_at < NOW() - INTERVAL '3 days')::int AS n,
+              COUNT(*)::int AS open_total
+       FROM tickets t
        JOIN devices d ON d.id = t.device_id
        JOIN roads r ON r.id = d.road_id
-       WHERE t.status <> 'Closed' AND t.raised_at < NOW() - INTERVAL '3 days'
-         ${roadFilter} ${visFilter}`,
+       WHERE t.status <> 'Closed'
+         ${roadFilter}`,
       params,
     )
 
@@ -171,6 +171,8 @@ router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => 
         width: `${Math.round((r.n / maxReason) * 100)}%`,
         hot: r.n === maxReason,
       })),
+      openIssues: openIssueTotal.rows[0]?.n ?? 0,
+      openTicketsCount: openOver3.rows[0]?.open_total ?? 0,
       roadStatus: roadStats,
       openTickets: openTickets.rows.map((t) => {
         const daysOpen = Math.floor(

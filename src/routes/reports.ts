@@ -4,7 +4,7 @@ import { handleApiError } from '../lib/api-error.js'
 import { ok } from '../lib/respond.js'
 import { query } from '../db/pool.js'
 import { authorize, hasPermission, requireAuth, type AuthedRequest } from '../middleware/auth.js'
-import { appendTicketVisibilitySql } from '../lib/ticket-access.js'
+import { FIELD_ROLES } from '../lib/permissions.js'
 import {
   buildWorkReportPeople,
   daysInPeriodInclusive,
@@ -27,13 +27,13 @@ const filtersSchema = z.object({
 
 type WorkFilters = z.infer<typeof filtersSchema>
 
-function buildWorkWhere(filters: WorkFilters, user: AuthedRequest['user']) {
+function buildWorkWhere(filters: WorkFilters) {
   const { from, to } = resolveWorkReportRange(filters.view as WorkReportView, filters.from, filters.to)
-  const params: unknown[] = [from.toISOString(), to.toISOString()]
+  const params: unknown[] = [from.toISOString(), to.toISOString(), [...FIELD_ROLES]]
   const where: string[] = [
     `e.created_at >= $1`,
     `e.created_at < ($2::timestamptz + INTERVAL '1 day')`,
-    `r.name IN ('Technician', 'Engineer')`,
+    `r.name = ANY($3::text[])`,
   ]
   if (filters.person && filters.person !== 'Everyone') {
     params.push(filters.person)
@@ -43,8 +43,6 @@ function buildWorkWhere(filters: WorkFilters, user: AuthedRequest['user']) {
     params.push(filters.road)
     where.push(`rd.name = $${params.length}`)
   }
-  const visibility = appendTicketVisibilitySql(user!, params)
-  if (visibility) where.push(visibility)
   return { from, to, params, where }
 }
 
@@ -66,7 +64,7 @@ const eventSelect = `
 router.get('/work', authorize('Work report', 'v'), async (req: AuthedRequest, res) => {
   try {
     const filters = filtersSchema.parse(req.query)
-    const { from, to, params, where } = buildWorkWhere(filters, req.user)
+    const { from, to, params, where } = buildWorkWhere(filters)
 
     const events = await query(
       `${eventSelect}
@@ -98,7 +96,7 @@ router.get('/work', authorize('Work report', 'v'), async (req: AuthedRequest, re
 router.get('/work/export', authorize('Work report', 'v'), async (req: AuthedRequest, res) => {
   try {
     const filters = filtersSchema.parse(req.query)
-    const { params, where } = buildWorkWhere(filters, req.user)
+    const { params, where } = buildWorkWhere(filters)
 
     const result = await query(
       `SELECT u.full_name, t.public_id, e.event_type, e.cost, e.created_at, rd.name AS road_name

@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from 'express'
 import { ApiError, handleApiError } from '../lib/api-error.js'
 import { denyToken, isTokenDenied, verifyAccessToken } from '../lib/auth.js'
 import { query } from '../db/pool.js'
+import { isFieldRoleName } from '../lib/permissions.js'
 import type { PermissionFlag, RoadScope, ScreenName } from '../types/api.js'
 
 export type AuthUser = {
@@ -17,6 +18,8 @@ export type AuthUser = {
   roadIds: string[]
   roadNames: string[]
   permissions: Record<string, string>
+  pushNotificationsEnabled: boolean
+  playNotificationSound: boolean
   jti: string
   tokenExp: number
 }
@@ -46,9 +49,12 @@ export async function loadAuthUser(
     role_name: string
     scope: RoadScope
     password_version: number
+    push_notifications_enabled: boolean
+    play_notification_sound: boolean
   }>(
     `SELECT u.id, u.full_name, u.email, u.mobile, u.status, u.role_id,
             COALESCE(u.password_version, 0) AS password_version,
+            u.push_notifications_enabled, u.play_notification_sound,
             r.name AS role_name, r.scope
      FROM users u
      JOIN roles r ON r.id = u.role_id
@@ -105,6 +111,8 @@ export async function loadAuthUser(
     roadIds: roads.rows.map((r) => r.road_id),
     roadNames: roads.rows.map((r) => r.name),
     permissions,
+    pushNotificationsEnabled: row.push_notifications_enabled !== false,
+    playNotificationSound: row.play_notification_sound !== false,
     jti,
     tokenExp: exp,
   }
@@ -168,13 +176,10 @@ export function assertRoadAccess(user: AuthUser, roadId: string) {
   }
 }
 
-/** Site attendant / Technician / Engineer may scan and raise on any road; other roles still use road scope. */
+/** Site attendant and field roles (FIELD_ROLES) may scan and raise on any road; other roles still use road scope. */
 export function assertRoadAccessUnlessFieldWork(user: AuthUser, roadId: string) {
-  if (
-    user.roleName === 'Site attendant' ||
-    user.roleName === 'Technician' ||
-    user.roleName === 'Engineer'
-  ) {
+  if (user.roleName === 'Site attendant' || isFieldRoleName(user.roleName)) {
     return
-  }  assertRoadAccess(user, roadId)
+  }
+  assertRoadAccess(user, roadId)
 }

@@ -20,6 +20,7 @@ export type PermissionFlag = 'v' | 'c' | 'e' | 'a' | 'x' | 'd'
 
 export type ScreenName =
   | 'Dashboard'
+  | 'Slot View'
   | 'Raise ticket'
   | 'Update ticket'
   | 'All tickets'
@@ -53,6 +54,12 @@ export interface PushConfig {
   available: boolean
   publicKey: string | null
   registered: boolean
+}
+
+/** Application-level notification preferences, stored per user (not per browser). */
+export interface NotificationPreferences {
+  pushNotificationsEnabled: boolean
+  playNotificationSound: boolean
 }
 
 export interface PushSubscriptionSummary {
