@@ -9,6 +9,7 @@ import {
   requireAuth,
   type AuthedRequest,
 } from '../middleware/auth.js'
+import { isFieldRoleName } from '../lib/permissions.js'
 
 const router = Router()
 router.use(requireAuth)
@@ -16,16 +17,12 @@ router.use(requireAuth)
 const categoryNameSchema = z.string().trim().min(2).max(120)
 const subcategoryNameSchema = z.string().trim().min(2).max(120)
 
-/** Issue master edit, or Technician / Engineer (field staff correcting wording/severity). */
+/** Issue master edit, or field staff (FIELD_ROLES) correcting wording/severity. */
 function authorizeIssueSubUpdate(req: AuthedRequest, res: Response, next: NextFunction) {
   try {
     const user = req.user
     if (!user) throw new ApiError(401, 'Unauthorized', 'UNAUTHORIZED')
-    if (
-      hasPermission(user, 'Issue master', 'e') ||
-      user.roleName === 'Technician' ||
-      user.roleName === 'Engineer'
-    ) {
+    if (hasPermission(user, 'Issue master', 'e') || isFieldRoleName(user.roleName)) {
       return next()
     }
     throw new ApiError(403, 'Forbidden', 'FORBIDDEN')

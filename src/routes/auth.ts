@@ -25,6 +25,7 @@ import {
   type AuthUser,
   type AuthedRequest,
 } from '../middleware/auth.js'
+import type { NotificationPreferences } from '../types/api.js'
 
 const router = Router()
 
@@ -52,6 +53,10 @@ function toClientUser(u: AuthUser) {
     scope: u.scope,
     roads: u.roadNames,
     permissions: u.permissions,
+    notificationPreferences: {
+      pushNotificationsEnabled: u.pushNotificationsEnabled,
+      playNotificationSound: u.playNotificationSound,
+    } satisfies NotificationPreferences,
   }
 }
 const loginSchema = z.object({
@@ -277,6 +282,48 @@ router.patch('/me', requireAuth, async (req: AuthedRequest, res) => {
       version.rows[0].password_version,
     )
     return ok(res, toClientUser(authUser), 'Profile updated')
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
+const notificationPreferencesSchema = z
+  .object({
+    pushNotificationsEnabled: z.boolean().optional(),
+    playNotificationSound: z.boolean().optional(),
+  })
+  .strict()
+  .refine(
+    (value) => value.pushNotificationsEnabled !== undefined || value.playNotificationSound !== undefined,
+    { message: 'At least one preference is required' },
+  )
+
+/** Own preferences only: the target is always the authenticated user, never a body/path id. */
+router.patch('/me/notification-preferences', requireAuth, async (req: AuthedRequest, res) => {
+  try {
+    const body = notificationPreferencesSchema.parse(req.body)
+    const userId = req.user!.id
+
+    await query(
+      `UPDATE users SET
+         push_notifications_enabled = COALESCE($2, push_notifications_enabled),
+         play_notification_sound = COALESCE($3, play_notification_sound),
+         updated_at = NOW()
+       WHERE id = $1`,
+      [userId, body.pushNotificationsEnabled ?? null, body.playNotificationSound ?? null],
+    )
+
+    const version = await query<{ password_version: number }>(
+      `SELECT COALESCE(password_version, 0) AS password_version FROM users WHERE id = $1`,
+      [userId],
+    )
+    const authUser = await loadAuthUser(
+      userId,
+      req.user!.jti,
+      req.user!.tokenExp,
+      version.rows[0].password_version,
+    )
+    return ok(res, toClientUser(authUser), 'Notification preferences updated')
   } catch (error) {
     return handleApiError(res, error)
   }

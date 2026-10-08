@@ -12,9 +12,9 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 |------|---------|
 | Admin | Full control including users and masters |
 | Project manager | City-wide ops; can approve Pending signups and manage users (Users `vce...`); cannot delete masters |
-| Control room | Raise and route tickets; does not close or edit masters |
-| Technician | Scan any road; update/close tickets they hold or raised (any road); list assignee/raiser-scoped |
-| Site attendant | Scan QR and raise tickets on any road; list raiser-scoped; Device Sync; Issue master CRUD |
+| Control room | Raise tickets and watch every ticket; does not close or edit masters |
+| Technician | Scan any road; update/close any open ticket (Phase 51 — no holder); sees every ticket |
+| Site attendant | Scan QR and raise tickets on any road; sees every ticket; Device Sync; Issue master CRUD |
 | AMC officer | View-only everywhere |
 | Custom roles | Created via Roles & permissions UI |
 
@@ -23,9 +23,9 @@ The frontend remains **unchanged unless explicitly authorized**. The API supplie
 ## Features (API-backed)
 
 1. **Authentication** — Email or mobile + password, JWT session, logout, current user (`/me`), forgot password, reset password
-2. **Authorization** — Screen × flag matrix (`v c e a x d`), road scope, ticket holder rules
+2. **Authorization** — Screen × flag matrix (`v c e a x d`), road scope (no ticket holder since Phase 51)
 3. **Dashboard** — Fleet status, down reasons, road-wise status, oldest open tickets
-4. **Tickets** — List (tabs/filters), raise, detail, assign, site-update, close; one non-`Closed` ticket per device (`409 OPEN_TICKET_EXISTS` with `openTicketId`); raise requires Slot Identifier (`400 SLOT_IDENTIFIER_REQUIRED` if missing); 7-day reopen = same ticket. **Multiple issues:** raise/update/close accept `issues: [{ categoryId, subCategoryId }, …]` (legacy single pair still works); detail returns `issuesReported` / `issuesFound`; primary pair kept on ticket scalars. List rows include `daysOpen` and `daysAfterClose` (whole days since `closed_at`, or `null` if still open). **Pagination:** `page`/`limit` with default `page=1`, `limit=10`; allowed limits `10|25|50|100`; DB `LIMIT`/`OFFSET` after visibility + filters; response `pagination: { page, limit, total, totalPages }`. **Statuses:** `Open`, `Under repair`, `Waiting for spare`, `Closed` (no `New`). **Visibility:** Admin and Project manager see all (within road scope). All other roles see only tickets where `assignee_id` or `raised_by_user_id` is the current user (enforced in SQL and on detail/mutations). **Add Update:** requires an assignee (`409 TICKET_NOT_ASSIGNED` if none); only **Admin** or the **current assignee** may post (`403 NOT_ASSIGNED_USER` otherwise); required `visitedBy` (active Technician or Engineer UUID) with structured `VALIDATION_ERROR` field details.
+4. **Tickets** — List (tabs `open` / `urp` / `cls` since Phase 52, filters, `age=over3`), raise, detail, site-update, close (assign removed in Phase 51 — see "Main/Sub issue resolution and no assignment"); duplicates detected by issue (Phase 50): the same Open issue on the same device → `409 OPEN_TICKET_EXISTS` with `openTicketId` + `details.issues`, a different issue → new ticket (a device may hold several open tickets), a raise after close → new ticket (no reopen); raise requires Slot Identifier (`400 SLOT_IDENTIFIER_REQUIRED` if missing). **Multiple issues:** raise/update/close accept `issues: [{ categoryId, subCategoryId }, …]` (legacy single pair still works); detail returns `issuesReported` / `issuesFound`; primary pair kept on ticket scalars. List rows include `daysOpen` and `daysAfterClose` (whole days since `closed_at`, or `null` if still open). **Pagination:** `page`/`limit` with default `page=1`, `limit=10`; allowed limits `10|25|50|100`; DB `LIMIT`/`OFFSET` after visibility + filters; response `pagination: { page, limit, total, totalPages }`. **Statuses:** `Open`, `Under repair`, `Waiting for spare`, `Closed` (no `New`). **Visibility (Phase 51):** every user with `All tickets` `v` sees every ticket on every road. **Add Update (Phase 51):** any user with `Update ticket` `e` may post to any non-Closed ticket (no assignee, no holder); `closeTicket: true` additionally needs `x`; required `visitedBy` (active Technician or Engineer UUID) with structured `VALIDATION_ERROR` field details.
 5. **Devices** — List, add, history, QR scan/lookup (`GET /api/devices/scan?q=`), QR label PNG, export; optional `latitude` / `longitude` (TEXT). **List / export / history are city-wide** for every role with Device list/history view (not filtered by `assigned_roads`). Open-ticket overlays on list/history remain ticket-visibility scoped. Create/PATCH keep `assertRoadAccess`. Scan and ticket raise use `assertRoadAccessUnlessFieldWork` (Site attendant / Technician bypass). **Status cards:** click Working / Under repair / Not working → same Device List with `?status=` (exact labels; SQL `derived_status` filter); not the Ticket page. Tile counts stay stable when `status` is set. **Pagination:** same `page`/`limit` rules as tickets (DB-level after status/repeats filters). **Device Sync** — `POST /api/device-sync` starts an async import from SmartPark (locations → roads, then QR pages → devices); poll `GET /api/device-sync/:id` or `/latest` for `started` / `completed` / `failed`.
 6. **Issue master** — Categories / sub-categories with severity; hard-delete unused categories and subs (`Issue master` `d`); deactivate if used (`409 IN_USE`); create/patch names trimmed `min(2)`/`max(120)`; sub create requires active parent category
 7. **Parts master** — Active parts with `amount` (`NUMERIC(12,2)`); list/lookups return `{ id, name, amount }`; create/patch via `/api/parts` (Issue master `c`/`e` or Technician/Engineer); hard-delete unused via `DELETE /api/parts/:id` (`Issue master` `d`); used → `409 IN_USE` (deactivate instead)
@@ -89,7 +89,7 @@ Canonical `tickets.status` values (exactly four; never `New`):
 - Unassigned raise writes `Open` (not `New`).
 - List tab key `new` is UI-only: **unassigned and not closed** (not a stored status). Tab `asg` = has assignee; `cls` = Closed.
 - List/export/tiles presentation: if a ticket has an assignee but stored status is still `Open`/`New`, list `status` is shown as `Under repair` (DB row unchanged). Detail API still returns stored status (normalized `New` → `Open`).
-- “One open ticket” means `status <> 'Closed'`, not status `Open` only.
+- “Open ticket” means `status <> 'Closed'`, not status `Open` only (a device may hold several — Phase 50).
 - Existing `New` rows migrated to `Open` (`007_ticket_status_open.sql`).
 
 **FRONTEND CHANGE REQUIRED:** All Tickets / detail badges must show `Open`, not `New`. Closed-tab aging can use list field `daysAfterClose` (do not recompute from dates in the browser unless needed). Trust list `status` for Assigned-tab pills vs Under repair tile alignment.
@@ -106,7 +106,7 @@ Canonical `tickets.status` values (exactly four; never `New`):
 ### Ticket list aging fields
 
 - `GET /api/tickets` each row: `daysOpen` (raised → closed or now) and `daysAfterClose` (now → `closed_at`, or `null` if not closed).
-- `daysAfterClose` is list-only (not ticket detail). Supports the 7-day reopen rule in the UI.
+- `daysAfterClose` is list-only (not ticket detail). Display only — the 7-day reopen rule was removed in Phase 50.
 - List tiles (`underRepair`, `waitingSpare`, `openOver3`) and CSV export use the same list presentation status rules as row `status`.
 
 ### List pagination requirements
@@ -137,22 +137,88 @@ Canonical `tickets.status` values (exactly four; never `New`):
 
 **FRONTEND CHANGE REQUIRED:** PartChips must send part UUIDs (not names). The update/close `cost` field must be labour / non-part charges only — do not pre-add part prices into `cost`. PartMaster Delete → `DELETE /api/parts/:id`; on `IN_USE` offer deactivate. Image zoom/crop stay FE-only. IssueMaster: add `createIssueCategory`, `createIssueSubcategory`, `deleteIssueCategory` in `issues.js`; Delete unused category → `DELETE /api/issues/categories/:id`; on `IN_USE` offer deactivate.
 
-### Add Update restrictions (Phase 30)
+### Add Update: auto-assign and close with update (Phase 47)
 
-- Unassigned tickets (`assignee_id` null) cannot receive `POST /api/tickets/:id/updates` → `409` / `TICKET_NOT_ASSIGNED` / `error: "Ticket not assigned"`. This applies to **every** role, including Admin/PM — a ticket must be assigned before it can be worked. The updater is never silently made the assignee.
-- Only **Admin** or the **current assignee** may Add Update. User B (QR scan or otherwise) on a ticket assigned to A → `403` / `NOT_ASSIGNED_USER` / `error: "This ticket is assigned to another user"` with `details.assignedTo` (assignee display name). Project manager and raiser do **not** bypass unless they are the assignee. List visibility is not applied on this path so the toast message is not replaced by a generic road Forbidden.
-- `visitedBy` is required (UUID). Missing/invalid → `400` / `VALIDATION_ERROR` with `details[].field = "visitedBy"`. Must be an Active **Technician** or **Engineer**. Stored in `ticket_events.meta.visitedBy`.
-- **Engineer** role exists (Technician-like permissions); lookups `/api/lookups/technicians` include Engineers.
+- **Field roles** (`FIELD_ROLES`: Technician, Engineer, **Electrician** — new role, migration `022`) can raise tickets (`023` guarantees `Raise ticket` `v`+`c`). `assigneeId` on raise stays optional; when sent it must be an eligible field worker (`400 INVALID_ASSIGNEE`).
+- `POST /api/tickets/:id/updates` on an **unassigned** ticket:
+  - field role → the ticket is assigned to the authenticated updater (their user id), even if they did not raise it — this is how the QR flow (`openTicketId` → update) works;
+  - Admin/PM → must send `handoverToUserId` (eligible assignee), else `409` / `TICKET_NOT_ASSIGNED` / "Select an assignee to update an unassigned ticket";
+  - other roles → `409 TICKET_NOT_ASSIGNED`.
+- On an **assigned** ticket the assignee never changes automatically; access stays Admin/PM, assignee or raiser (others `403`).
+- New optional `closeTicket: boolean` (default `false`). Only `true` closes: needs `Update ticket` `x` + ticket holder (`403 NOT_HOLDER` otherwise); the ticket becomes `Closed` with `closed_at`, and the single update event (`status_label: "Closed"`) appears in `workHistory`. Omitted/`false` keeps the ticket open.
+- Resolve = `updateType: "Site visit — resolved"` (`resolvedReady: true`); it does **not** close unless `closeTicket: true`. No `Resolved` status.
+- Claim + update + close run in one transaction with a row lock; a concurrent claim loses with `409` / `TICKET_ALREADY_ASSIGNED`.
+- A claim sends the existing `ticket.assigned` notification after commit.
+- Response adds `assigneeId`, `autoAssigned`, `closed`; existing fields unchanged.
 - One Add Update request produces exactly one work-history entry. If the on-site issue changes, the found issue is stored on that visit entry (and in `ticket_issues`); the API must not add a second `Issue reclassified` entry.
-- `resolvedReady` is `true` only for `updateType: "Site visit — resolved"`. `"Site visit — not resolved"` returns `resolvedReady: false` and is stored as a `visit_open` event.
+- Photos may still be attached (`PATCH …/updates/:eventId/photos`) to the author's own closing update after the ticket closed.
 
-**FRONTEND CHANGE REQUIRED:** Send `visitedBy` on Add Update; toast `Ticket not assigned` / `This ticket is assigned to another user` from `error`; show field error under Visited By from `details`.
+**FRONTEND CHANGE REQUIRED:** remove the client-side "no assignee / not assigned to you" gate for field roles in `TicketUpdate.jsx`; add Close Ticket Yes/No (default No) sending `closeTicket`; Admin/PM assignee picker on unassigned tickets sent as `handoverToUserId`; toast `TICKET_ALREADY_ASSIGNED` and reload.
+
+### Per-issue Open/Resolved (Phase 49)
+
+- Every **reported** issue (`issuesReported[]`) now has `id` and `status` (`Open` / `Resolved`, plus `resolvedAt`, `resolvedBy`). Migration `024_ticket_issue_status.sql`; legacy single-issue tickets are backfilled with a resolvable row; issues on Closed tickets start Resolved.
+- `POST /api/tickets/:id/updates` accepts optional `resolveIssueIds: uuid[]`. Each id must be an Open reported issue **of this ticket**: unknown / other ticket's id → `400 INVALID_ISSUES`; already resolved (including a concurrent loser) → `409 ISSUE_ALREADY_RESOLVED`. Checked after the existing authorization and inside the existing row-locked transaction; a rejection writes nothing.
+- One update may resolve several issues. Resolving the last one does **not** close the ticket; `closeTicket: true` or `POST /:id/close` resolves any still-Open issues with the closing event.
+- `workHistory[].resolvedIssues` shows which update resolved which issue. Update response adds `resolvedIssues` and `openIssueCount`.
+- Dashboard `downReasons` counts Open reported issues on open tickets (resolved issues drop out); new `openIssues` / `openTicketsCount`. Device status and ticket counts are unchanged.
+- No new notifications; Control room still needs `Update ticket` `e` (not granted by default) to add any update.
+
+### Issue-level duplicate tickets (Phase 50)
+
+- Duplicate key is **device + Open reported issue**, not device. Same Open issue → `409 OPEN_TICKET_EXISTS` (`details.openTicketId` / `ticketId` as before, plus `details.issues[]` listing every duplicate); a mixed selection is rejected whole. A different issue, an issue only on a Closed ticket, or one already Resolved on a still-open ticket → `201` new ticket. A device may now hold several open tickets.
+- The 7-day `REOPEN_SAME_TICKET` rule is removed: a raise never reopens or modifies a Closed ticket.
+- Migration `025_open_issue_per_device.sql`: `ticket_issues.device_id` (backfilled), stray Open issues on Closed tickets → Resolved, drops `idx_tickets_one_open_per_device`, adds partial unique `idx_ticket_issues_one_open_issue_per_device (device_id, subcategory_id) WHERE role='reported' AND status='Open'`. Concurrent same-issue raises: exactly one `201`, the other `409`.
+- Scan (`/scan`, `/slot-mac`) adds `openTickets: [{ id, status, assigneeId, age, issues[] }]` (Open issues only); `openTicketId` / `openTicketIssue` / `openTicketAge` stay (worst ticket).
+- Device status (Dashboard, Device list, Device detail, scan) = the **worst** open ticket via shared `openTicketLateralSql`; a device with several open tickets counts once. Device list rows add `openTicketCount`. Roads `down` counts distinct devices. Device-detail days-down starts at the earliest open raise.
+- Updates are unchanged: several authorized users can resolve different issues on the same ticket; nothing creates a ticket on update. Notifications unchanged (new ticket notifies, `409` / update do not).
+- Smoke: `npm run test:smoke:multi-ticket` (cases 1–12); `smoke-writes` adds a different-issue `201` case.
+
+**FRONTEND CHANGE REQUIRED (done, frontend Phase 50):** Raise drops the device-level block, lists open tickets with their open issues, pre-checks same-issue duplicates and handles `details.issues`; QR Update picks among several open tickets and links to raise a different issue.
+
+### Main/Sub issue resolution and no assignment (Phase 51)
+
+Supersedes the holder / auto-claim rules of Phases 18, 46 and 47 above (those sections are kept as history).
+
+- **Resolve by group:** `POST /api/tickets/:id/updates` accepts `resolveCategoryIds: uuid[]` (Main Issue — resolves every Open reported sub of that category on this ticket) and `resolveIssueIds: uuid[]` (single Sub Issue). The server resolves the union. Category not on this ticket / unknown id → `400 INVALID_ISSUES`; an issue id that is no longer Open, or a category with no Open sub left → `409 ISSUE_ALREADY_RESOLVED`. A partly resolved category resolves only its remaining Open subs.
+- **Add issues on update:** `addIssues: [{ categoryId, subCategoryId }]` appends Open reported issues after the existing ones (they become resolvable in later updates, or in the same update by `resolveCategoryIds`). Sub already on this ticket → `409 ISSUE_ALREADY_ON_TICKET` with `details.issues`; sub Open on another ticket of the device → `409 OPEN_TICKET_EXISTS` (same `details` as raise). Response adds `addedIssues[]`.
+- Everything is checked and written in one row-locked transaction; any rejection writes nothing. Resolving every issue never closes the ticket — only `closeTicket: true` (with `x`) or `POST /:id/close`.
+- **No assignment:** `POST /api/tickets/:id/assign` is removed (`404`). Raise ignores `assigneeId` and always creates `Open`. No auto-claim, no handover, no `ticket_assignments` writes, no `ticket.assigned` notifications. Every user with `All tickets` `v` sees every ticket on every road (list, detail, export, dashboard, devices, reports); `Update ticket` `e` updates any open ticket; `x` closes. Photo attach on an event: its author or Admin/PM.
+- List tabs are `open` and `cls` (`tab=asg` → `400`); `tabCounts { open, cls }`; `assignee` filter and `assignedTo` / `actionLabel` / `actionPrimary` removed. Detail drops `assigneeId` / `assignmentTrail`. Update response drops `assigneeId` / `autoAssigned`.
+- **Historical data:** `tickets.assignee_id`, `ticket_assignments` and old assignment notifications are kept unchanged (no migration). An old Open ticket with an assignee still reads "Under repair"; old `assigned` events stay in work history.
+- Smoke: `npm run test:smoke:issue-groups`, `npm run test:smoke:no-assignment`.
+
+**FRONTEND CHANGE REQUIRED (done, frontend Phase 51):** grouped Resolve Issues panels with Another Issue / Add another issue; remove every Assign / Reassign surface, the Assigned tab and the QR assignee gate.
+
+### Under repair tab and list age filter (Phase 52)
+
+Supersedes the Phase 51 two-tab list (`open` = every non-Closed).
+
+- List tabs: `open` = raised, no update yet (`Open` with no historical assignee); `urp` = at least one update (`Under repair`, `Waiting for spare`, or legacy Open + historical assignee); `cls` = Closed. `tab=asg` → `400`. Row `tab` uses the same rules.
+- `status` narrows within the tab (`Under repair` / `Waiting for spare` / `All`); older values still work.
+- `age=over3` (optional; other values → `400`) limits `open` / `urp` to tickets raised more than 3 days ago; ignored on `cls`.
+- Response: `tabCounts { open, urp, cls }` (the `open` / `urp` counts respect `age`); new `over3Counts { open, urp }`; `tiles` unchanged (base filters only).
+- Smoke: `npm run test:smoke:no-assignment` (Phase 52 block).
+
+**FRONTEND CHANGE REQUIRED (done, frontend Phase 52):** three tabs, clickable summary cards (tab + status + age), Under-Repair-only status filter, sliding tab transition.
+
+### Slot View (Phase 53)
+
+A slot-centric, read-only view of existing ticket data. Gate: new permission screen `Slot View` `v` (backend `authorize` on every route). Default: Admin and Project manager only; any role can be granted or revoked in Roles & permissions. Migration `026_slot_view_permission.sql` adds the row for every existing role.
+
+- `GET /api/slot-view?q=&page=&limit=` — only slots with at least one ticket (any status). Row `{ id, uuid, slotId, slotLabel, road, ticketCount }`. `ticketCount` counts tickets, never issues (a ticket with 3 issues = 1). Natural Slot Label ascending (`3-2` before `3-12`), SQL pagination (10/25/50/100), `q` on Slot Label / Slot Id / road.
+- `GET /api/slot-view/:slotId` (Slot Id, `PD-xxxx` or UUID; unknown → `404 NOT_FOUND`) — `{ slot, ticketCount, unresolvedIssues }`. Unresolved = reported Sub Issues whose persisted status is `Open`, one entry per Sub Issue (by `subCategoryId`) with the ticket(s) holding it. Resolved Sub Issues never appear; a Main Issue stays while any of its Sub Issues is Open.
+- `GET /api/tickets?device=<slot>` — the slot's tickets in the normal list shape; without `tab` every status (Closed included) is listed.
+- Slot ↔ ticket ↔ issue relationships are resolved server-side (`tickets.device_id`); nothing is taken from the client. The ticket section keeps the `All tickets` `v` gate of `GET /api/tickets`.
+- Smoke: `npm run test:smoke:slot-view`.
+
+**FRONTEND CHANGE REQUIRED (done, frontend Phase 53):** sidebar Slot View after Dashboard (gated on `Slot View` v), Slot list and Slot detail pages, Slot View row in the Roles & permissions matrix.
 
 ### Work report (Phase 31)
 
 - `GET /api/reports/work?view=&from=&to=&person=&road=` — people-centric payload matching WorkReport UI; actors Technician + Engineer; road filter on `roads.name`; `days` / `daysInPeriod` from calendar; `tickets` view-shaped (day / week|range / month).
 - `GET /api/reports/work/export` — same filters; CSV `Person,Ticket,Event,Cost,Road,When`.
-- Visibility: Admin/PM city-wide; others assignee/raiser scoped.
+- Visibility: every viewer with Work report `v` sees all events (Phase 51 — no assignee/raiser scoping).
 
 **FRONTEND CHANGE REQUIRED:** Replace `REPORT` mock in WorkReport.jsx with `GET /api/reports/work`; Export → `/work/export`; Person options from lookups; gate page with Work report `v`.
 
@@ -185,6 +251,26 @@ Canonical `tickets.status` values (exactly four; never `New`):
 - Only the authenticated user's rows are affected. A user can never mark another user's notification read; the per-id route still returns `404` for someone else's notification.
 - `updated: 0` means nothing was unread, so no row is rewritten. The unread badge reflects the change on the next `/unread-count` poll.
 - This makes opening a ticket directly (not only via the bell) clear its unread notification, while leaving every other ticket's notifications untouched.
+
+### Notification preferences (Phase 54)
+
+Two per-user application preferences, stored on `users` (migration `027_user_notification_preferences.sql`):
+
+| Column | API field | Default | Meaning |
+|--------|-----------|---------|---------|
+| `push_notifications_enabled` | `pushNotificationsEnabled` | `TRUE` | Whether this user receives browser Web Push at all |
+| `play_notification_sound` | `playNotificationSound` | `TRUE` | Whether a delivered push asks for sound |
+
+- Both default to `TRUE`, so existing users keep today's behaviour (every subscribed user received push with sound) and nobody has to re-enable anything after deployment.
+- `POST /api/auth/login` and `GET /api/auth/me` return `user.notificationPreferences`. No extra request is needed after login.
+- `PATCH /api/auth/me/notification-preferences` (`requireAuth`) with `{ pushNotificationsEnabled?, playNotificationSound? }`. The schema is strict: at least one boolean, and unknown keys such as `userId` get `400 VALIDATION_ERROR`. The target is always the authenticated user; there is no user id in the path or body. Returns the client user, like `PATCH /me`.
+- **Delivery:** `deliverNotificationPush` only selects users with `push_notifications_enabled = TRUE`. This is in the one existing JOIN query, so it adds no extra queries and applies to **every** subscription the user holds (all browsers and devices), whatever the browser permission or saved subscriptions.
+- Suppressed rows keep `push_sent_at = NULL`. They are not replayed when push is turned back on. The in-app notification row, list, unread count and mark-read are unaffected.
+- **Sound:** the payload carries `notification.silent = !play_notification_sound` and `data.playSound`. The sound preference never decides whether a push is delivered.
+- Browser permission is client state and is never stored. Turning push OFF keeps `push_subscriptions` rows; the delivery filter blocks them.
+- Smoke: `npm run test:smoke:notification-prefs`.
+
+**FRONTEND CHANGE REQUIRED (done, frontend Phase 54):** push controls moved from the bell popover to a Settings → Notifications panel. Logout keeps the browser subscription and drops only its server record.
 
 ### Signup approval requirements
 
