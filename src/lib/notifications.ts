@@ -5,6 +5,8 @@ import { ApiError } from './api-error.js'
 import { deviceDisplayId } from './device-ref.js'
 import { paginationMeta, type AllowedPageLimit } from './pagination.js'
 import { FIELD_ROLES } from './permissions.js'
+import { appendUserVisibilitySql } from './user-access.js'
+import { hasPermission, type AuthUser } from '../middleware/auth.js'
 import type {
   AppNotification,
   PushConfig,
@@ -240,6 +242,98 @@ export async function createNewTicketNotifications(ticketId: string, eventId: st
   return createdIds
 }
 
+/** Roles that can approve signup requests (Users `e`) and are alerted when one arrives. */
+export const USER_SIGNUP_NOTIFICATION_ROLES = ['Admin', 'Project manager'] as const
+
+/**
+ * Alert every approver that a new account is waiting for approval.
+ * Recipients also need All tickets `v`, which gates the notification bell and push delivery.
+ * The signup user's id doubles as the event id: an account is requested exactly once.
+ */
+export async function createUserSignupNotifications(userId: string) {
+  const userResult = await query<{
+    id: string
+    full_name: string
+    mobile: string
+    email: string | null
+    created_at: Date | string
+  }>(
+    `SELECT id, full_name, mobile, email, created_at FROM users WHERE id = $1`,
+    [userId],
+  )
+  if (!userResult.rowCount) {
+    throw new ApiError(404, 'User not found for notification', 'NOT_FOUND')
+  }
+  const applicant = userResult.rows[0]
+
+  const recipients = await query<{ id: string }>(
+    `SELECT DISTINCT u.id
+     FROM users u
+     JOIN roles r ON r.id = u.role_id
+     JOIN role_permissions users_perm
+       ON users_perm.role_id = r.id AND users_perm.screen = 'Users' AND users_perm.can_edit = TRUE
+     JOIN role_permissions tickets_perm
+       ON tickets_perm.role_id = r.id AND tickets_perm.screen = 'All tickets' AND tickets_perm.can_view = TRUE
+     WHERE u.status = 'Active'
+       AND r.name IN (${rolePlaceholders(1, USER_SIGNUP_NOTIFICATION_ROLES)})`,
+    [...USER_SIGNUP_NOTIFICATION_ROLES],
+  )
+
+  const title = 'New account approval request'
+  const message = `${applicant.full_name} (${applicant.mobile}) has requested an account and is waiting for approval.`
+  const data = {
+    reference: applicant.full_name,
+    canOpen: true,
+    url: '/users?status=Pending',
+    applicant: {
+      id: applicant.id,
+      name: applicant.full_name,
+      mobile: applicant.mobile,
+      email: applicant.email,
+    },
+    createdAt: applicant.created_at,
+  }
+
+  const createdIds = await withTransaction(async (client) => {
+    const ids: string[] = []
+    for (const recipient of recipients.rows) {
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO notifications (
+           recipient_user_id, type, title, message,
+           related_entity_type, related_entity_id, data, event_id
+         ) VALUES ($1, 'user.signup_requested', $2, $3, 'user', $4, $5::jsonb, $4)
+         ON CONFLICT (recipient_user_id, type, related_entity_type, related_entity_id, event_id)
+         DO NOTHING
+         RETURNING id`,
+        [recipient.id, title, message, applicant.id, JSON.stringify(data)],
+      )
+      if (inserted.rowCount) ids.push(inserted.rows[0].id)
+    }
+    return ids
+  })
+
+  scheduleNotificationPush(createdIds)
+  return createdIds
+}
+
+/**
+ * Once a signup request is handled (approved, rejected or the account deleted), its alert
+ * is no longer actionable for any approver, so it is marked read for everyone.
+ */
+export async function resolveUserSignupNotifications(userId: string) {
+  const result = await query<{ id: string }>(
+    `UPDATE notifications
+     SET read_at = NOW()
+     WHERE type = 'user.signup_requested'
+       AND related_entity_type = 'user'
+       AND related_entity_id = $1
+       AND read_at IS NULL
+     RETURNING id`,
+    [userId],
+  )
+  return result.rowCount ?? 0
+}
+
 /**
  * Mark every unread notification the given user holds for one ticket as read.
  * Scoped to `recipient_user_id`, so a user can never mark another user's row.
@@ -302,6 +396,33 @@ export async function getUnreadNotificationCount(userId: string) {
      FROM notifications
      WHERE recipient_user_id = $1 AND read_at IS NULL`,
     [userId],
+  )
+  return result.rows[0]?.n ?? 0
+}
+
+/** Unread notifications about tickets only; drives the Tickets menu badge. */
+export async function getUnreadTicketNotificationCount(userId: string) {
+  const result = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n
+     FROM notifications
+     WHERE recipient_user_id = $1 AND read_at IS NULL AND related_entity_type = 'ticket'`,
+    [userId],
+  )
+  return result.rows[0]?.n ?? 0
+}
+
+/**
+ * Accounts waiting for approval, counted with the Users list visibility rule so the
+ * Users menu badge matches the Pending approval tile. Zero for anyone who cannot approve.
+ */
+export async function getPendingApprovalCount(user: AuthUser) {
+  if (!hasPermission(user, 'Users', 'e')) return 0
+  const params: unknown[] = []
+  const result = await query<{ n: number }>(
+    `SELECT COUNT(*)::int AS n
+     FROM users u LEFT JOIN roles r ON r.id = u.role_id
+     WHERE u.status = 'Pending' AND ${appendUserVisibilitySql(user, params)}`,
+    params,
   )
   return result.rows[0]?.n ?? 0
 }

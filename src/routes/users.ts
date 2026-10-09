@@ -12,6 +12,7 @@ import {
   omitPasswordHash,
   passwordSchema,
 } from '../lib/auth.js'
+import { resolveUserSignupNotifications } from '../lib/notifications.js'
 import { appendUserVisibilitySql, assertNotLastActiveAdmin } from '../lib/user-access.js'
 
 const router = Router()
@@ -21,6 +22,7 @@ router.get('/', authorize('Users', 'v'), async (req: AuthedRequest, res) => {
   try {
     const q = String(req.query.q || '').trim().toLowerCase()
     const statusFilter = String(req.query.status || '').trim()
+    const roleFilter = String(req.query.role || '').trim()
     const params: unknown[] = []
     // Own account is never listed, and a non-Admin viewer never sees Admin accounts.
     const clauses: string[] = [appendUserVisibilitySql(req.user!, params)]
@@ -34,6 +36,10 @@ router.get('/', authorize('Users', 'v'), async (req: AuthedRequest, res) => {
     if (statusFilter === 'Active' || statusFilter === 'Inactive' || statusFilter === 'Pending') {
       params.push(statusFilter)
       clauses.push(`u.status = $${params.length}`)
+    }
+    if (roleFilter) {
+      params.push(roleFilter)
+      clauses.push(`r.name = $${params.length}`)
     }
 
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
@@ -209,6 +215,14 @@ router.patch('/:id', authorize('Users', 'e'), async (req, res) => {
       }
     }
 
+    if (existing.rows[0].status === 'Pending' && body.status && body.status !== 'Pending') {
+      try {
+        await resolveUserSignupNotifications(String(req.params.id))
+      } catch (notificationError) {
+        console.error('[notifications] failed to resolve signup alerts:', notificationError)
+      }
+    }
+
     return ok(res, omitPasswordHash(result.rows[0]), 'User updated')
   } catch (error) {
     return handleApiError(res, error)
@@ -261,6 +275,10 @@ router.delete('/:id', authorize('Users', 'd'), async (req: AuthedRequest, res) =
       )
       await client.query(
         `UPDATE device_sync_runs SET triggered_by_user_id = NULL WHERE triggered_by_user_id = $1`,
+        [targetId],
+      )
+      await client.query(
+        `DELETE FROM notifications WHERE related_entity_type = 'user' AND related_entity_id = $1`,
         [targetId],
       )
       await client.query(`DELETE FROM users WHERE id = $1`, [targetId])
