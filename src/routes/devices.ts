@@ -737,6 +737,8 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
       tickets: tickets.rows.map((t) => ({
         id: t.public_id,
         raisedDate: t.raised_at,
+        whatsappAt: t.whatsapp_at ?? null,
+        createdAt: t.created_at,
         reported: t.reported_sub,
         reportedCat: t.reported_cat,
         found: t.found_sub,
