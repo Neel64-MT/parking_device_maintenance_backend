@@ -16,6 +16,7 @@ import {
   verifyPassword,
 } from '../lib/auth.js'
 import { sendPasswordResetEmail } from '../lib/mail.js'
+import { createUserSignupNotifications } from '../lib/notifications.js'
 import { ok } from '../lib/respond.js'
 import { query } from '../db/pool.js'
 import {
@@ -112,11 +113,19 @@ router.post('/signup', async (req, res) => {
       throw new ApiError(500, 'Default signup role is not configured', 'INTERNAL_ERROR')
     }
 
-    await query(
+    const inserted = await query<{ id: string }>(
       `INSERT INTO users (full_name, mobile, email, password_hash, role_id, status)
-       VALUES ($1, $2, $3, $4, $5, 'Pending')`,
+       VALUES ($1, $2, $3, $4, $5, 'Pending')
+       RETURNING id`,
       [body.fullName.trim(), mobile, email, passwordHash, roleResult.rows[0].id],
     )
+
+    // The signup is already saved; a notification failure must not turn it into an error.
+    try {
+      await createUserSignupNotifications(inserted.rows[0].id)
+    } catch (notificationError) {
+      console.error('[notifications] failed after signup request:', notificationError)
+    }
 
     return ok(
       res,

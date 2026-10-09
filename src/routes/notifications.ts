@@ -2,8 +2,10 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { handleApiError } from '../lib/api-error.js'
 import {
+  getPendingApprovalCount,
   getPushConfig,
   getUnreadNotificationCount,
+  getUnreadTicketNotificationCount,
   listNotifications,
   markAllNotificationsRead,
   markNotificationRead,
@@ -87,7 +89,12 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
 
 router.get('/unread-count', authorize('All tickets', 'v'), async (req: AuthedRequest, res) => {
   try {
-    return ok(res, { count: await getUnreadNotificationCount(req.user!.id) })
+    const [count, ticketCount, pendingApprovalCount] = await Promise.all([
+      getUnreadNotificationCount(req.user!.id),
+      getUnreadTicketNotificationCount(req.user!.id),
+      getPendingApprovalCount(req.user!),
+    ])
+    return ok(res, { count, ticketCount, pendingApprovalCount })
   } catch (error) {
     return handleApiError(res, error)
   }
