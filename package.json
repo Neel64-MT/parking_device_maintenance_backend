@@ -21,7 +21,8 @@
     "test:smoke:issue-groups": "tsx scripts/smoke-issue-groups.ts",
     "test:smoke:no-assignment": "tsx scripts/smoke-no-assignment.ts",
     "test:smoke:slot-view": "tsx scripts/smoke-slot-view.ts",
-    "test:smoke:notification-prefs": "tsx scripts/smoke-notification-preferences.ts"
+    "test:smoke:notification-prefs": "tsx scripts/smoke-notification-preferences.ts",
+    "test:smoke:whatsapp-time": "tsx scripts/smoke-whatsapp-time.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",

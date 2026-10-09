@@ -59,6 +59,13 @@ function listStatus(status: string, assigneeId: string | null) {
   return s
 }
 
+/** When the ticket / update was posted in the WhatsApp group; the UI falls back to created_at. */
+const whatsappAtSchema = z
+  .string()
+  .refine((v) => !Number.isNaN(Date.parse(v)), 'Reported time must be a valid date and time')
+  .refine((v) => Date.parse(v) <= Date.now() + 5 * 60_000, 'Reported time cannot be in the future')
+  .nullish()
+
 function statusTone(status: string) {
   if (status === 'Closed') return 'ok'
   if (status === 'Under repair' || status === 'Waiting for spare') return 'warn'
@@ -193,6 +200,15 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
               ru.full_name AS raised_by_name,
               rc.name AS reported_cat, rs.name AS reported_sub,
               fc.name AS found_cat, fs.name AS found_sub,
+              COALESCE(
+                (SELECT au.full_name FROM users au WHERE au.id = t.assignee_id),
+                (SELECT u.full_name FROM ticket_events e JOIN users u ON u.id = e.actor_user_id
+                  WHERE e.ticket_id = t.id AND e.event_type NOT IN ('raised', 'assigned')
+                  ORDER BY e.created_at DESC LIMIT 1)
+              ) AS assigned_to_name,
+              (SELECT u.full_name FROM ticket_events e JOIN users u ON u.id = e.actor_user_id
+                WHERE e.ticket_id = t.id AND e.status_label = 'Closed'
+                ORDER BY e.created_at DESC LIMIT 1) AS closed_by_name,
               (SELECT COUNT(*)::int FROM ticket_events e
                 WHERE e.ticket_id = t.id
                   AND e.event_type IN ('visit_open', 'visit_resolved', 'waiting_spare', 'reclassified')
@@ -231,6 +247,11 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
         issueFound: t.found_sub || null,
         issueFoundDetail: t.found_cat || null,
         raisedBy: t.raised_by_name || null,
+        /** Historical assignee, else whoever added the latest update. */
+        assignedTo: t.assigned_to_name || null,
+        closedBy: t.status === 'Closed' ? t.closed_by_name || null : null,
+        whatsappAt: t.whatsapp_at ?? null,
+        createdAt: t.created_at,
         updates: t.updates,
         daysOpen,
         daysAfterClose: t.closed_at
@@ -272,19 +293,20 @@ router.get('/export', authorize('All tickets', 'v'), async (req: AuthedRequest, 
   try {
     const result = await query(
       `SELECT t.public_id, d.public_id AS device_public_id, d.slot_id, r.name AS road,
-              t.status, t.assignee_id, t.raised_at
+              t.status, t.assignee_id, t.raised_at,
+              COALESCE(t.whatsapp_at, t.created_at) AS whatsapp_time
        FROM tickets t
        JOIN devices d ON d.id = t.device_id
        JOIN roads r ON r.id = d.road_id
        ORDER BY t.raised_at DESC`,
     )
-    const header = 'Ticket,Slot Id,Road,Status,Raised\n'
+    const header = 'Ticket,Slot Id,Road,Status,Raised,Reported time\n'
     const lines = result.rows.map((r) => {
       const device = deviceDisplayId({
         slot_id: r.slot_id,
         public_id: r.device_public_id,
       })
-      return `${r.public_id},${device},"${r.road}",${listStatus(r.status, r.assignee_id)},${r.raised_at}`
+      return `${r.public_id},${device},"${r.road}",${listStatus(r.status, r.assignee_id)},${r.raised_at},${r.whatsapp_time}`
     })
     res.setHeader('Content-Type', 'text/csv')
     res.setHeader('Content-Disposition', 'attachment; filename="tickets.csv"')
@@ -304,6 +326,7 @@ const raiseSchema = z
     reporterType: z.string().default('Site attendant'),
     priority: z.string().optional(),
     photos: z.array(z.string()).default([]),
+    whatsappAt: whatsappAtSchema,
   })
   .superRefine((data, ctx) => {
     if (!normalizeIssueList(data).length) {
@@ -344,8 +367,8 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
           `INSERT INTO tickets (
             public_id, device_id, status, priority, reporter_type, description,
             reported_category_id, reported_subcategory_id,
-            raised_by_user_id
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+            raised_by_user_id, whatsapp_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
           [
             publicId,
             device.rows[0].id,
@@ -356,13 +379,14 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
             primary.categoryId,
             primary.subcategoryId,
             req.user!.id,
+            body.whatsappAt || null,
           ],
         )
         const id = ticket.rows[0].id as string
         await replaceTicketIssues(client, id, 'reported', resolvedIssues)
         const raisedEvent = await client.query(
-          `INSERT INTO ticket_events (ticket_id, event_type, title, body, status_label, actor_user_id, category_id, subcategory_id, photos)
-           VALUES ($1,'raised','Ticket raised',$2,$3,$4,$5,$6,$7)
+          `INSERT INTO ticket_events (ticket_id, event_type, title, body, status_label, actor_user_id, category_id, subcategory_id, photos, whatsapp_at)
+           VALUES ($1,'raised','Ticket raised',$2,$3,$4,$5,$6,$7,$8)
            RETURNING id`,
           [
             id,
@@ -372,6 +396,7 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
             primary.categoryId,
             primary.subcategoryId,
             JSON.stringify(body.photos),
+            body.whatsappAt || null,
           ],
         )
         return { id, eventId: raisedEvent.rows[0].id as string }
@@ -483,6 +508,8 @@ router.get('/:ticketId', authorize('All tickets', 'v'), async (req: AuthedReques
         slot: t.slot_number,
         status: displayStatus(t.status),
         statusTone: statusTone(displayStatus(t.status)),
+        whatsappAt: t.whatsapp_at ?? null,
+        createdAt: t.created_at,
         facts: [
           { label: 'Raised on', value: t.raised_at },
           { label: 'Raised by', value: t.raised_by_name },
@@ -498,6 +525,7 @@ router.get('/:ticketId', authorize('All tickets', 'v'), async (req: AuthedReques
       issuesFound: mapIssueApi(ticketIssueLists.found),
       workHistory: events.rows.map((e) => ({
         when: e.created_at,
+        whatsappAt: e.whatsapp_at ?? null,
         actor: e.actor_name,
         title: e.title,
         status: e.status_label,
@@ -576,6 +604,7 @@ const updateSchema = z.object({
     .transform((ids) => [...new Set(ids)]),
   /** New issues appended to the ticket as Open reported issues. */
   addIssues: z.array(issuePairSchema).default([]),
+  whatsappAt: whatsappAtSchema,
 })
 
 router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: AuthedRequest, res) => {
@@ -643,8 +672,9 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
       const inserted = await client.query(
         `INSERT INTO ticket_events (
            ticket_id, event_type, title, body, status_label, actor_user_id,
-           category_id, subcategory_id, cost, next_visit_at, not_fixed_reason, work_done, photos, parts, meta
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+           category_id, subcategory_id, cost, next_visit_at, not_fixed_reason, work_done, photos, parts, meta,
+           whatsapp_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
          RETURNING id`,
         [
           t.id,
@@ -662,6 +692,7 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
           JSON.stringify(body.photos),
           JSON.stringify(snapshots),
           JSON.stringify(body.closeTicket ? { closedTicket: true } : {}),
+          body.whatsappAt || null,
         ],
       )
       const id = inserted.rows[0].id as string
@@ -870,6 +901,7 @@ const closeSchema = z
     /** Labour / non-part charges only — part prices come from Parts Master. */
     cost: z.coerce.number().nonnegative().default(0),
     deviceTested: z.string().min(1),
+    whatsappAt: whatsappAtSchema,
   })
   .superRefine((data, ctx) => {
     if (!normalizeIssueList(data).length) {
@@ -907,8 +939,8 @@ router.post('/:ticketId/close', authorize('Update ticket', 'x'), async (req: Aut
       const inserted = await client.query(
         `INSERT INTO ticket_events (
            ticket_id, event_type, title, body, status_label, actor_user_id,
-           category_id, subcategory_id, cost, work_done, photos, parts, meta
-         ) VALUES ($1,'closed','Ticket closed',$2,'Closed',$3,$4,$5,$6,$7,$8,$9,$10)
+           category_id, subcategory_id, cost, work_done, photos, parts, meta, whatsapp_at
+         ) VALUES ($1,'closed','Ticket closed',$2,'Closed',$3,$4,$5,$6,$7,$8,$9,$10,$11)
          RETURNING id`,
         [
           t.id,
@@ -921,6 +953,7 @@ router.post('/:ticketId/close', authorize('Update ticket', 'x'), async (req: Aut
           JSON.stringify(body.photos),
           JSON.stringify(snapshots),
           JSON.stringify({ deviceTested: body.deviceTested }),
+          body.whatsappAt || null,
         ],
       )
       const eventId = inserted.rows[0].id as string
