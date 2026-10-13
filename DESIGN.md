@@ -790,3 +790,67 @@ LIMIT $n OFFSET $m
 ## Frontend
 
 **FRONTEND CHANGE (done, frontend Phase 53):** sidebar Slot View (after Dashboard, `Slot View` v) and a Slot View row in the Roles & permissions matrix; `/slot-view` list; `/slot-view/:slotId` with Unresolved issues (grouped by Main Issue) and Tickets (`TicketTable`, `listTickets({ device })`).
+
+---
+
+# Design — EOD report (Phase 55)
+
+## Endpoint
+
+| Endpoint | Gate | Query | Returns |
+|----------|------|-------|---------|
+| `GET /api/dashboard/eod-report` | `Dashboard` `v` | `date=YYYY-MM-DD` (optional, default today IST); strict, unknown keys → `400` | `{ date, timezone, generatedAt, range, summary, raised[], closed[], users[] }` |
+
+Errors: malformed or impossible date (`2026-02-30`, `13-10-2026`, empty) → `400 VALIDATION_ERROR`; no token → `401`; no `Dashboard` `v` (Technician, Engineer, Electrician, Site attendant by default) → `403 FORBIDDEN`. An empty day is `200` with zeros and empty arrays.
+
+## Definitions
+
+| Metric | Source | Window | Attribution |
+|--------|--------|--------|-------------|
+| Tickets raised | `tickets` row | `raised_at` | `raised_by_user_id` (`Unknown user` when null) |
+| Tickets completed | `tickets.status = 'Closed'` | `closed_at` | latest `ticket_events.status_label = 'Closed'` actor (`Not recorded` when none) |
+| Users raised / completed | distinct non-null user ids in each list | — | — |
+
+Window: `istDayRange(date)` = `[date T00:00:00+05:30, +24 h)`. IST has no DST, so +24 h is always the next midnight.
+
+## Closed query
+
+```sql
+SELECT t.public_id, d.slot_id, d.slot_number, r.name, ce.actor_user_id, u.full_name, t.closed_at
+FROM tickets t
+JOIN devices d ON d.id = t.device_id
+JOIN roads r ON r.id = d.road_id
+LEFT JOIN LATERAL (
+  SELECT e.actor_user_id FROM ticket_events e
+  WHERE e.ticket_id = t.id AND e.status_label = 'Closed'
+  ORDER BY e.created_at DESC LIMIT 1
+) ce ON TRUE
+LEFT JOIN users u ON u.id = ce.actor_user_id
+WHERE t.status = 'Closed' AND t.closed_at >= $1 AND t.closed_at < $2
+```
+
+`LIMIT 1` keeps one row per ticket even if a race on `/close` (status check outside the transaction) ever wrote two closing events.
+
+## User summary
+
+`buildUserSummary` merges both lists into a `Map` keyed by `userId` (rows without a user key on their label, so `Not recorded` and `Unknown user` are separate rows). Each row: `raised`, `closed` (0 when absent), `slots` = unique Slot Labels sorted with numeric collation. Rows are sorted by name, then id, so two people with the same name stay two stable rows. Row sums always equal the summary totals.
+
+## Frontend
+
+**FRONTEND CHANGE (done, frontend Phase 56):** Dashboard EOD report panel (date picker, Generate / Regenerate, summary tiles, plain-text preview, Copy report). The shareable text is built in the browser from this response only; no totals are recomputed.
+
+# Design — User-wise activity (Phase 56)
+
+| Metric | Source | Per user | Total |
+|--------|--------|----------|-------|
+| Raised | `tickets.raised_at` in window | `raised_by_user_id` | tickets |
+| Updated | `ticket_events` with `event_type` in `visit_open`, `visit_resolved`, `waiting_spare`, `reclassified`, `created_at` in window | `actor_user_id`, `COUNT(DISTINCT ticket_id)` | distinct tickets |
+| Closed | `status = 'Closed'`, `closed_at` in window | latest `status_label='Closed'` event actor | tickets |
+
+- Window: `[from 00:00 IST, to + 1 day 00:00 IST)`; `from`/`to` inclusive calendar dates, ≤ 366 days.
+- `POST /close` writes `event_type 'closed'` → closed only. An Add Update with `closeTicket` writes a `visit_resolved` event with `status_label 'Closed'` → updated **and** closed.
+- Users with no activity in the window are not listed. Null user ids (legacy rows) → one `Not recorded` row (`role: null`), not counted in `activeUsers`.
+- Order: raised + updated + closed descending, then name, then id.
+- Indexes: none added; `raised_at`, `closed_at` and `ticket_events.created_at` scans are fine at current volume.
+
+**FRONTEND CHANGE (done, frontend Phase 57):** Dashboard User-wise activity panel (From / To dates, totals tiles, User | Raised | Updated | Closed table).

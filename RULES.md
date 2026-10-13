@@ -115,6 +115,15 @@
 - Keep Device Sync code concise; reuse Express + `pg` patterns; avoid unnecessary APIs, libraries, abstractions, and refactoring.
 - Slot View (Phase 53): list only slots that have tickets by aggregating from `tickets` (never list every device and filter); count tickets, never `ticket_issues` rows. Unresolved issues = reported rows with persisted `status = 'Open'` (reuse `loadOpenDeviceTickets`), deduplicated by `subcategory_id`, never by display text. Slot tickets go through `GET /api/tickets?device=` — do not add a second ticket list query or row mapper. Gate every Slot View route with `authorize('Slot View', 'v')` — never a role-name check; who sees it is decided in Roles & permissions (defaults: Admin and Project manager).
 - Slot Label ordering goes through `slotLabelOrderBy` in `lib/device-ref.ts`; Slot View passes `{ natural: true }` (synced labels are not zero-padded). Never sort slot rows in JS after a paginated query.
+- EOD report (Phase 55) counting rules:
+  - **Raised** = tickets whose `raised_at` falls in the day, grouped by `raised_by_user_id`. Never the latest update time, never the `raised` event.
+  - **Completed** = tickets with `status = 'Closed'` whose `closed_at` falls in the day. The completer is the `actor_user_id` of the **latest** `ticket_events` row with `status_label = 'Closed'` (covers `/close` and update `closeTicket`). Never infer it from the raiser, `assignee_id` or the last updater; with no closing event report `Not recorded` (`userId: null`), never a guess.
+  - Resolving issues is not completing: a ticket with every issue Resolved but still open counts 0. Issue counts never mix into ticket counts.
+  - Count tickets, one row per ticket: no joins to `ticket_issues`, photos or every event. Raised and completed are independent (raised Monday, closed Tuesday → Monday's raised, Tuesday's completed).
+  - Group users by id, never display name. Slots = unique Slot Labels across the user's raised + completed tickets.
+  - Day = half-open IST window `[date 00:00 +05:30, next day 00:00 +05:30)` from `istDayRange`; default date = `todayIst()`. The frontend uses the same IST date (`todayIstDate`). Do not use server-local or UTC day boundaries for this report.
+  - Gate with `authorize('Dashboard', 'v')`; the query is strict (`date` only) — never accept a client user id to scope activity.
+- User-wise activity (Phase 56): raised and closed follow the EOD rules above. **Updated** = distinct tickets with an Add Update event (`UPDATE_EVENT_TYPES`, the same set as the list "Updates" column) by `actor_user_id`; never count the `closed` event or `raised` event as an update, and never count issue rows. Totals are distinct tickets from their own query, never summed from user rows. Range = inclusive IST days as one half-open window, at most `MAX_ACTIVITY_DAYS`.
 
 ## What to avoid
 

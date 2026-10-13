@@ -765,3 +765,51 @@ A failure rolls back the whole update (no event, no claim). The found-on-site `i
 **Verification:** `npm run db:migrate` (applies `027`); `npx tsc --noEmit -p .`; `test:smoke:notification-prefs`, `test:smoke:writes`, `test:smoke:multi-ticket` and `test:smoke:no-assignment` pass (`test:smoke` stops at the known device-sync permission drift, the same on a clean tree).
 
 **Frontend (done, frontend Phase 54):** Settings → Notifications panel (Push Notifications, Browser Permission status, Play Notification Sound), push controls removed from the bell, logout keeps the browser subscription, and the service worker honours `silent`.
+
+## Phase 55 — EOD (End of Day) report
+
+**Status:** Complete
+
+**Objective:** A read-only report of one IST day's ticket activity for the Dashboard: tickets raised (by creator) and tickets completed (by the user who actually closed them), with Slot ID, Slot Label and Ticket ID, plus a per-user summary. Built from existing data; no schema change.
+
+**Analysis (why no migration):** `tickets` has no `closed_by`, but both close paths write a `ticket_events` row with `status_label = 'Closed'` and `actor_user_id = req.user.id` in the same transaction that sets `closed_at`. The ticket list already derives "Closed by" from that event. Resolving every issue never closes a ticket (Phase 49), and a Closed ticket is never reopened, so "completed" = transitioned to Closed. Only tickets closed by direct SQL (migration `012`, seed `TK-0904`, smoke cleanups) lack the event; they report `Not recorded`.
+
+**Behavior:**
+- `GET /api/dashboard/eod-report?date=YYYY-MM-DD` in `src/routes/dashboard.ts`, `authorize('Dashboard', 'v')`. Strict zod query: `date` only, `isCalendarDate` rejects bad formats and impossible dates (`400 VALIDATION_ERROR`); omitted → `todayIst()`.
+- `src/lib/eod-report.ts`: `todayIst`, `isCalendarDate`, `istDayRange` (half-open `[00:00 +05:30, +24 h)`), `loadEodReport` (two queries, see DESIGN) and `buildUserSummary` (Map by user id, unique Slot Labels in numeric collation, rows sorted by name then id).
+- Raised: `tickets.raised_at` in range, `raised_by_user_id` (null → `Unknown user`). Completed: `status = 'Closed'` and `closed_at` in range, closer = latest closing event actor via `LEFT JOIN LATERAL … LIMIT 1` (none → `Not recorded`, `userId: null`). One row per ticket in both lists.
+- Response `{ date, timezone, generatedAt, range, summary { ticketsRaised, ticketsClosed, usersRaised, usersClosed }, raised[], closed[], users[] }` via `ok()`.
+- No change to ticket creation, updates, issue resolution, closing, statuses, notifications or any existing response.
+
+**Files:** `src/lib/eod-report.ts` (new), `src/routes/dashboard.ts`, `scripts/smoke-eod-report.ts` (new), `package.json` (`test:smoke:eod-report`).
+
+**Testing:** `npm run test:smoke:eod-report`. Tickets are raised and closed through the real endpoints, then moved to a random empty historic IST date. A: empty day → zeros, IST half-open `range`. B: 23:59:59 IST included, next-day 00:00 and previous day excluded. C: a 3-issue ticket and a ticket with a duplicate older closing event each count once. D: both close paths counted; a ticket with every issue resolved but not closed is not. E: closer = latest closing-event actor, never the raiser; SQL-closed ticket → `Not recorded`. F: two users with the same name → two rows; slots deduplicated and naturally ordered; row sums = summary. G: raised one day, closed the next → each date's own section. H: `abc`, `2026-02-30`, `2026-1-5`, `13-10-2026`, empty and unknown params → 400; no date → today IST. I: no token 401; Site attendant and Technician 403; Control room gets the same data. Cleanup closes leftovers at their historic time so today's report is untouched.
+
+**Verification:** `npx tsc --noEmit -p .` passes. The local Postgres DB's seeded Admin password has been changed, so the smoke scripts can't log in there; they were run on a fresh migrated + seeded PGlite DB (`DATABASE_URL=pglite:./data/smoke-eod-pglite npm run db:setup`): `test:smoke:eod-report`, `test:smoke:close`, `test:smoke:issue-resolution` and `test:smoke:ticket-flow` pass. `test:smoke` stops at the known "tech device-sync should be authorized" check, identically with the Phase 55 changes stashed.
+
+**Frontend (done, frontend Phase 56):** Dashboard `EodReportPanel` (date, Generate / Regenerate, tiles, plain-text preview, Copy report).
+
+## Phase 56 — User-wise activity + ticket list `closedAt`
+
+**Status:** Complete
+
+**Objective:** Show, per user and for an IST date range, how many tickets they raised, updated and closed (Dashboard). Expose a ticket's close time on the ticket list so the All tickets Closed tab can show it.
+
+**Behavior:**
+- `GET /api/dashboard/user-activity?from=YYYY-MM-DD&to=YYYY-MM-DD` in `src/routes/dashboard.ts`, `authorize('Dashboard', 'v')`. Strict query; both dates optional (missing one = the other, both missing = today IST); `from > to` or a range over 366 days → `400 VALIDATION_ERROR`.
+- `src/lib/user-activity.ts` `loadUserActivity`: one window `[from 00:00 IST, to + 1 day 00:00 IST)` (reuses `istDayRange`). One CTE query grouped by user id:
+  - raised = tickets with `raised_at` in window, by `raised_by_user_id`;
+  - updated = **distinct tickets** with an Add Update event (`visit_open`, `visit_resolved`, `waiting_spare`, legacy `reclassified` — the list "Updates" set) by `actor_user_id` in window. `POST /close` (`event_type 'closed'`) is not an update; an update with `closeTicket` counts as both updated and closed;
+  - closed = same rule as the EOD report (latest `status_label='Closed'` event actor).
+  - Null user ids (legacy rows) collapse into one `Not recorded` row. Rows sorted by total activity, then name.
+- Totals are a second small query of distinct tickets (a ticket updated by two users counts once), so totals are not the sum of the user rows for "updated".
+- Response `{ from, to, timezone, generatedAt, range, summary { ticketsRaised, ticketsUpdated, ticketsClosed, activeUsers }, users[{ userId, userName, role, raised, updated, closed }] }`.
+- `GET /api/tickets` rows gain `closedAt` (`closed_at` when `status = 'Closed'`, else `null`). Additive; no other field changed.
+
+**Files:** `src/lib/user-activity.ts` (new), `src/routes/dashboard.ts`, `src/routes/tickets.ts`, `scripts/smoke-user-activity.ts` (new), `package.json` (`test:smoke:user-activity`).
+
+**Testing:** `npm run test:smoke:user-activity` (historic random date, real endpoints). A: empty range. B: raiser counts; two updates on one ticket = 1 updated; `/close` not an update; close via update = updated + closed; totals 2/2/2 with 3 users; role returned. C: 3-day range inclusive of both ends. D: list `closedAt` set for Closed, `null` otherwise. E: bad / impossible dates, reversed range, >366 days, unknown params → 400; defaults. F: 401 / 403 (Site attendant, Technician).
+
+**Verification:** `npx tsc --noEmit -p .` passes. On the PGlite smoke DB: `test:smoke:user-activity`, `test:smoke:eod-report`, `test:smoke:close`, `test:smoke:issue-resolution`, `test:smoke:ticket-flow` pass. Read-only check on `pdm_db` for today matches the seeded TEST-EOD tickets.
+
+**Frontend (done, frontend Phase 57):** Dashboard `UserActivityPanel`; All tickets Closed tab shows **Closed time**.

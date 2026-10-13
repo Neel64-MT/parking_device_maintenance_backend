@@ -6,9 +6,58 @@ import { query } from '../db/pool.js'
 import { authorize, requireAuth, type AuthedRequest } from '../middleware/auth.js'
 import { deriveDeviceStatus, openTicketLateralSql } from '../lib/device-status.js'
 import { deviceDisplayId } from '../lib/device-ref.js'
+import { isCalendarDate, loadEodReport, todayIst } from '../lib/eod-report.js'
+import { MAX_ACTIVITY_DAYS, activityDayCount, loadUserActivity } from '../lib/user-activity.js'
 
 const router = Router()
 router.use(requireAuth)
+
+const eodQuerySchema = z
+  .object({
+    date: z
+      .string()
+      .trim()
+      .refine(isCalendarDate, 'Date must be a valid calendar date in YYYY-MM-DD format')
+      .optional(),
+  })
+  .strict()
+
+// Activity counts cover every ticket: tickets have no holder, so Dashboard `v` is the whole check.
+router.get('/eod-report', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => {
+  try {
+    const { date } = eodQuerySchema.parse(req.query)
+    return ok(res, await loadEodReport(date || todayIst()))
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
+const calendarDate = z
+  .string()
+  .trim()
+  .refine(isCalendarDate, 'Date must be a valid calendar date in YYYY-MM-DD format')
+
+const userActivityQuerySchema = z
+  .object({ from: calendarDate.optional(), to: calendarDate.optional() })
+  .strict()
+  .transform(({ from, to }) => {
+    const today = todayIst()
+    return { from: from || to || today, to: to || from || today }
+  })
+  .refine(({ from, to }) => from <= to, { message: 'From date must be on or before To date', path: ['from'] })
+  .refine(({ from, to }) => activityDayCount(from, to) <= MAX_ACTIVITY_DAYS, {
+    message: `Date range cannot be longer than ${MAX_ACTIVITY_DAYS} days`,
+    path: ['to'],
+  })
+
+router.get('/user-activity', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => {
+  try {
+    const { from, to } = userActivityQuerySchema.parse(req.query)
+    return ok(res, await loadUserActivity(from, to))
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
 
 router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => {
   try {
