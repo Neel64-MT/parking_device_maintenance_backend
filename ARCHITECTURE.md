@@ -43,7 +43,7 @@ backend/
 │   │   ├── error-handler.ts
 │   │   └── upload.ts
 │   ├── routes/
-│   ├── lib/ (incl. device-sync.ts, device-sync-client.ts)
+│   ├── lib/ (incl. device-sync.ts, device-sync-client.ts, eod-report.ts, report-range.ts, user-activity.ts)
 │   └── types/api.ts
 ├── uploads/
 ├── .env.example
@@ -427,6 +427,71 @@ GET /api/reports/work
 | Export | `GET /api/reports/work/export` (same filters) |
 
 **FRONTEND CHANGE REQUIRED:** wire WorkReport.jsx to this API (drop `data/workReport.js` mock).
+
+## EOD report (Phase 55)
+
+```text
+GET /api/dashboard/eod-report?from=YYYY-MM-DD&to=YYYY-MM-DD   (or ?date=; none → today in IST)
+  → requireAuth + authorize(Dashboard, v)
+  → reportRangeQuerySchema (src/lib/report-range.ts): strict, real calendar dates,
+    from ≤ to, ≤ 366 days, date XOR from/to            (Phase 57; shared with /user-activity)
+  → window: [from 00:00 +05:30, to + 1 day 00:00 +05:30)   half-open
+  → query 1 (raised): tickets t ⋈ devices ⋈ roads ⟕ users ON raised_by_user_id
+                       WHERE raised_at in range                     one row per ticket
+  → query 2 (closed): tickets t ⋈ devices ⋈ roads
+                       ⟕ LATERAL (latest ticket_events with status_label = 'Closed') ce
+                       ⟕ users ON ce.actor_user_id
+                       WHERE status = 'Closed' AND closed_at in range   one row per ticket
+  → buildUserSummary(raised, closed): Map keyed by user id, unique Slot Labels
+  → ok(res, { date, from, to, timezone, generatedAt, range, summary, raised[], closed[], users[] })
+```
+
+| Piece | Location |
+|-------|----------|
+| Route | [`src/routes/dashboard.ts`](src/routes/dashboard.ts) (`/eod-report`) |
+| Query validation (shared) | [`src/lib/report-range.ts`](src/lib/report-range.ts) |
+| Range, queries, user summary | [`src/lib/eod-report.ts`](src/lib/eod-report.ts) |
+| Smoke | [`scripts/smoke-eod-report.ts`](scripts/smoke-eod-report.ts) (`npm run test:smoke:eod-report`) |
+
+- **Two queries, no N+1.** Neither joins `ticket_issues` or every `ticket_events` row, so issues, photos and repeated events can't multiply a ticket. The closer comes from one `LIMIT 1` lateral per closed ticket, using the existing `idx_ticket_events_ticket`.
+- **Closer = closing event actor.** `tickets` has no `closed_by`. Both close paths (`POST /:id/close` with `event_type 'closed'`, and an update with `closeTicket: true`) write `status_label = 'Closed'`, the same predicate the ticket list uses for `closedByName`. With no closing event (direct SQL closes, e.g. migration `012`, seed `TK-0904`), `userId` is `null` and `userName` is `Not recorded`.
+- **Raiser** = `tickets.raised_by_user_id`, not the `raised` event (seed/fixture tickets lack it). A deleted raiser shows as `Unknown user`.
+- **No new index.** The report reads one day of tickets; `raised_at` / `closed_at` have no index, so it is a sequential scan of `tickets` (fine at current volume; add a `029` index migration if this grows).
+- **Fresh on every call.** No caching; `generatedAt` is the server time of the request, so "today" covers midnight IST up to that moment.
+
+Response shape:
+
+```json
+{
+  "date": "2026-10-13", "from": "2026-10-13", "to": "2026-10-13", "timezone": "Asia/Kolkata", "generatedAt": "…Z",
+  "range": { "from": "2026-10-12T18:30:00.000Z", "to": "2026-10-13T18:30:00.000Z" },
+  "summary": { "ticketsRaised": 0, "ticketsClosed": 0, "usersRaised": 0, "usersClosed": 0 },
+  "raised": [{ "ticketId": "TK-1201", "slotId": 101, "slotLabel": "S1-001", "road": "…", "userId": "uuid", "userName": "…", "at": "…Z" }],
+  "closed": [{ "ticketId": "TK-1190", "slotId": null, "slotLabel": "P-7", "road": "…", "userId": null, "userName": "Not recorded", "at": "…Z" }],
+  "users": [{ "userId": "uuid|null", "userName": "…", "slots": ["S1-001"], "raised": 0, "closed": 0 }]
+}
+```
+
+**Frontend (done, frontend Phase 56):** Dashboard `EodReportPanel` renders this response and builds the shareable text from it.
+
+## User-wise activity (Phase 56)
+
+```text
+GET /api/dashboard/user-activity?from=&to=  → requireAuth → authorize('Dashboard','v')
+  → reportRangeQuerySchema (strict; calendar dates; from ≤ to; ≤ 366 days; defaults today IST)
+  → loadUserActivity(from, to)        src/lib/user-activity.ts
+       window = [istDayRange(from).from, istDayRange(to).to)
+       1 query:  CTE raised (tickets.raised_by_user_id)
+                 CTE updated (ticket_events actor, Add Update types, COUNT DISTINCT ticket)
+                 CTE closed (latest status_label='Closed' event actor, lateral LIMIT 1)
+                 UNION of user ids → LEFT JOIN users, roles
+       1 query:  distinct-ticket totals (raised / updated / closed)
+  → ok({ from, to, timezone, generatedAt, range, summary, users[] })
+```
+
+`GET /api/tickets` rows also carry `closedAt` (Closed tickets only) for the All tickets Closed tab.
+
+**Frontend (done, frontend Phase 57):** Dashboard `UserActivityPanel`; `TicketTable` `time="closed"`.
 
 ## Device Sync (SmartPark)
 

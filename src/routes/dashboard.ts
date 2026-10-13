@@ -6,9 +6,31 @@ import { query } from '../db/pool.js'
 import { authorize, requireAuth, type AuthedRequest } from '../middleware/auth.js'
 import { deriveDeviceStatus, openTicketLateralSql } from '../lib/device-status.js'
 import { deviceDisplayId } from '../lib/device-ref.js'
+import { loadEodReport } from '../lib/eod-report.js'
+import { reportRangeQuerySchema } from '../lib/report-range.js'
+import { loadUserActivity } from '../lib/user-activity.js'
 
 const router = Router()
 router.use(requireAuth)
+
+// Activity counts cover every ticket: tickets have no holder, so Dashboard `v` is the whole check.
+router.get('/eod-report', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => {
+  try {
+    const { from, to } = reportRangeQuerySchema.parse(req.query)
+    return ok(res, await loadEodReport(from, to))
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
+router.get('/user-activity', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => {
+  try {
+    const { from, to } = reportRangeQuerySchema.parse(req.query)
+    return ok(res, await loadUserActivity(from, to))
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
 
 router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => {
   try {
@@ -86,7 +108,7 @@ router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => 
       `SELECT r.name, r.stretch_from, r.stretch_to,
               COUNT(d.id)::int AS total
        FROM roads r
-       LEFT JOIN devices d ON d.road_id = r.id
+       JOIN devices d ON d.road_id = r.id
        GROUP BY r.id
        ORDER BY r.code`,
     )

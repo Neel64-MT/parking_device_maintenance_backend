@@ -272,6 +272,38 @@ Two per-user application preferences, stored on `users` (migration `027_user_not
 
 **FRONTEND CHANGE REQUIRED (done, frontend Phase 54):** push controls moved from the bell popover to a Settings → Notifications panel. Logout keeps the browser subscription and drops only its server record.
 
+### EOD report (Phase 55)
+
+A Dashboard-only, read-only End of Day report of ticket activity for one calendar day in IST, ready to share on WhatsApp or email.
+
+- `GET /api/dashboard/eod-report?date=YYYY-MM-DD` (`Dashboard` `v`; `date` optional, defaults to today in IST). Every call reads live data; there is no cache.
+- **Daily summary:** tickets raised, tickets completed, distinct users who raised, distinct users who completed.
+- **Tickets raised:** Ticket ID, Slot ID, Slot Label, road and the raising user for every ticket whose `raised_at` is in the day.
+- **Tickets completed:** the same fields plus the user who closed it, for every ticket closed (`closed_at`) in the day. The closer is the actor of the closing event; if none was recorded the report says `Not recorded`.
+- **User-wise summary:** one row per user id with Slots, Tickets raised and Tickets completed (0 when the user did only one of the two).
+- A ticket is one ticket however many issues it carries. Resolving issues is not completing a ticket. Issue-resolution activity is not part of this report.
+- Real data only: an empty day returns zeros, a failure returns an error (never a fake zero report).
+- No database change.
+- Smoke: `npm run test:smoke:eod-report`.
+
+**FRONTEND CHANGE (done, frontend Phase 56):** Dashboard EOD report generator panel with Copy report.
+
+### User-wise activity and closed time (Phase 56)
+
+- `GET /api/dashboard/user-activity?from=YYYY-MM-DD&to=YYYY-MM-DD` (`Dashboard` `v`; inclusive IST days, at most 366; defaults to today). Per user: **Raised** (tickets they raised), **Updated** (different tickets they logged an Add Update on), **Closed** (tickets whose closing event they recorded), plus their role. Totals count each ticket once.
+- `GET /api/tickets` rows include `closedAt` (null unless Closed) for the All tickets Closed tab.
+- No database change. Smoke: `npm run test:smoke:user-activity`.
+
+**FRONTEND CHANGE (done, frontend Phase 57):** Dashboard User-wise activity panel; Closed tab shows Closed time.
+
+### Date range for the EOD report (Phase 57)
+
+- `GET /api/dashboard/eod-report` now accepts `from` / `to` (inclusive IST days) as well as the existing `?date=`. The response adds `from` and `to`; `date` is still returned (the first day), so existing callers keep working.
+- Both Dashboard report endpoints (`eod-report`, `user-activity`) use one validation rule (`src/lib/report-range.ts`): default today IST, From must be on or before To, at most 366 days, `date` cannot be combined with `from` / `to`; anything else → `400`.
+- No database change. Smoke: `npm run test:smoke:eod-report` (new section J), `npm run test:smoke:user-activity`.
+
+**FRONTEND CHANGE (done, frontend Phase 58):** Period dropdown (Today, This Week, Last Week, Current Month, Last Month, 3 Months, 6 Months, Custom range) plus From / To on the EOD report generator and User-Wise Ticket Activity.
+
 ### Signup approval requirements
 
 - `POST /api/auth/signup` creates `Pending` users.
@@ -302,7 +334,7 @@ PostgreSQL via discrete env vars: `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSW
 
 | Screen | API |
 |--------|-----|
-| Dashboard | `GET /api/dashboard` |
+| Dashboard | `GET /api/dashboard`, `GET /api/dashboard/eod-report?from=&to=` (or `?date=`), `GET /api/dashboard/user-activity?from=&to=` (done) |
 | Tickets | `/api/tickets*` |
 | Ticket notifications | `/api/notifications*` + service-worker Web Push |
 | Devices | `/api/devices*`, especially `GET /api/devices/scan?q=`; Sync Device → `POST /api/device-sync` + status poll |
