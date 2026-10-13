@@ -252,6 +252,7 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
         closedBy: t.status === 'Closed' ? t.closed_by_name || null : null,
         whatsappAt: t.whatsapp_at ?? null,
         createdAt: t.created_at,
+        closedAt: t.status === 'Closed' ? t.closed_at ?? null : null,
         updates: t.updates,
         daysOpen,
         daysAfterClose: t.closed_at

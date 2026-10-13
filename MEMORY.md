@@ -47,9 +47,17 @@
 
 - Phase 55 (frontend only) - Notifications "View all" page: the bell keeps `GET /api/notifications?page=1&limit=10`, and the new frontend `/notifications` page pages the same endpoint with `page` / `limit` / `unreadOnly`. No backend change; the existing `authorize('All tickets', 'v')`, ownership and pagination rules apply.
 
+- Phase 55 - EOD report: `GET /api/dashboard/eod-report?date=YYYY-MM-DD` (`Dashboard v`, strict query, default today IST). `src/lib/eod-report.ts`: half-open IST day (`istDayRange`), raised = `tickets.raised_at` by `raised_by_user_id`, completed = `status='Closed'` + `closed_at` by the latest `status_label='Closed'` event actor (lateral `LIMIT 1`; none → `Not recorded`), user summary keyed by user id with unique Slot Labels. No migration. Smoke: `npm run test:smoke:eod-report`
+
+- Phase 56 - User-wise activity: `GET /api/dashboard/user-activity?from=&to=` (`Dashboard v`, inclusive IST days, ≤366, default today). `src/lib/user-activity.ts`: per user id raised / updated (distinct tickets with an Add Update event) / closed (closing-event actor); totals are distinct tickets. `GET /api/tickets` rows add `closedAt`. No migration. Smoke: `npm run test:smoke:user-activity`
+
+- Phase 57 - Report date range: `src/lib/report-range.ts` `reportRangeQuerySchema` is the one query schema for `eod-report` and `user-activity` (`from` / `to` inclusive IST days, or the alias `date`; default today; `from <= to`; ≤ `MAX_REPORT_DAYS` 366; strict). `loadEodReport(from, to)` covers the whole range; response adds `from` / `to` (`date` = `from` kept). No migration. Smoke: `test:smoke:eod-report` section J
+
+- Dashboard Road-wise status: `GET /api/dashboard` `roadStatus` lists only roads with at least one device (inner join; roads with Total 0 are omitted). Row totals still sum to the fleet total.
+
 ## Currently Working On
 
-- (idle - Phase 55 needed no backend change; Phase 54 notification preferences complete; edited `src/db/migrations/027_user_notification_preferences.sql`, `src/middleware/auth.ts`, `src/routes/auth.ts`, `src/lib/notifications.ts`, `src/types/api.ts`, `scripts/smoke-notification-preferences.ts`, `package.json`)
+- (idle - Phase 57 report date range complete; edited `src/lib/report-range.ts` (new), `src/lib/eod-report.ts`, `src/lib/user-activity.ts`, `src/routes/dashboard.ts`, `scripts/smoke-eod-report.ts`, `scripts/smoke-user-activity.ts`)
 
 ## Pending
 
@@ -137,7 +145,12 @@
 - Device list / export order (Phase 41): Slot Label ascending via `DEVICE_LIST_ORDER_BY` (`ORDER BY (slot_number = ''), slot_number, public_id`) in `src/routes/devices.ts`; SQL-side so it survives pagination. Since Phase 53 the string comes from `slotLabelOrderBy()` in `lib/device-ref.ts` (same output).
 - Slot View (Phase 53): its own matrix screen `Slot View` (only `v` used), granted by default to Admin and Project manager only; other roles get an all-off row (migration `026`) so the toggle exists in Roles & permissions. `GET /api/tickets?device=` keeps `All tickets v`. Slot = `devices` row; ticket count = tickets (never issues), every status. "Unresolved issue" = reported Sub Issue with persisted `status = 'Open'`, unique per `subcategory_id`, grouped by Main Issue in the UI. Slot View order is natural (`slotLabelOrderBy(alias, { natural: true })`) because synced labels are not zero-padded; the Device list kept plain text order (not changed without a request). Slot tickets come from `GET /api/tickets?device=` rather than a second ticket query.
 
+- EOD report (Phase 55): "completed" = ticket transitioned to `Closed` in the day (no reopen exists, so one completion per ticket); issue resolutions are deliberately excluded (user's choice). The completer is read from the closing event because `tickets` has no `closed_by`; no column was added since every API close already records the actor. Day = fixed IST (user works in IST; the dashboard stamp is `Asia/Kolkata`), not UTC like the Work report. Access reuses `Dashboard v` (user's choice) instead of a new screen — the report shows only data every Dashboard viewer can already see in All tickets. The phase number 55 matches the frontend's Phase 55 (notifications page, frontend-only); the EOD frontend is frontend Phase 56.
+
 ## Known Issues
+
+- Smoke scripts log in as seed Admin `9000000001` / `Password123`; that password was changed on the local Postgres DB (`pdm_october_db`), so the scripts fail there at login. Run them on a seeded PGlite DB: `DATABASE_URL=pglite:./data/smoke-eod-pglite npm run db:setup`, then `DATABASE_URL=pglite:./data/smoke-eod-pglite npm run test:smoke:<name>`.
+- EOD report: tickets closed by direct SQL (no closing event) show the closer as `Not recorded`; this includes leftovers that older smoke scripts close with `closed_at = NOW()`, which then appear in that day's report.
 
 - Device Sync skips QR items that omit Slot Id (`slot.id`); missing MAC/QR still syncs. Existing devices are left untouched when other records fail.
 - Device Sync `devicesUpdated` only counts rows whose road/label/QR/MAC actually changed vs DB; duplicate QRs resolved once per run (last Slot Id wins) so a second sync on the same feed should show Updated: 0.
