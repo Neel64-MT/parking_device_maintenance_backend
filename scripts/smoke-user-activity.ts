@@ -259,6 +259,7 @@ async function main() {
     `from=${nextDay}&to=${day}`,
     'from=2024-01-01&to=2025-12-31',
     `from=${day}&to=${day}&user=${tech.id}`,
+    `date=${day}&to=${day}`,
   ]) {
     const res = await call(`/api/dashboard/user-activity?${qs}`, { headers: admin.auth })
     assert(res.status === 400 && res.body.code === 'VALIDATION_ERROR', `E: "${qs}" must be 400, got ${brief(res)}`)

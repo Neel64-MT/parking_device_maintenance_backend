@@ -341,6 +341,35 @@ async function main() {
   assert(dflt.status === 200 && dflt.body.data.date === todayIst(), `H: missing date must default to today IST: ${brief(dflt)}`)
   console.log('OK H — malformed dates and unknown params return 400; missing date defaults to today (IST)')
 
+  // --- J: date range (from / to, inclusive IST days) -------------------------------
+  const rangeRes = await call(`/api/dashboard/eod-report?from=${prevDay}&to=${nextDay}`, { headers: admin.auth })
+  assert(rangeRes.status === 200, `J: range report failed: ${brief(rangeRes)}`)
+  const range = rangeRes.body.data as EodReport & { from: string; to: string }
+  assert(range.from === prevDay && range.to === nextDay, `J: from/to must be echoed: ${range.from}..${range.to}`)
+  assert(
+    range.range.from === new Date(ist(prevDay, '00:00:00')).toISOString() &&
+      range.range.to === new Date(ist(addDays(nextDay, 1), '00:00:00')).toISOString(),
+    `J: window must be [from 00:00 IST, to + 1 day 00:00 IST): ${JSON.stringify(range.range)}`,
+  )
+  assert(
+    range.raised.map((x) => x.ticketId).sort().join() === [t1.id, t2.id, t3.id, t4.id, t5.id, t6.id].sort().join(),
+    `J: range raised must be t1–t6, got ${range.raised.map((x) => x.ticketId)}`,
+  )
+  assert(range.summary.ticketsClosed === 3, `J: range closed must be 3, got ${range.summary.ticketsClosed}`)
+  const sameDay = await call(`/api/dashboard/eod-report?from=${day}&to=${day}`, { headers: admin.auth })
+  assert(sameDay.status === 200 && sameDay.body.data.summary.ticketsRaised === r.summary.ticketsRaised,
+    `J: from = to = day must equal ?date=day: ${brief(sameDay)}`)
+  for (const qs of [
+    `from=${nextDay}&to=${day}`,
+    'from=2024-01-01&to=2025-12-31',
+    `date=${day}&from=${day}`,
+    `from=${day}&to=2026-02-30`,
+  ]) {
+    const res = await call(`/api/dashboard/eod-report?${qs}`, { headers: admin.auth })
+    assert(res.status === 400 && res.body.code === 'VALIDATION_ERROR', `J: "${qs}" must be 400, got ${brief(res)}`)
+  }
+  console.log('OK J — from/to range is inclusive; reversed, >366-day, mixed date+from and bad dates return 400')
+
   // --- I: authorization ---------------------------------------------------------
   const anon = await call(`/api/dashboard/eod-report?date=${day}`)
   assert(anon.status === 401, `I: no token must be 401, got ${brief(anon)}`)

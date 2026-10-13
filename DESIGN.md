@@ -799,9 +799,9 @@ LIMIT $n OFFSET $m
 
 | Endpoint | Gate | Query | Returns |
 |----------|------|-------|---------|
-| `GET /api/dashboard/eod-report` | `Dashboard` `v` | `date=YYYY-MM-DD` (optional, default today IST); strict, unknown keys → `400` | `{ date, timezone, generatedAt, range, summary, raised[], closed[], users[] }` |
+| `GET /api/dashboard/eod-report` | `Dashboard` `v` | `from=YYYY-MM-DD&to=YYYY-MM-DD` (inclusive IST days) or `date=YYYY-MM-DD` (= `from=to=date`); default today IST; strict, unknown keys → `400` | `{ date, from, to, timezone, generatedAt, range, summary, raised[], closed[], users[] }` (`date` = `from`) |
 
-Errors: malformed or impossible date (`2026-02-30`, `13-10-2026`, empty) → `400 VALIDATION_ERROR`; no token → `401`; no `Dashboard` `v` (Technician, Engineer, Electrician, Site attendant by default) → `403 FORBIDDEN`. An empty day is `200` with zeros and empty arrays.
+Errors: malformed or impossible date (`2026-02-30`, `13-10-2026`, empty), `from > to`, a range over 366 days, or `date` with `from` / `to` → `400 VALIDATION_ERROR` (shared `reportRangeQuerySchema`, Phase 57); no token → `401`; no `Dashboard` `v` (Technician, Engineer, Electrician, Site attendant by default) → `403 FORBIDDEN`. An empty day is `200` with zeros and empty arrays.
 
 ## Definitions
 
@@ -811,7 +811,7 @@ Errors: malformed or impossible date (`2026-02-30`, `13-10-2026`, empty) → `40
 | Tickets completed | `tickets.status = 'Closed'` | `closed_at` | latest `ticket_events.status_label = 'Closed'` actor (`Not recorded` when none) |
 | Users raised / completed | distinct non-null user ids in each list | — | — |
 
-Window: `istDayRange(date)` = `[date T00:00:00+05:30, +24 h)`. IST has no DST, so +24 h is always the next midnight.
+Window: `[istDayRange(from).from, istDayRange(to).to)` = `[from T00:00:00+05:30, to + 1 day T00:00:00+05:30)`; a single day is `[date T00:00:00+05:30, +24 h)`. IST has no DST, so +24 h is always the next midnight.
 
 ## Closed query
 
@@ -854,3 +854,5 @@ WHERE t.status = 'Closed' AND t.closed_at >= $1 AND t.closed_at < $2
 - Indexes: none added; `raised_at`, `closed_at` and `ticket_events.created_at` scans are fine at current volume.
 
 **FRONTEND CHANGE (done, frontend Phase 57):** Dashboard User-wise activity panel (From / To dates, totals tiles, User | Raised | Updated | Closed table).
+
+**Phase 57 (range for EOD):** both report endpoints share `reportRangeQuerySchema`; the frontend (Phase 58) sends `from` / `to` from a period dropdown (Today, This Week, Last Week, Current Month, Last Month, 3 Months, 6 Months, Custom range).

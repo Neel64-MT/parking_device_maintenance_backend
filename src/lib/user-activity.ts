@@ -3,7 +3,6 @@ import { EOD_TIMEZONE, UNRECORDED_CLOSER, istDayRange } from './eod-report.js'
 
 /** Add Update event types (same set as the ticket list "Updates" column). */
 export const UPDATE_EVENT_TYPES = ['visit_open', 'visit_resolved', 'waiting_spare', 'reclassified']
-export const MAX_ACTIVITY_DAYS = 366
 
 export type UserActivityRow = {
   userId: string | null
@@ -31,11 +30,6 @@ type ActivityDbRow = {
   raised: number
   updated: number
   closed: number
-}
-
-/** Whole IST days from `from` to `to`, both included. */
-export function activityDayCount(from: string, to: string): number {
-  return Math.round((istDayRange(to).from.getTime() - istDayRange(from).from.getTime()) / 86400000) + 1
 }
 
 /**

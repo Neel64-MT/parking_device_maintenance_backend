@@ -43,7 +43,7 @@ backend/
 │   │   ├── error-handler.ts
 │   │   └── upload.ts
 │   ├── routes/
-│   ├── lib/ (incl. device-sync.ts, device-sync-client.ts, eod-report.ts, user-activity.ts)
+│   ├── lib/ (incl. device-sync.ts, device-sync-client.ts, eod-report.ts, report-range.ts, user-activity.ts)
 │   └── types/api.ts
 ├── uploads/
 ├── .env.example
@@ -431,10 +431,11 @@ GET /api/reports/work
 ## EOD report (Phase 55)
 
 ```text
-GET /api/dashboard/eod-report?date=YYYY-MM-DD      (date optional → today in IST)
+GET /api/dashboard/eod-report?from=YYYY-MM-DD&to=YYYY-MM-DD   (or ?date=; none → today in IST)
   → requireAuth + authorize(Dashboard, v)
-  → zod: strict query, real calendar date (isCalendarDate)
-  → istDayRange(date): [date 00:00 +05:30, next day 00:00 +05:30)   half-open
+  → reportRangeQuerySchema (src/lib/report-range.ts): strict, real calendar dates,
+    from ≤ to, ≤ 366 days, date XOR from/to            (Phase 57; shared with /user-activity)
+  → window: [from 00:00 +05:30, to + 1 day 00:00 +05:30)   half-open
   → query 1 (raised): tickets t ⋈ devices ⋈ roads ⟕ users ON raised_by_user_id
                        WHERE raised_at in range                     one row per ticket
   → query 2 (closed): tickets t ⋈ devices ⋈ roads
@@ -442,12 +443,13 @@ GET /api/dashboard/eod-report?date=YYYY-MM-DD      (date optional → today in I
                        ⟕ users ON ce.actor_user_id
                        WHERE status = 'Closed' AND closed_at in range   one row per ticket
   → buildUserSummary(raised, closed): Map keyed by user id, unique Slot Labels
-  → ok(res, { date, timezone, generatedAt, range, summary, raised[], closed[], users[] })
+  → ok(res, { date, from, to, timezone, generatedAt, range, summary, raised[], closed[], users[] })
 ```
 
 | Piece | Location |
 |-------|----------|
 | Route | [`src/routes/dashboard.ts`](src/routes/dashboard.ts) (`/eod-report`) |
+| Query validation (shared) | [`src/lib/report-range.ts`](src/lib/report-range.ts) |
 | Range, queries, user summary | [`src/lib/eod-report.ts`](src/lib/eod-report.ts) |
 | Smoke | [`scripts/smoke-eod-report.ts`](scripts/smoke-eod-report.ts) (`npm run test:smoke:eod-report`) |
 
@@ -461,7 +463,7 @@ Response shape:
 
 ```json
 {
-  "date": "2026-10-13", "timezone": "Asia/Kolkata", "generatedAt": "…Z",
+  "date": "2026-10-13", "from": "2026-10-13", "to": "2026-10-13", "timezone": "Asia/Kolkata", "generatedAt": "…Z",
   "range": { "from": "2026-10-12T18:30:00.000Z", "to": "2026-10-13T18:30:00.000Z" },
   "summary": { "ticketsRaised": 0, "ticketsClosed": 0, "usersRaised": 0, "usersClosed": 0 },
   "raised": [{ "ticketId": "TK-1201", "slotId": 101, "slotLabel": "S1-001", "road": "…", "userId": "uuid", "userName": "…", "at": "…Z" }],
@@ -476,7 +478,7 @@ Response shape:
 
 ```text
 GET /api/dashboard/user-activity?from=&to=  → requireAuth → authorize('Dashboard','v')
-  → zod (strict; calendar dates; from ≤ to; ≤ 366 days; defaults today IST)
+  → reportRangeQuerySchema (strict; calendar dates; from ≤ to; ≤ 366 days; defaults today IST)
   → loadUserActivity(from, to)        src/lib/user-activity.ts
        window = [istDayRange(from).from, istDayRange(to).to)
        1 query:  CTE raised (tickets.raised_by_user_id)

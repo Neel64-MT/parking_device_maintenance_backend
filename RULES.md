@@ -122,8 +122,9 @@
   - Count tickets, one row per ticket: no joins to `ticket_issues`, photos or every event. Raised and completed are independent (raised Monday, closed Tuesday → Monday's raised, Tuesday's completed).
   - Group users by id, never display name. Slots = unique Slot Labels across the user's raised + completed tickets.
   - Day = half-open IST window `[date 00:00 +05:30, next day 00:00 +05:30)` from `istDayRange`; default date = `todayIst()`. The frontend uses the same IST date (`todayIstDate`). Do not use server-local or UTC day boundaries for this report.
-  - Gate with `authorize('Dashboard', 'v')`; the query is strict (`date` only) — never accept a client user id to scope activity.
-- User-wise activity (Phase 56): raised and closed follow the EOD rules above. **Updated** = distinct tickets with an Add Update event (`UPDATE_EVENT_TYPES`, the same set as the list "Updates" column) by `actor_user_id`; never count the `closed` event or `raised` event as an update, and never count issue rows. Totals are distinct tickets from their own query, never summed from user rows. Range = inclusive IST days as one half-open window, at most `MAX_ACTIVITY_DAYS`.
+  - Gate with `authorize('Dashboard', 'v')`; the query is strict (`from` / `to` or `date` only) — never accept a client user id to scope activity.
+- User-wise activity (Phase 56): raised and closed follow the EOD rules above. **Updated** = distinct tickets with an Add Update event (`UPDATE_EVENT_TYPES`, the same set as the list "Updates" column) by `actor_user_id`; never count the `closed` event or `raised` event as an update, and never count issue rows. Totals are distinct tickets from their own query, never summed from user rows.
+- Dashboard report ranges (Phase 57): `eod-report` and `user-activity` parse their query only with `reportRangeQuerySchema` (`src/lib/report-range.ts`); do not add a second per-route date schema. Range = inclusive IST days as one half-open window `[istDayRange(from).from, istDayRange(to).to)`, `from <= to`, at most `MAX_REPORT_DAYS`. A multi-day EOD report is still one query per list over the whole window, never a loop of single days.
 
 ## What to avoid
 

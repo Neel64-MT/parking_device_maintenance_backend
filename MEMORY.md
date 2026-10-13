@@ -51,9 +51,13 @@
 
 - Phase 56 - User-wise activity: `GET /api/dashboard/user-activity?from=&to=` (`Dashboard v`, inclusive IST days, ≤366, default today). `src/lib/user-activity.ts`: per user id raised / updated (distinct tickets with an Add Update event) / closed (closing-event actor); totals are distinct tickets. `GET /api/tickets` rows add `closedAt`. No migration. Smoke: `npm run test:smoke:user-activity`
 
+- Phase 57 - Report date range: `src/lib/report-range.ts` `reportRangeQuerySchema` is the one query schema for `eod-report` and `user-activity` (`from` / `to` inclusive IST days, or the alias `date`; default today; `from <= to`; ≤ `MAX_REPORT_DAYS` 366; strict). `loadEodReport(from, to)` covers the whole range; response adds `from` / `to` (`date` = `from` kept). No migration. Smoke: `test:smoke:eod-report` section J
+
+- Dashboard Road-wise status: `GET /api/dashboard` `roadStatus` lists only roads with at least one device (inner join; roads with Total 0 are omitted). Row totals still sum to the fleet total.
+
 ## Currently Working On
 
-- (idle - Phase 56 user activity complete; edited `src/lib/user-activity.ts` (new), `src/routes/dashboard.ts`, `src/routes/tickets.ts`, `scripts/smoke-user-activity.ts` (new), `package.json`)
+- (idle - Phase 57 report date range complete; edited `src/lib/report-range.ts` (new), `src/lib/eod-report.ts`, `src/lib/user-activity.ts`, `src/routes/dashboard.ts`, `scripts/smoke-eod-report.ts`, `scripts/smoke-user-activity.ts`)
 
 ## Pending
 

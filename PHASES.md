@@ -813,3 +813,22 @@ A failure rolls back the whole update (no event, no claim). The found-on-site `i
 **Verification:** `npx tsc --noEmit -p .` passes. On the PGlite smoke DB: `test:smoke:user-activity`, `test:smoke:eod-report`, `test:smoke:close`, `test:smoke:issue-resolution`, `test:smoke:ticket-flow` pass. Read-only check on `pdm_db` for today matches the seeded TEST-EOD tickets.
 
 **Frontend (done, frontend Phase 57):** Dashboard `UserActivityPanel`; All tickets Closed tab shows **Closed time**.
+
+## Phase 57 — Date range for the EOD report (shared report range)
+
+**Status:** Complete
+
+**Objective:** Let the EOD report cover a date range (the Dashboard now offers Today / This Week / Last Week / Current Month / Last Month / 3 Months / 6 Months / custom From–To), with one validation rule for both Dashboard report endpoints.
+
+**Behavior:**
+- `src/lib/report-range.ts` (new): `reportRangeQuerySchema` (strict zod) used by `GET /api/dashboard/eod-report` and `GET /api/dashboard/user-activity`. Accepts `from` / `to` (inclusive IST days) or the single-day alias `date`. Missing one date = the other; none = today IST. `400 VALIDATION_ERROR` for: invalid or impossible dates, `date` together with `from` / `to`, `from > to` ("From date must be on or before To date"), a range over `MAX_REPORT_DAYS` (366), unknown params.
+- `loadEodReport(from, to = from)`: one half-open window `[from 00:00 IST, to + 1 day 00:00 IST)`; same raised / completed / user-summary rules. Response adds `from` and `to`; `date` stays (= `from`) for compatibility. `?date=` callers get the same response as before plus the two new fields.
+- `user-activity` behavior is unchanged; its range checks moved to the shared schema (`MAX_ACTIVITY_DAYS` removed from `user-activity.ts`).
+
+**Files:** `src/lib/report-range.ts` (new), `src/lib/eod-report.ts`, `src/lib/user-activity.ts`, `src/routes/dashboard.ts`, `scripts/smoke-eod-report.ts`, `scripts/smoke-user-activity.ts`.
+
+**Testing:** `npm run test:smoke:eod-report` adds J: a 3-day range echoes `from` / `to`, its window ends at `to + 1 day` 00:00 IST, and it counts the tickets of all three days; `from=to=day` equals `?date=day`; reversed range, >366 days, `date` + `from`, invalid `to` → 400. `npm run test:smoke:user-activity` E adds `date` + `to` → 400.
+
+**Verification:** `npx tsc --noEmit -p .` passes; both smoke scripts pass on the PGlite smoke DB. Read-only check on `pdm_db`: `eod-report` and `user-activity` for 01–30 Sep 2026 both report 629 raised / 665 closed.
+
+**Frontend (done, frontend Phase 58):** shared `DateRangeFilter` (presets + From / To) on the EOD report generator and User-Wise Ticket Activity.

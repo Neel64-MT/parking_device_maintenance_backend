@@ -296,6 +296,14 @@ A Dashboard-only, read-only End of Day report of ticket activity for one calenda
 
 **FRONTEND CHANGE (done, frontend Phase 57):** Dashboard User-wise activity panel; Closed tab shows Closed time.
 
+### Date range for the EOD report (Phase 57)
+
+- `GET /api/dashboard/eod-report` now accepts `from` / `to` (inclusive IST days) as well as the existing `?date=`. The response adds `from` and `to`; `date` is still returned (the first day), so existing callers keep working.
+- Both Dashboard report endpoints (`eod-report`, `user-activity`) use one validation rule (`src/lib/report-range.ts`): default today IST, From must be on or before To, at most 366 days, `date` cannot be combined with `from` / `to`; anything else → `400`.
+- No database change. Smoke: `npm run test:smoke:eod-report` (new section J), `npm run test:smoke:user-activity`.
+
+**FRONTEND CHANGE (done, frontend Phase 58):** Period dropdown (Today, This Week, Last Week, Current Month, Last Month, 3 Months, 6 Months, Custom range) plus From / To on the EOD report generator and User-Wise Ticket Activity.
+
 ### Signup approval requirements
 
 - `POST /api/auth/signup` creates `Pending` users.
@@ -326,7 +334,7 @@ PostgreSQL via discrete env vars: `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSW
 
 | Screen | API |
 |--------|-----|
-| Dashboard | `GET /api/dashboard`, `GET /api/dashboard/eod-report?date=`, `GET /api/dashboard/user-activity?from=&to=` (done) |
+| Dashboard | `GET /api/dashboard`, `GET /api/dashboard/eod-report?from=&to=` (or `?date=`), `GET /api/dashboard/user-activity?from=&to=` (done) |
 | Tickets | `/api/tickets*` |
 | Ticket notifications | `/api/notifications*` + service-worker Web Push |
 | Devices | `/api/devices*`, especially `GET /api/devices/scan?q=`; Sync Device → `POST /api/device-sync` + status poll |

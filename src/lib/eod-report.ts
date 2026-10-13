@@ -26,7 +26,10 @@ export type EodUserRow = {
 }
 
 export type EodReport = {
+  /** First day of the period; kept for single-day callers. */
   date: string
+  from: string
+  to: string
   timezone: string
   generatedAt: string
   range: { from: string; to: string }
@@ -120,8 +123,10 @@ export function buildUserSummary(raised: EodTicketRow[], closed: EodTicketRow[])
 const distinctUsers = (rows: EodTicketRow[]) =>
   new Set(rows.filter((r) => r.userId).map((r) => r.userId)).size
 
-export async function loadEodReport(date: string): Promise<EodReport> {
-  const { from, to } = istDayRange(date)
+/** Report over IST days [fromDate, toDate], both inclusive, as one half-open window. */
+export async function loadEodReport(fromDate: string, toDate: string = fromDate): Promise<EodReport> {
+  const from = istDayRange(fromDate).from
+  const to = istDayRange(toDate).to
   const params = [from.toISOString(), to.toISOString()]
 
   // One row per ticket: no joins to issues/events, so a ticket can never count twice.
@@ -160,7 +165,9 @@ export async function loadEodReport(date: string): Promise<EodReport> {
   const closedRows = closed.rows.map((r) => toTicketRow(r, UNRECORDED_CLOSER)).sort(byUserThenTime)
 
   return {
-    date,
+    date: fromDate,
+    from: fromDate,
+    to: toDate,
     timezone: EOD_TIMEZONE,
     generatedAt: new Date().toISOString(),
     range: { from: from.toISOString(), to: to.toISOString() },
