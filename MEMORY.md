@@ -55,6 +55,8 @@
 
 - Dashboard Road-wise status: `GET /api/dashboard` `roadStatus` lists only roads with at least one device (inner join; roads with Total 0 are omitted). Row totals still sum to the fleet total.
 
+- Ticket list `lastUpdateAt`: `GET /api/tickets` rows carry the latest Add Update event's time (same event types as `updates`, newest by `created_at`), as `COALESCE(whatsapp_at, created_at)` of that event; `null` with no updates. Used by the All tickets Under Repair tab.
+
 ## Currently Working On
 
 - (idle - Phase 57 report date range complete; edited `src/lib/report-range.ts` (new), `src/lib/eod-report.ts`, `src/lib/user-activity.ts`, `src/routes/dashboard.ts`, `scripts/smoke-eod-report.ts`, `scripts/smoke-user-activity.ts`)
