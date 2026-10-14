@@ -212,7 +212,11 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
               (SELECT COUNT(*)::int FROM ticket_events e
                 WHERE e.ticket_id = t.id
                   AND e.event_type IN ('visit_open', 'visit_resolved', 'waiting_spare', 'reclassified')
-               ) AS updates
+               ) AS updates,
+              (SELECT COALESCE(e.whatsapp_at, e.created_at) FROM ticket_events e
+                WHERE e.ticket_id = t.id
+                  AND e.event_type IN ('visit_open', 'visit_resolved', 'waiting_spare', 'reclassified')
+                ORDER BY e.created_at DESC LIMIT 1) AS last_update_at
        ${ticketListJoins}
        ${pageWhereSql}
        ORDER BY t.raised_at DESC
@@ -253,6 +257,8 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
         whatsappAt: t.whatsapp_at ?? null,
         createdAt: t.created_at,
         closedAt: t.status === 'Closed' ? t.closed_at ?? null : null,
+        /** Latest Add Update: its WhatsApp time, else when it was logged; null with no updates. */
+        lastUpdateAt: t.last_update_at ?? null,
         updates: t.updates,
         daysOpen,
         daysAfterClose: t.closed_at
