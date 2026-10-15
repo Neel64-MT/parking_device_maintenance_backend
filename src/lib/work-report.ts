@@ -142,11 +142,12 @@ function isClosedEvent(e: WorkReportEventRow): boolean {
 function buildDayTickets(events: WorkReportEventRow[]): string[][] {
   return events.map((e) => [
     e.ticket_public_id,
-    deviceDisplayId({
-      slot_id: e.slot_id,
-      public_id: e.device_public_id,
-    }),
-    `${e.road_name} · ${e.slot_number}`,
+    e.slot_number ||
+      deviceDisplayId({
+        slot_id: e.slot_id,
+        public_id: e.device_public_id,
+      }),
+    e.road_name,
     e.issue_name || '—',
     e.work_done || e.title || e.body || '',
     e.event_type === 'closed' || e.status_label === 'Closed' ? 'Closed' : 'In progress',

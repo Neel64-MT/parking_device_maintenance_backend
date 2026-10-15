@@ -146,6 +146,10 @@ async function main() {
   const row = list.body.data.find((r: { id: string }) => r.id === ticketId)
   assert(row && sameInstant(row.whatsappAt, raisedAt) && row.createdAt, `list row missing whatsappAt/createdAt: ${JSON.stringify(row)}`)
   assert(row.closedBy === adminName, `closedBy expected ${adminName}, got ${row.closedBy}`)
+  assert(typeof row.slotLabel === 'string' && row.slotLabel.startsWith('WA-wa-'), `list row slotLabel expected WA-wa-*, got ${row.slotLabel}`)
+  const linked = await call(`/api/devices/${encodeURIComponent(row.deviceId)}`, { headers: auth })
+  assert(linked.status === 200, `device link from list row (${row.deviceId}) failed: ${linked.status}`)
+  console.log('OK list row shows Slot Label and its device link still resolves')
   console.log('OK Closed row shows Closed by')
   const plainList = await call(`/api/tickets?device=${encodeURIComponent(plainDevice)}`, { headers: auth })
   const plainRow = plainList.body.data[0]
@@ -157,8 +161,11 @@ async function main() {
   console.log('OK device detail returns whatsappAt')
 
   const csv = await call('/api/tickets/export', { headers: auth })
-  assert(String(csv.body).split('\n')[0].endsWith('Reported time'), 'export must have a Reported time column')
-  console.log('OK export has a Reported time column')
+  const csvLines = String(csv.body).split('\n')
+  assert(csvLines[0].endsWith('Reported time'), 'export must have a Reported time column')
+  assert(csvLines[0].split(',')[1] === 'Slot Label', `export column 2 must be Slot Label: ${csvLines[0]}`)
+  assert(csvLines.some((l) => l.startsWith(`${ticketId},"${row.slotLabel}",`)), 'export row must carry the Slot Label')
+  console.log('OK export has Slot Label and Reported time columns')
 
   console.log('\nWhatsApp time verification passed')
   server.close()
