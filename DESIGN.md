@@ -433,7 +433,7 @@ Matches frontend mock: `name`, `role`, `roads`, `days`, `visits`, `worked`, `clo
 
 | view | tickets row meaning |
 |------|---------------------|
-| day | Ticket, Slot Id, Road/slot, Issue, Work done, Result |
+| day | Ticket, Slot Label, Road/slot, Issue, Work done, Result |
 | week / range | Day, Volume, Roads, Main issues, Outcome, Result |
 | month | Week, Dates, Volume, Main issues, Outcome, Result |
 

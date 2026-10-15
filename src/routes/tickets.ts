@@ -244,6 +244,7 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
         tab,
         road: t.road_name,
         slot: `Slot ${t.slot_number}`,
+        slotLabel: t.slot_number || null,
         issueReported: t.reported_sub || t.description || '—',
         issueReportedDetail: t.reported_cat
           ? `${t.reported_cat} › ${t.reported_sub}`
@@ -299,7 +300,7 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
 router.get('/export', authorize('All tickets', 'v'), async (req: AuthedRequest, res) => {
   try {
     const result = await query(
-      `SELECT t.public_id, d.public_id AS device_public_id, d.slot_id, r.name AS road,
+      `SELECT t.public_id, d.public_id AS device_public_id, d.slot_id, d.slot_number, r.name AS road,
               t.status, t.assignee_id, t.raised_at,
               COALESCE(t.whatsapp_at, t.created_at) AS whatsapp_time
        FROM tickets t
@@ -307,13 +308,15 @@ router.get('/export', authorize('All tickets', 'v'), async (req: AuthedRequest, 
        JOIN roads r ON r.id = d.road_id
        ORDER BY t.raised_at DESC`,
     )
-    const header = 'Ticket,Slot Id,Road,Status,Raised,Reported time\n'
+    const header = 'Ticket,Slot Label,Road,Status,Raised,Reported time\n'
     const lines = result.rows.map((r) => {
-      const device = deviceDisplayId({
-        slot_id: r.slot_id,
-        public_id: r.device_public_id,
-      })
-      return `${r.public_id},${device},"${r.road}",${listStatus(r.status, r.assignee_id)},${r.raised_at},${r.whatsapp_time}`
+      const slotLabel =
+        r.slot_number ||
+        deviceDisplayId({
+          slot_id: r.slot_id,
+          public_id: r.device_public_id,
+        })
+      return `${r.public_id},"${String(slotLabel).replace(/"/g, '""')}","${r.road}",${listStatus(r.status, r.assignee_id)},${r.raised_at},${r.whatsapp_time}`
     })
     res.setHeader('Content-Type', 'text/csv')
     res.setHeader('Content-Disposition', 'attachment; filename="tickets.csv"')
