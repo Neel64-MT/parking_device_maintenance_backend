@@ -145,7 +145,7 @@ async function loadScanRowByWhere(
      FROM devices d
      JOIN roads r ON r.id = d.road_id
      ${openTicketLateralSql()}
-     WHERE ${whereSql}
+     WHERE (${whereSql}) AND d.deleted_at IS NULL
      LIMIT 1`,
     params,
   )
@@ -198,7 +198,7 @@ const listSchema = z.object({
 /** Shared FROM/WHERE for device list (optional roadIds + search). */
 function buildDeviceListBase(filters: z.infer<typeof listSchema>, roadIds?: string[]) {
   const params: unknown[] = []
-  const where: string[] = []
+  const where: string[] = ['d.deleted_at IS NULL']
 
   if (roadIds && roadIds.length) {
     params.push(roadIds)
@@ -535,14 +535,20 @@ router.post('/slot-mac', authorize('Scan QR', 'v'), async (req: AuthedRequest, r
 })
 
 const createSchema = z.object({
+  // Slot Id for a manually created device: user-entered string stored as public_id
+  // (the application identity). Optional for backward compatibility — when omitted the
+  // server auto-generates a PD-xxxx id. The sync-owned numeric slot_id stays NULL here.
+  slotId: z.string().min(1).optional(),
   roadId: z.string().uuid(),
   slotNumber: z.string().min(1),
+  slotIdentifier: z.string().optional(),
+  qrNumber: z.string().optional(),
   sideOfRoad: z.string().optional(),
   landmark: z.string().optional(),
   latitude: z.string().optional(),
   longitude: z.string().optional(),
   model: z.string().optional(),
-  installedOn: z.string().min(1),
+  installedOn: z.string().optional(),
   commissionedOn: z.string().optional(),
   installStatus: z.enum(['Working', 'Under installation', 'Not working']).default('Working'),
   photoUrl: z.string().optional(),
@@ -553,24 +559,28 @@ router.post('/', authorize('Add device', 'c'), async (req: AuthedRequest, res) =
   try {
     const body = createSchema.parse(req.body)
     assertRoadAccess(req.user!, body.roadId)
-    const publicId = await nextPublicId('PD', 4)
-    const qr = qrFromDeviceId(publicId)
+    // Slot Id is the user-entered application identity (public_id); auto-generate when
+    // omitted (legacy callers). QR defaults to the auto-generated QR-<publicId> when not
+    // supplied. slot_id stays NULL (sync owns it).
+    const publicId = body.slotId?.trim() || (await nextPublicId('PD', 4))
+    const qr = body.qrNumber?.trim() || qrFromDeviceId(publicId)
     const result = await query(
       `INSERT INTO devices (
-        public_id, qr_code, road_id, slot_number, side_of_road, landmark,
+        public_id, qr_code, road_id, slot_number, slot_identifier, side_of_road, landmark,
         latitude, longitude, model, installed_on, commissioned_on, install_status, photo_url, remarks
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
       [
         publicId,
         qr,
         body.roadId,
         body.slotNumber,
+        body.slotIdentifier?.trim() || null,
         body.sideOfRoad || null,
         body.landmark || null,
         body.latitude || null,
         body.longitude || null,
         body.model || 'Flap barrier — 4 wheeler',
-        body.installedOn,
+        body.installedOn || null,
         body.commissionedOn || null,
         body.installStatus,
         body.photoUrl || null,
@@ -586,7 +596,7 @@ router.post('/', authorize('Add device', 'c'), async (req: AuthedRequest, res) =
 router.get('/:deviceId/qr', authorize('Device history', 'v'), async (req, res) => {
   try {
     const result = await query(
-      `SELECT public_id, qr_code FROM devices WHERE ${deviceLookupWhere('devices', 1)}`,
+      `SELECT public_id, qr_code FROM devices WHERE ${deviceLookupWhere('devices', 1)} AND deleted_at IS NULL`,
       [req.params.deviceId],
     )
     if (!result.rowCount) throw new ApiError(404, 'Device not found', 'NOT_FOUND')
@@ -603,7 +613,7 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
     const device = await query(
       `SELECT d.*, r.name AS road_name FROM devices d
        JOIN roads r ON r.id = d.road_id
-       WHERE ${deviceLookupWhere('d', 1)}`,
+       WHERE ${deviceLookupWhere('d', 1)} AND d.deleted_at IS NULL`,
       [req.params.deviceId],
     )
     if (!device.rowCount) throw new ApiError(404, 'Device not found', 'NOT_FOUND')
@@ -713,6 +723,7 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
         qr: d.qr_code,
         qrNumber: d.qr_code,
         parkingLocation: d.road_name,
+        roadId: d.road_id,
         status,
         statusTone: statusTone(status),
         facts: [
@@ -794,6 +805,8 @@ router.patch('/:deviceId', authorize('Device list', 'e'), async (req: AuthedRequ
          install_status = COALESCE($11, install_status),
          photo_url = COALESCE($12, photo_url),
          remarks = COALESCE($13, remarks),
+         slot_identifier = COALESCE($14, slot_identifier),
+         qr_code = COALESCE($15, qr_code),
          updated_at = NOW()
        WHERE id = $1 RETURNING *`,
       [
@@ -810,9 +823,31 @@ router.patch('/:deviceId', authorize('Device list', 'e'), async (req: AuthedRequ
         body.installStatus ?? null,
         body.photoUrl ?? null,
         body.remarks ?? null,
+        body.slotIdentifier?.trim() || null,
+        body.qrNumber?.trim() || null,
       ],
     )
     return ok(res, deviceWritePayload(result.rows[0]), 'Device updated')
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
+// Soft delete: set deleted_at so ticket/history relationships (RESTRICT FKs) stay intact.
+// The device drops out of list/scan/history reads but its rows are preserved.
+router.delete('/:deviceId', authorize('Device list', 'd'), async (req: AuthedRequest, res) => {
+  try {
+    const existing = await query(
+      `SELECT * FROM devices WHERE ${deviceLookupWhere('devices', 1)} AND deleted_at IS NULL`,
+      [req.params.deviceId],
+    )
+    if (!existing.rowCount) throw new ApiError(404, 'Device not found', 'NOT_FOUND')
+    assertRoadAccess(req.user!, existing.rows[0].road_id)
+    const result = await query(
+      `UPDATE devices SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *`,
+      [existing.rows[0].id],
+    )
+    return ok(res, deviceWritePayload(result.rows[0]), 'Device deleted')
   } catch (error) {
     return handleApiError(res, error)
   }
