@@ -832,3 +832,23 @@ A failure rolls back the whole update (no event, no claim). The found-on-site `i
 **Verification:** `npx tsc --noEmit -p .` passes; both smoke scripts pass on the PGlite smoke DB. Read-only check on `pdm_db`: `eod-report` and `user-activity` for 01–30 Sep 2026 both report 629 raised / 665 closed.
 
 **Frontend (done, frontend Phase 58):** shared `DateRangeFilter` (presets + From / To) on the EOD report generator and User-Wise Ticket Activity.
+
+## Phase 59 — Add Device five-field contract + manual device CRUD (create / delete)
+
+**Status:** Complete
+
+**Objective:** Make the `/devices/add` form (Slot Id, Slot Label, MAC, QR Number, Parking Location) actually create devices, fix the silent-drop of MAC/QR on edit, and add device delete — without breaking Device Sync, QR lookup, tickets, Slot View, or derived status.
+
+**Behavior:**
+- `createSchema` (`src/routes/devices.ts`) now accepts `slotId?` (→ `public_id`, auto `PD-xxxx` when omitted — backward compatible), `slotIdentifier?` (MAC), `qrNumber?` (→ `qr_code`, auto `QR-<id>` when omitted); `installedOn` is now **optional** (nullable in DB; sync already creates without it). `slot_id` (sync-owned numeric key) stays NULL for manual devices, so a manual device's Slot Id is its `public_id`.
+- `PATCH /:id` now writes `slot_identifier` and `qr_code` via `COALESCE` (previously `createSchema.partial()` silently stripped them). `public_id`/`slot_id` remain non-editable.
+- `DELETE /api/devices/:id` (`authorize('Device list','d')`): **soft delete** via new `devices.deleted_at` (migration `029_device_soft_delete.sql`). Reads exclude `deleted_at IS NOT NULL` in device list/tiles/export, `GET /:id`, `/:id/qr`, scan + slot-mac, slot-view list/detail, and ticket-raise device resolution. Tickets/history (RESTRICT FKs) are preserved. Migration `030_device_delete_perm.sql` back-fills Admin's `Device list` `d` flag (already in `DEFAULT_ROLE_PERMS` = `vce..d`).
+- Device Sync is unchanged and does not reference `deleted_at` (no auto-restore of a soft-deleted synced device; manual restore only). `GET /:deviceId` header now also returns `roadId` for the Edit form's location select.
+
+**Files:** `src/routes/devices.ts`, `src/routes/slot-view.ts`, `src/routes/tickets.ts`, `src/db/migrations/029_device_soft_delete.sql`, `src/db/migrations/030_device_delete_perm.sql`, `scripts/smoke-device-crud.ts` (new), `package.json` (`test:smoke:device-crud`).
+
+**Testing:** `npm run test:smoke:device-crud` — create persists all five fields (slot_id NULL), list + detail reflect them, update persists MAC/QR/label, duplicate QR → 409 `DUPLICATE_ERROR`, invalid roadId → 400 `VALIDATION_ERROR`, soft delete hides the device from reads while preserving the row and blocking ticket-raise (404). Regression: `test:smoke:writes` (legacy auto-`PD` create) and `test:smoke:slot-view` still pass.
+
+**Verification:** `npx tsc --noEmit` passes; migrate + seed + all three smokes pass on an isolated PGlite DB.
+
+**Frontend (done, frontend Phase 59):** `/devices/add` redesigned to the five fields with real `createDevice` + validation; Edit reuses the form; `DeviceDetail` gains a permission-gated Delete action with a confirm modal.

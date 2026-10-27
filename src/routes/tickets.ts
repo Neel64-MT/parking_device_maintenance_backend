@@ -358,7 +358,7 @@ router.post('/', authorize('Raise ticket', 'c'), async (req: AuthedRequest, res)
     const deviceId = body.deviceId.trim()
     const device = await query(
       `SELECT d.*, r.name AS road_name FROM devices d JOIN roads r ON r.id = d.road_id
-       WHERE ${deviceLookupWhere('d', 1)}`,
+       WHERE ${deviceLookupWhere('d', 1)} AND d.deleted_at IS NULL`,
       [deviceId],
     )
     if (!device.rowCount) throw new ApiError(404, 'Device not found', 'NOT_FOUND')

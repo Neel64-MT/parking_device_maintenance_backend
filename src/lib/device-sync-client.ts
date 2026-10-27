@@ -140,6 +140,7 @@ export async function deviceSyncFetch<T = unknown>(
     let json: unknown
     try {
       json = text ? JSON.parse(text) : null
+      // console.log(`deviceSyncFetch response:`, json?.data.items)
     } catch {
       throw new DeviceSyncClientError(
         `Invalid JSON from external sync API (${res.status})`,
