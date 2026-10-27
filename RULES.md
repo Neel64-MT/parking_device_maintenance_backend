@@ -107,6 +107,7 @@
 - Device Sync matches by stable `slot_id`; never overwrite `slot_id` after it is set. Do not create duplicate devices for an existing Slot Id.
 - When Slot Id exists and incoming MAC differs, update the existing device’s `slot_identifier` (and QR/road/label when changed).
 - Count `devicesUpdated` only when a row’s synced fields actually change (`IS DISTINCT FROM`); unchanged external payload → no-op.
+- When the same Slot Id appears on multiple QR rows in one sync: keep the newest `updated_at` (tie-break: highest external item `id`); do not use last-page order.
 - Duplicate QR across Slot Ids in one sync: last Slot Id keeps the QR; others get stable `UNLINKED-SLOT-{slotId}` to avoid update thrash.
 - Do not perform unnecessary database writes when MAC and synced fields are unchanged.
 - Preserve existing ticket functionality — incomplete sync records must not disable existing devices.
