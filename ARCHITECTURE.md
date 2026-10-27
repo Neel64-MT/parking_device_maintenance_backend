@@ -149,22 +149,35 @@ Client scans QR / enters device code
 
 Reuse only — no `/devices/by-qr` or `/tickets/by-slot` endpoints. Device `latitude` / `longitude` are TEXT. Scan `openTicketId` / `openTickets` and the 6-month ticket count read every ticket (no visibility filter since Phase 51). Scan and raise use `assertRoadAccessUnlessFieldWork` (Site attendant + `FIELD_ROLES` bypass); device create/PATCH still use `assertRoadAccess`. FE must not call SmartPark directly (`DEVICE_SYNC_API_TOKEN` stays server-side).
 
-### Manual device create / edit (fallback when Sync is down)
+### Manual device create / edit / delete (fallback when Sync is down)
 
 ```text
-POST /api/devices          authorize Add device c
-PATCH /api/devices/:id     authorize Device list e
+POST   /api/devices        authorize Add device c
+  body: slotId? (→ public_id; auto PD-xxxx when omitted), roadId, slotNumber,
+        slotIdentifier? (MAC), qrNumber? (→ qr_code; auto QR-<id> when omitted),
+        installedOn? (now optional), …
+  slot_id stays NULL (sync-owned numeric key); Slot Id for a manual device IS its public_id
+PATCH  /api/devices/:id    authorize Device list e
   body may include: roadId, slotNumber, slotIdentifier (MAC), qrNumber, …
-  never writes slot_id (Slot Id not editable; sync-owned)
+  never writes public_id / slot_id (Slot Id not editable)
+DELETE /api/devices/:id    authorize Device list d
+  soft delete: sets deleted_at; tickets/history (RESTRICT FKs) preserved;
+  device drops out of list / scan / history / slot-view / ticket-raise reads
 ```
 
-`GET /api/devices/:deviceId` already returns `slotId` / `slotIdentifier` / `qrNumber` for the Edit form.
+The five-field Add Device form (Slot Id, Slot Label, MAC, QR Number, Parking Location) maps to
+`public_id`, `slot_number`, `slot_identifier`, `qr_code`, `road_id`. Uniqueness is DB-enforced
+(`public_id`, `qr_code`, `road_id+slot_number`) → `409 DUPLICATE_ERROR`. Install metadata
+(status/model/dates/geo) is no longer on the form but remains on the model and detail page;
+`install_status` defaults to `Working` and operational status stays derived from open tickets.
+
+`GET /api/devices/:deviceId` returns `slotId` / `slotIdentifier` / `qrNumber` / `roadId` for the Edit form.
 
 ### Device list order
 
 `GET /api/devices` and `GET /api/devices/export` both order by **Slot Label ascending** — `DEVICE_LIST_ORDER_BY` = `ORDER BY (slot_number = ''), slot_number, public_id` in `src/routes/devices.ts`. Sorting lives in SQL (not the frontend) so it is correct across `LIMIT/OFFSET` pagination; blank labels sort last and `public_id` is the stable tie-break. Filters, tiles, and the pagination envelope are unchanged. Ticket list order (`raised_at DESC`) is untouched.
 
-Duplicate tickets are detected per issue (Phase 50): one Open reported issue per device + sub-category. DB: `idx_ticket_issues_one_open_issue_per_device` on `ticket_issues(device_id, subcategory_id) WHERE role='reported' AND status='Open'` (replaces `idx_tickets_one_open_per_device`). Raise pre-check (`assertNoOpenIssueConflicts`) + unique-violation → same `OPEN_TICKET_EXISTS` details (`openTicketId`, `issues[]`). A device may hold several open tickets for different issues. Raise also requires non-empty `slot_identifier` → `400` / `SLOT_IDENTIFIER_REQUIRED`.
+Duplicate tickets are detected per issue (Phase 50): one Open reported issue per device + sub-category. DB: `idx_ticket_issues_one_open_issue_per_device` on `ticket_issues(device_id, subcategory_id) WHERE role='reported' AND status='Open'` (replaces `idx_tickets_one_open_per_device`). Raise pre-check (`assertNoOpenIssueConflicts`) + unique-violation → same `OPEN_TICKET_EXISTS` details (`openTicketId`, `issues[]`). A device may hold several open tickets for different issues. Raise only requires the device to resolve (404 otherwise) and to be active (`deleted_at IS NULL`); `slot_identifier`/MAC is optional for manual devices.
 
 ## Signup approval
 
