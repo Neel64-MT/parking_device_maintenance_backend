@@ -177,6 +177,8 @@ export type ExternalQrItem = {
   id?: number
   qr_number: string
   mac_address?: string | null
+  /** SmartPark row timestamp; used to pick the newest row when Slot Id repeats. */
+  updated_at?: string | null
   slot?: { id?: number; slot_label?: string | null; slot_identifier?: string | null } | null
   parking_location?: { id?: number; name?: string | null; type?: string | null } | null
 }
@@ -250,12 +252,17 @@ export function parseQrPage(payload: unknown): {
     const row = raw as Record<string, unknown>
     const qr = typeof row.qr_number === 'string' ? row.qr_number.trim() : ''
     if (!qr) continue
+    const idNum = row.id != null ? Number(row.id) : NaN
     items.push({
-      id: row.id != null ? Number(row.id) : undefined,
+      id: Number.isFinite(idNum) ? idNum : undefined,
       qr_number: qr,
       mac_address:
         typeof row.mac_address === 'string' && row.mac_address.trim()
           ? row.mac_address.trim()
+          : null,
+      updated_at:
+        typeof row.updated_at === 'string' && row.updated_at.trim()
+          ? row.updated_at.trim()
           : null,
       slot: (row.slot as ExternalQrItem['slot']) ?? null,
       parking_location: (row.parking_location as ExternalQrItem['parking_location']) ?? null,
