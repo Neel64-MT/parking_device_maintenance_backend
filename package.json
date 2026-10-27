@@ -14,6 +14,7 @@
     "test:smoke:users": "tsx scripts/smoke-users.ts",
     "test:smoke:roles": "tsx scripts/smoke-roles.ts",
     "test:smoke:writes": "tsx scripts/smoke-writes.ts",
+    "test:smoke:device-crud": "tsx scripts/smoke-device-crud.ts",
     "test:smoke:close": "tsx scripts/smoke-close.ts",
     "test:smoke:ticket-flow": "tsx scripts/smoke-ticket-update-flow.ts",
     "test:smoke:issue-resolution": "tsx scripts/smoke-issue-resolution.ts",
