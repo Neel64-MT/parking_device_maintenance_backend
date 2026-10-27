@@ -474,7 +474,7 @@ Aggregation helpers: [`src/lib/work-report.ts`](src/lib/work-report.ts). Road fi
 
 1. Missing Slot Id → skip (`devicesSkipped`). MAC/QR optional.
 2. Missing label → `String(slotId)`; missing QR → `UNLINKED-SLOT-{slotId}`.
-3. Collect all QR pages first; last payload per Slot Id wins. Duplicate QR across slots → last Slot Id keeps the real QR; others get stable `UNLINKED-SLOT-{slotId}`.
+3. Collect all QR pages first; when the same Slot Id appears on multiple QR rows, keep the newest `updated_at` (tie-break: highest external item `id`). Duplicate QR across slots → last Slot Id keeps the real QR; others get stable `UNLINKED-SLOT-{slotId}`.
 4. Find by `slot_id` → none → INSERT (MAC may be null).
 5. Existing Slot Id → same effective MAC/QR/road/label → **no-op**. Null incoming MAC does not clear existing MAC.
 6. Existing Slot Id → different MAC/QR/road/label → UPDATE; `devicesUpdated` counts rows that actually changed.

@@ -141,6 +141,21 @@ type IntendedDevice = {
   slotLabel: string
   slotIdentifier: string | null
   roadId: string
+  /** External QR row id — tie-break when updated_at ties. */
+  sourceId: number
+  /** External updated_at — newer row wins when Slot Id repeats in the feed. */
+  sourceUpdatedAt: string
+}
+
+/** True when `candidate` should replace `current` for the same Slot Id. */
+function isNewerQrSource(
+  candidate: { sourceUpdatedAt: string; sourceId: number },
+  current: { sourceUpdatedAt: string; sourceId: number },
+): boolean {
+  if (candidate.sourceUpdatedAt !== current.sourceUpdatedAt) {
+    return candidate.sourceUpdatedAt > current.sourceUpdatedAt
+  }
+  return candidate.sourceId > current.sourceId
 }
 
 /**
@@ -310,9 +325,27 @@ async function collectIntendedFromItems(
       typeof item.mac_address === 'string' && item.mac_address.trim()
         ? item.mac_address.trim()
         : null
+    const sourceId =
+      item.id != null && Number.isFinite(Number(item.id)) ? Number(item.id) : 0
+    const sourceUpdatedAt =
+      typeof item.updated_at === 'string' && item.updated_at.trim()
+        ? item.updated_at.trim()
+        : ''
 
-    // Last page item for a Slot Id wins (stable within a run).
-    bySlotId.set(slotId, { slotId, qr, slotLabel, slotIdentifier, roadId })
+    const intended: IntendedDevice = {
+      slotId,
+      qr,
+      slotLabel,
+      slotIdentifier,
+      roadId,
+      sourceId,
+      sourceUpdatedAt,
+    }
+
+    // Same Slot Id may appear on multiple QR rows; keep newest updated_at, then highest id.
+    const existing = bySlotId.get(slotId)
+    if (existing && !isNewerQrSource(intended, existing)) continue
+    bySlotId.set(slotId, intended)
   }
 }
 
