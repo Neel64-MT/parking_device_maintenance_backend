@@ -342,7 +342,7 @@ export async function resolveUserSignupNotifications(userId: string) {
  */
 export async function markTicketNotificationsRead(userId: string, ticketId: string) {
   const ticket = await query<{ id: string }>(
-    `SELECT id FROM tickets WHERE public_id = $1 OR id::text = $1`,
+    `SELECT id FROM tickets WHERE (public_id = $1 OR id::text = $1) AND deleted_at IS NULL`,
     [ticketId],
   )
   if (!ticket.rowCount) {

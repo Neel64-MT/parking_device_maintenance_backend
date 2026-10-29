@@ -137,7 +137,7 @@ export async function loadEodReport(fromDate: string, toDate: string = fromDate)
      JOIN devices d ON d.id = t.device_id
      JOIN roads r ON r.id = d.road_id
      LEFT JOIN users u ON u.id = t.raised_by_user_id
-     WHERE t.raised_at >= $1 AND t.raised_at < $2`,
+     WHERE t.deleted_at IS NULL AND t.raised_at >= $1 AND t.raised_at < $2`,
     params,
   )
 
@@ -157,7 +157,7 @@ export async function loadEodReport(fromDate: string, toDate: string = fromDate)
        LIMIT 1
      ) ce ON TRUE
      LEFT JOIN users u ON u.id = ce.actor_user_id
-     WHERE t.status = 'Closed' AND t.closed_at >= $1 AND t.closed_at < $2`,
+     WHERE t.deleted_at IS NULL AND t.status = 'Closed' AND t.closed_at >= $1 AND t.closed_at < $2`,
     params,
   )
 

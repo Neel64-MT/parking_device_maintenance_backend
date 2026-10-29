@@ -46,7 +46,7 @@ export function openTicketLateralSql(alias = 'ot') {
       FROM tickets t
       LEFT JOIN issue_subcategories fs ON fs.id = t.found_subcategory_id
       LEFT JOIN issue_subcategories rs ON rs.id = t.reported_subcategory_id
-      WHERE t.device_id = d.id AND t.status <> 'Closed'
+      WHERE t.device_id = d.id AND t.status <> 'Closed' AND t.deleted_at IS NULL
       ORDER BY ${OPEN_TICKET_RANK_SQL} DESC, t.raised_at DESC
       LIMIT 1
     ) ${alias} ON TRUE`
