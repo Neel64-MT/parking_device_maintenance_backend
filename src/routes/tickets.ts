@@ -103,7 +103,8 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
     })
     const filters = schema.parse(req.query)
     const baseParams: unknown[] = []
-    const baseWhere: string[] = []
+    // Soft-deleted tickets never appear in the list, tiles, tab counts or over-3 counts.
+    const baseWhere: string[] = ['t.deleted_at IS NULL']
 
     // Every ticket on every road is visible to anyone with All tickets `v`.
     if (filters.device) {
@@ -306,6 +307,7 @@ router.get('/export', authorize('All tickets', 'v'), async (req: AuthedRequest, 
        FROM tickets t
        JOIN devices d ON d.id = t.device_id
        JOIN roads r ON r.id = d.road_id
+       WHERE t.deleted_at IS NULL
        ORDER BY t.raised_at DESC`,
     )
     const header = 'Ticket,Slot Label,Road,Status,Raised,Reported time\n'
@@ -461,7 +463,7 @@ router.get('/:ticketId', authorize('All tickets', 'v'), async (req: AuthedReques
        LEFT JOIN issue_subcategories rs ON rs.id = t.reported_subcategory_id
        LEFT JOIN issue_categories fc ON fc.id = t.found_category_id
        LEFT JOIN issue_subcategories fs ON fs.id = t.found_subcategory_id
-       WHERE t.public_id = $1 OR t.id::text = $1`,
+       WHERE (t.public_id = $1 OR t.id::text = $1) AND t.deleted_at IS NULL`,
       [req.params.ticketId],
     )
     if (!result.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
@@ -486,7 +488,7 @@ router.get('/:ticketId', authorize('All tickets', 'v'), async (req: AuthedReques
        FROM tickets t
        LEFT JOIN issue_subcategories fs ON fs.id = t.found_subcategory_id
        LEFT JOIN issue_subcategories rs ON rs.id = t.reported_subcategory_id
-       WHERE t.device_id = $1 AND t.id <> $2
+       WHERE t.device_id = $1 AND t.id <> $2 AND t.deleted_at IS NULL
        ORDER BY t.raised_at DESC LIMIT 10`,
       [t.device_id, t.id],
     )
@@ -623,7 +625,7 @@ router.post('/:ticketId/updates', authorize('Update ticket', 'e'), async (req: A
     const ticketId = String(req.params.ticketId || '').trim()
     const ticket = await query(
       `SELECT t.*, d.road_id FROM tickets t JOIN devices d ON d.id = t.device_id
-       WHERE t.public_id = $1 OR t.id::text = $1`,
+       WHERE (t.public_id = $1 OR t.id::text = $1) AND t.deleted_at IS NULL`,
       [ticketId],
     )
     if (!ticket.rowCount) {
@@ -792,7 +794,7 @@ router.patch(
       const ticketId = String(req.params.ticketId || '').trim()
       const ticket = await query(
         `SELECT t.*, d.road_id FROM tickets t JOIN devices d ON d.id = t.device_id
-         WHERE t.public_id = $1 OR t.id::text = $1`,
+         WHERE (t.public_id = $1 OR t.id::text = $1) AND t.deleted_at IS NULL`,
         [ticketId],
       )
       if (!ticket.rowCount) {
@@ -836,7 +838,7 @@ router.patch(
       const ticketId = String(req.params.ticketId || '').trim()
       const ticket = await query(
         `SELECT t.*, d.road_id FROM tickets t JOIN devices d ON d.id = t.device_id
-         WHERE t.public_id = $1 OR t.id::text = $1`,
+         WHERE (t.public_id = $1 OR t.id::text = $1) AND t.deleted_at IS NULL`,
         [ticketId],
       )
       if (!ticket.rowCount) {
@@ -878,7 +880,7 @@ router.get('/:ticketId/close-preview', authorize('Update ticket', 'x'), async (r
     const ticket = await query(
       `SELECT t.*, d.road_id FROM tickets t
        JOIN devices d ON d.id = t.device_id
-       WHERE t.public_id = $1 OR t.id::text = $1`,
+       WHERE (t.public_id = $1 OR t.id::text = $1) AND t.deleted_at IS NULL`,
       [req.params.ticketId],
     )
     if (!ticket.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
@@ -935,7 +937,7 @@ router.post('/:ticketId/close', authorize('Update ticket', 'x'), async (req: Aut
 
     const ticket = await query(
       `SELECT t.*, d.road_id FROM tickets t JOIN devices d ON d.id = t.device_id
-       WHERE t.public_id = $1 OR t.id::text = $1`,
+       WHERE (t.public_id = $1 OR t.id::text = $1) AND t.deleted_at IS NULL`,
       [req.params.ticketId],
     )
     if (!ticket.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
@@ -997,6 +999,42 @@ router.post('/:ticketId/close', authorize('Update ticket', 'x'), async (req: Aut
       },
       'Ticket closed',
     )
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
+// Soft delete (mirrors device delete): sets tickets.deleted_at so the ticket drops out of every
+// list / count / Slot View / dashboard / report read while its history (events, issues, parts,
+// assignments) is preserved. Open issue rows are flagged so the one-open-issue-per-device index
+// frees up for a re-raise, and the ticket's notifications are removed so bell counts stay correct.
+// Any ticket (any status) is deletable; no road scope — tickets are visible to anyone with
+// All tickets `v`, so delete follows the same rule.
+router.delete('/:ticketId', authorize('All tickets', 'd'), async (req: AuthedRequest, res) => {
+  try {
+    const ticketId = String(req.params.ticketId || '').trim()
+    const existing = await query<{ id: string; public_id: string }>(
+      `SELECT id, public_id FROM tickets
+       WHERE (public_id = $1 OR id::text = $1) AND deleted_at IS NULL`,
+      [ticketId],
+    )
+    // A second delete finds nothing (already deleted) → same 404 as an unknown ticket.
+    if (!existing.rowCount) throw new ApiError(404, 'Ticket not found', 'NOT_FOUND')
+    const t = existing.rows[0]
+
+    await withTransaction(async (client) => {
+      await client.query(
+        `UPDATE tickets SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1`,
+        [t.id],
+      )
+      await client.query(`UPDATE ticket_issues SET deleted_at = NOW() WHERE ticket_id = $1`, [t.id])
+      await client.query(
+        `DELETE FROM notifications WHERE related_entity_type = 'ticket' AND related_entity_id = $1`,
+        [t.id],
+      )
+    })
+
+    return ok(res, { id: t.public_id }, 'Ticket deleted')
   } catch (error) {
     return handleApiError(res, error)
   }

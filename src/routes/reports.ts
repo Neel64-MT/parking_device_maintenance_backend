@@ -34,6 +34,7 @@ function buildWorkWhere(filters: WorkFilters) {
     `e.created_at >= $1`,
     `e.created_at < ($2::timestamptz + INTERVAL '1 day')`,
     `r.name = ANY($3::text[])`,
+    `t.deleted_at IS NULL`,
   ]
   if (filters.person && filters.person !== 'Everyone') {
     params.push(filters.person)

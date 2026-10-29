@@ -141,7 +141,7 @@ async function loadScanRowByWhere(
        ot.assignee_id, ot.raised_at AS open_ticket_raised_at,
        ot.issue_name, ot.severity,
        (SELECT COUNT(*)::int FROM tickets t
-        WHERE t.device_id = d.id AND t.raised_at >= NOW() - INTERVAL '6 months') AS tickets_6m
+        WHERE t.device_id = d.id AND t.deleted_at IS NULL AND t.raised_at >= NOW() - INTERVAL '6 months') AS tickets_6m
      FROM devices d
      JOIN roads r ON r.id = d.road_id
      ${openTicketLateralSql()}
@@ -226,7 +226,7 @@ function buildDeviceListBase(filters: z.infer<typeof listSchema>, roadIds?: stri
 
   const tickets6mSql = `
     (SELECT COUNT(*)::int FROM tickets t
-     WHERE t.device_id = d.id AND t.raised_at >= NOW() - INTERVAL '6 months')`
+     WHERE t.device_id = d.id AND t.deleted_at IS NULL AND t.raised_at >= NOW() - INTERVAL '6 months')`
 
   const fromSql = `
     FROM devices d
@@ -641,7 +641,7 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
        LEFT JOIN issue_subcategories rs ON rs.id = t.reported_subcategory_id
        LEFT JOIN issue_categories fc ON fc.id = t.found_category_id
        LEFT JOIN issue_subcategories fs ON fs.id = t.found_subcategory_id
-       WHERE t.device_id = $1
+       WHERE t.device_id = $1 AND t.deleted_at IS NULL
        ORDER BY t.raised_at DESC`,
       ticketParams,
     )
@@ -653,7 +653,7 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
        JOIN tickets t ON t.id = e.ticket_id
        LEFT JOIN issue_subcategories fs ON fs.id = t.found_subcategory_id
        LEFT JOIN issue_subcategories rs ON rs.id = t.reported_subcategory_id
-       WHERE t.device_id = $1 AND jsonb_array_length(e.parts) > 0
+       WHERE t.device_id = $1 AND t.deleted_at IS NULL AND jsonb_array_length(e.parts) > 0
        ORDER BY e.created_at DESC`,
       ticketParams,
     )
@@ -704,7 +704,7 @@ router.get('/:deviceId', authorize('Device history', 'v'), async (req: AuthedReq
        FROM tickets t
        LEFT JOIN issue_categories fc ON fc.id = t.found_category_id
        LEFT JOIN issue_categories rc ON rc.id = t.reported_category_id
-       WHERE t.device_id = $1
+       WHERE t.device_id = $1 AND t.deleted_at IS NULL
        GROUP BY COALESCE(fc.name, rc.name)
        ORDER BY n DESC`,
       ticketParams,

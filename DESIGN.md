@@ -125,6 +125,8 @@ No new signup-request table or approve endpoint.
 
 **Guard order in the handler** is deliberate: self first (the most specific, and it must fire even if the caller's other state changes), then existence, then the no-op guard, then `assertNotLastActiveAdmin` — the same helper `PATCH` uses, extracted so the "at least one active Admin" rule cannot drift between the two write paths.
 
+**Ticket delete is a soft delete, not a deactivation of status (Phase 60).** A ticket already has a lifecycle `status` (`Open`…`Closed`), so delete uses a separate `tickets.deleted_at` flag rather than a `'Deleted'` status — a status value would silently pass the many `status <> 'Closed'` predicates and leak deleted tickets into the Under-repair tab and counts. The flag is set in one transaction alongside `ticket_issues.deleted_at` and a `DELETE FROM notifications` for the ticket. The subtle correctness point is the `idx_ticket_issues_one_open_issue_per_device` unique index: it is defined on `ticket_issues` columns and provably cannot reference the parent `tickets.deleted_at`, so the deleted flag is **mirrored** onto `ticket_issues` and the index recreated with `AND deleted_at IS NULL` — otherwise a soft-deleted ticket's still-`Open` issue rows would reject a legitimate re-raise with a bare constraint error and no visible ticket to explain it. "All roles can delete" is expressed as the `All tickets` `d` matrix flag granted to every role, not a role-name or auth-only check, so the permission stays visible and revocable in Roles & permissions and the backend remains the single enforcement point.
+
 ---
 
 # Design — QR Scan Payload & Duplicate-Ticket Rule
