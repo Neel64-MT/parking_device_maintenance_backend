@@ -39,9 +39,12 @@ router.get('/', authorize('Issue master', 'v'), async (_req, res) => {
     const subs = await query(
       `SELECT s.*, (
          SELECT COUNT(*)::int FROM tickets t
-         WHERE t.found_subcategory_id = s.id
-            OR (t.found_subcategory_id IS NULL AND t.reported_subcategory_id = s.id)
-           AND t.raised_at >= NOW() - INTERVAL '90 days'
+         WHERE t.deleted_at IS NULL
+           AND (
+             t.found_subcategory_id = s.id
+              OR (t.found_subcategory_id IS NULL AND t.reported_subcategory_id = s.id)
+                AND t.raised_at >= NOW() - INTERVAL '90 days'
+           )
        ) AS usage_90d
        FROM issue_subcategories s
        ORDER BY s.name`,

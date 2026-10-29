@@ -56,7 +56,7 @@ async function roadRows(filters: z.infer<typeof listSchema>) {
       (SELECT COUNT(*)::int FROM devices d WHERE d.road_id = r.id) AS devices,
       (SELECT COUNT(DISTINCT t.device_id)::int FROM tickets t
          JOIN devices d ON d.id = t.device_id
-         WHERE d.road_id = r.id AND t.status NOT IN ('Closed')) AS down
+         WHERE d.road_id = r.id AND t.status NOT IN ('Closed') AND t.deleted_at IS NULL) AS down
     FROM roads r
     ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
     ORDER BY r.code`

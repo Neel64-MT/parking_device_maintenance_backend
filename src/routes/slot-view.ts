@@ -50,7 +50,7 @@ router.get('/', authorize('Slot View', 'v'), async (req: AuthedRequest, res) => 
   try {
     const filters = listSchema.parse(req.query)
     const params: unknown[] = []
-    const where: string[] = ['d.deleted_at IS NULL']
+    const where: string[] = ['d.deleted_at IS NULL', 't.deleted_at IS NULL']
     if (filters.q?.trim()) {
       params.push(`%${filters.q.trim().toLowerCase()}%`)
       const p = `$${params.length}`
@@ -97,7 +97,7 @@ router.get('/:slotId', authorize('Slot View', 'v'), async (req: AuthedRequest, r
     const slotId = z.string().min(1).parse(req.params.slotId)
     const found = await query<SlotRow & { ticket_count: number }>(
       `SELECT d.id, d.public_id, d.slot_id, d.slot_number, r.name AS road_name,
-              (SELECT COUNT(*)::int FROM tickets t WHERE t.device_id = d.id) AS ticket_count
+              (SELECT COUNT(*)::int FROM tickets t WHERE t.device_id = d.id AND t.deleted_at IS NULL) AS ticket_count
        FROM devices d
        JOIN roads r ON r.id = d.road_id
        WHERE ${deviceLookupWhere('d', 1)} AND d.deleted_at IS NULL

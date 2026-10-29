@@ -272,7 +272,7 @@ export async function findOpenIssueConflicts(
      JOIN tickets t ON t.id = ti.ticket_id
      JOIN issue_categories c ON c.id = ti.category_id
      JOIN issue_subcategories s ON s.id = ti.subcategory_id
-     WHERE t.device_id = $1 AND t.status <> 'Closed'
+     WHERE t.device_id = $1 AND t.status <> 'Closed' AND t.deleted_at IS NULL
        AND ti.role = 'reported' AND ti.status = 'Open'
        AND ti.subcategory_id = ANY($2::uuid[])
      ORDER BY t.raised_at, ti.sort_order`,
@@ -331,7 +331,7 @@ export async function loadOpenDeviceTickets(
        ON ti.ticket_id = t.id AND ti.role = 'reported' AND ti.status = 'Open'
      LEFT JOIN issue_categories c ON c.id = ti.category_id
      LEFT JOIN issue_subcategories s ON s.id = ti.subcategory_id
-     WHERE t.device_id = $1 AND t.status <> 'Closed'
+     WHERE t.device_id = $1 AND t.status <> 'Closed' AND t.deleted_at IS NULL
      ORDER BY t.raised_at, ti.sort_order`,
     [deviceId],
   )

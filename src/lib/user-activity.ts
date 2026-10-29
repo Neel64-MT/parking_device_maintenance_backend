@@ -48,13 +48,15 @@ export async function loadUserActivity(from: string, to: string): Promise<UserAc
     `WITH raised AS (
        SELECT t.raised_by_user_id AS user_id, COUNT(*)::int AS n
        FROM tickets t
-       WHERE t.raised_at >= $1 AND t.raised_at < $2
+       WHERE t.deleted_at IS NULL AND t.raised_at >= $1 AND t.raised_at < $2
        GROUP BY 1
      ),
      updated AS (
        SELECT e.actor_user_id AS user_id, COUNT(DISTINCT e.ticket_id)::int AS n
        FROM ticket_events e
-       WHERE e.event_type = ANY($3::text[]) AND e.created_at >= $1 AND e.created_at < $2
+       JOIN tickets t ON t.id = e.ticket_id
+       WHERE t.deleted_at IS NULL
+         AND e.event_type = ANY($3::text[]) AND e.created_at >= $1 AND e.created_at < $2
        GROUP BY 1
      ),
      closed AS (
@@ -67,7 +69,7 @@ export async function loadUserActivity(from: string, to: string): Promise<UserAc
          ORDER BY e.created_at DESC
          LIMIT 1
        ) ce ON TRUE
-       WHERE t.status = 'Closed' AND t.closed_at >= $1 AND t.closed_at < $2
+       WHERE t.deleted_at IS NULL AND t.status = 'Closed' AND t.closed_at >= $1 AND t.closed_at < $2
        GROUP BY 1
      ),
      people AS (
@@ -87,11 +89,13 @@ export async function loadUserActivity(from: string, to: string): Promise<UserAc
   // Totals are distinct tickets: one ticket updated by two users counts once here.
   const totals = await query<{ raised: number; updated: number; closed: number }>(
     `SELECT
-       (SELECT COUNT(*)::int FROM tickets WHERE raised_at >= $1 AND raised_at < $2) AS raised,
-       (SELECT COUNT(DISTINCT ticket_id)::int FROM ticket_events
-         WHERE event_type = ANY($3::text[]) AND created_at >= $1 AND created_at < $2) AS updated,
+       (SELECT COUNT(*)::int FROM tickets WHERE deleted_at IS NULL AND raised_at >= $1 AND raised_at < $2) AS raised,
+       (SELECT COUNT(DISTINCT e.ticket_id)::int FROM ticket_events e
+         JOIN tickets t ON t.id = e.ticket_id
+         WHERE t.deleted_at IS NULL
+           AND e.event_type = ANY($3::text[]) AND e.created_at >= $1 AND e.created_at < $2) AS updated,
        (SELECT COUNT(*)::int FROM tickets
-         WHERE status = 'Closed' AND closed_at >= $1 AND closed_at < $2) AS closed`,
+         WHERE deleted_at IS NULL AND status = 'Closed' AND closed_at >= $1 AND closed_at < $2) AS closed`,
     params,
   )
 
