@@ -852,3 +852,27 @@ A failure rolls back the whole update (no event, no claim). The found-on-site `i
 **Verification:** `npx tsc --noEmit` passes; migrate + seed + all three smokes pass on an isolated PGlite DB.
 
 **Frontend (done, frontend Phase 59):** `/devices/add` redesigned to the five fields with real `createDevice` + validation; Edit reuses the form; `DeviceDetail` gains a permission-gated Delete action with a confirm modal.
+
+## Phase 60 — Delete ticket (soft delete, all roles)
+
+**Status:** Complete
+
+**Objective:** Let every authenticated role delete a ticket of any status (erroneous / duplicate / spam) without erasing history or corrupting related data, mirroring the device soft-delete model (Phase 59).
+
+**Behavior:**
+- `DELETE /api/tickets/:ticketId` (`authorize('All tickets','d')`): **soft delete** via new `tickets.deleted_at` (migration `032_ticket_soft_delete.sql`). One transaction sets `tickets.deleted_at`, flags the ticket's `ticket_issues.deleted_at`, and deletes the ticket's `notifications` rows (no FK, else orphaned). History (`ticket_events`, `ticket_issues`, parts, assignments) is preserved. No road scope — tickets are visible to anyone with `All tickets` `v`, so delete follows the same rule (unlike device delete). A deleted / unknown ticket → `404 NOT_FOUND`; a second delete is idempotent (404).
+- The `All tickets` `d` flag is granted to **every** role. `DEFAULT_ROLE_PERMS` now ends each role's `All tickets` code in `d`; migration `033_ticket_delete_perm.sql` back-fills `can_delete = TRUE` on existing databases (still editable per role in Roles & permissions).
+- **One-open-issue-per-device index:** `idx_ticket_issues_one_open_issue_per_device` (migration 025) is on `ticket_issues` and cannot see `tickets.deleted_at`, so a soft-deleted ticket's Open issue rows would keep blocking a re-raise. Migration 032 adds `ticket_issues.deleted_at`, recreates the index with `AND deleted_at IS NULL`, and the delete flags those rows — freeing a re-raise of the same issue.
+- **Read exclusion:** every ticket read now excludes `deleted_at IS NOT NULL` — ticket list / tiles / tab counts / export / detail / device-previous-tickets and the update/close/close-preview/photo lookups (`routes/tickets.ts`), `openTicketLateralSql` (`lib/device-status.ts`, feeds devices list/scan/history + dashboard), devices `tickets_6m` / history / parts / failRanks, `loadOpenDeviceTickets` + `findOpenIssueConflicts` (`lib/ticket-issues.ts`), dashboard, Slot View list + detail, EOD report, user-activity, work report (`routes/reports.ts`), roads "down" count, users `open_tickets` count, and the Issue-master `usage_90d` count. The Issue-master **IN_USE hard-delete guards** deliberately still count soft-deleted tickets (they physically hold the issue FK).
+
+**APIs:** `DELETE /api/tickets/:ticketId` → `{ success, data: { id }, message: 'Ticket deleted' }`.
+
+**Database:** `032_ticket_soft_delete.sql` (`tickets.deleted_at` + `idx_tickets_active`; `ticket_issues.deleted_at` + index recreate), `033_ticket_delete_perm.sql` (grant `All tickets` `d` to all roles).
+
+**Files:** `src/routes/tickets.ts`, `src/lib/permissions.ts`, `src/lib/device-status.ts`, `src/lib/ticket-issues.ts`, `src/lib/eod-report.ts`, `src/lib/user-activity.ts`, `src/lib/notifications.ts`, `src/routes/dashboard.ts`, `src/routes/slot-view.ts`, `src/routes/devices.ts`, `src/routes/reports.ts`, `src/routes/roads.ts`, `src/routes/users.ts`, `src/routes/issues.ts`, `src/db/migrations/032_ticket_soft_delete.sql`, `src/db/migrations/033_ticket_delete_perm.sql`, `scripts/smoke-ticket-delete.ts` (new), `package.json` (`test:smoke:ticket-delete`).
+
+**Testing:** `npm run test:smoke:ticket-delete` — delete returns 200; history preserved and issue rows flagged; GET/update/close/close-preview on a deleted ticket → 404; second delete → 404; excluded from list, device status (back to Working), Slot View count and EOD report; the same issue re-raises after delete (index freed); a Technician with `d` can delete, and the backend returns 403 once `d` is revoked from the role. Regression: `test:smoke:close`, `test:smoke:ticket-flow`, `test:smoke:multi-ticket`, `test:smoke:slot-view`, `test:smoke:eod-report`, `test:smoke:user-activity`, `test:smoke:issue-resolution` all pass.
+
+**Verification:** `npx tsc --noEmit` passes; migrate + seed + the new and regression smokes pass on an isolated PGlite DB.
+
+**Frontend (done, frontend Phase 60):** permission-gated (`canPerm(user,'All tickets','d')`) Delete action on the ticket detail page and in the ticket-list / Slot-detail row actions, with a confirm modal naming the ticket, a busy state, success/error toasts, and a refresh that preserves filters/pagination.

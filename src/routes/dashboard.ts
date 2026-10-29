@@ -86,7 +86,7 @@ router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => 
        JOIN roads r ON r.id = d.road_id`
     const openIssueWhere = `
        WHERE ti.role = 'reported' AND ti.status = 'Open'
-         AND t.status <> 'Closed' ${roadFilter}`
+         AND t.status <> 'Closed' AND t.deleted_at IS NULL ${roadFilter}`
     const downReasons = await query(
       `SELECT s.name AS name, c.name AS category, COUNT(*)::int AS n
        ${openIssueJoins}
@@ -149,7 +149,7 @@ router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => 
        JOIN roads r ON r.id = d.road_id
        LEFT JOIN issue_subcategories rs ON rs.id = COALESCE(t.found_subcategory_id, t.reported_subcategory_id)
        LEFT JOIN issue_categories rc ON rc.id = COALESCE(t.found_category_id, t.reported_category_id)
-       WHERE t.status <> 'Closed' ${roadFilter}
+       WHERE t.status <> 'Closed' AND t.deleted_at IS NULL ${roadFilter}
        ORDER BY t.raised_at ASC
        LIMIT 8`,
       params,
@@ -161,7 +161,7 @@ router.get('/', authorize('Dashboard', 'v'), async (req: AuthedRequest, res) => 
        FROM tickets t
        JOIN devices d ON d.id = t.device_id
        JOIN roads r ON r.id = d.road_id
-       WHERE t.status <> 'Closed'
+       WHERE t.status <> 'Closed' AND t.deleted_at IS NULL
          ${roadFilter}`,
       params,
     )

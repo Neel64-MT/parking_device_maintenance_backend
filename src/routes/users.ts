@@ -51,7 +51,7 @@ router.get('/', authorize('Users', 'v'), async (req: AuthedRequest, res) => {
               COALESCE(string_agg(DISTINCT rd.name, ', ' ORDER BY rd.name), 'All roads') AS roads,
               (
                 SELECT COUNT(*)::int FROM tickets t
-                WHERE t.assignee_id = u.id AND t.status NOT IN ('Closed')
+                WHERE t.assignee_id = u.id AND t.status NOT IN ('Closed') AND t.deleted_at IS NULL
               ) AS open_tickets
        FROM users u
        LEFT JOIN roles r ON r.id = u.role_id
