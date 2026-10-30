@@ -52,6 +52,37 @@ router.get('/technicians', authorize('All tickets', 'v'), async (_req, res) => {
   }
 })
 
+/**
+ * Roster for the All tickets per-tab person filters (Raised By / Assigned to / Closed by).
+ * All three dropdowns share one list: every Active user whose role attends tickets on site.
+ * Values are exact `full_name` strings (same contract the list filter uses).
+ */
+const TICKET_PERSON_ROLES = ['Technician', 'Site attendant', 'Engineer', 'Electrician']
+
+router.get('/ticket-people', authorize('All tickets', 'v'), async (_req, res) => {
+  try {
+    const result = await query(
+      `SELECT u.id, u.full_name AS name, r.name AS role
+       FROM users u
+       JOIN roles r ON r.id = u.role_id
+       WHERE u.status = 'Active'
+         AND r.name = ANY($1::text[])
+         AND u.full_name IS NOT NULL AND u.full_name <> ''
+       ORDER BY u.full_name`,
+      [TICKET_PERSON_ROLES],
+    )
+    return ok(res, {
+      people: result.rows.map((row) => ({
+        id: String(row.id),
+        name: String(row.name),
+        role: String(row.role),
+      })),
+    })
+  } catch (error) {
+    return handleApiError(res, error)
+  }
+})
+
 router.get('/parts', authorize('Update ticket', 'v'), async (_req, res) => {
   try {
     const result = await query(
