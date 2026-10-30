@@ -95,6 +95,10 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
       road: z.string().optional(),
       status: z.string().optional(),
       category: z.string().optional(),
+      /** Per-tab person filters: raiser (Open), latest worker (Under repair), closer (Closed). */
+      raisedBy: z.string().optional(),
+      assignedTo: z.string().optional(),
+      closedBy: z.string().optional(),
       age: z.enum(['over3']).optional(),
       /** One slot (Slot View): public_id, UUID or Slot Id, resolved server-side. */
       device: z.string().trim().min(1).optional(),
@@ -183,6 +187,33 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
         pageWhere.push(`t.status = $${pageParams.length}`)
       }
     }
+    // Per-tab person filters. Each matches the same name the list column shows for that tab,
+    // so they are only ever sent for the matching tab (raiser → Open, worker → Under repair,
+    // closer → Closed). They narrow the page/count only, not the tiles or tab counts.
+    if (filters.raisedBy) {
+      pageParams.push(filters.raisedBy)
+      pageWhere.push(`ru.full_name = $${pageParams.length}`)
+    }
+    if (filters.assignedTo) {
+      pageParams.push(filters.assignedTo)
+      pageWhere.push(
+        `COALESCE(
+           (SELECT au.full_name FROM users au WHERE au.id = t.assignee_id),
+           (SELECT u2.full_name FROM ticket_events e2 JOIN users u2 ON u2.id = e2.actor_user_id
+             WHERE e2.ticket_id = t.id AND e2.event_type NOT IN ('raised', 'assigned')
+             ORDER BY e2.created_at DESC LIMIT 1)
+         ) = $${pageParams.length}`,
+      )
+    }
+    if (filters.closedBy) {
+      pageParams.push(filters.closedBy)
+      pageWhere.push(
+        `(SELECT u3.full_name FROM ticket_events e3 JOIN users u3 ON u3.id = e3.actor_user_id
+           WHERE e3.ticket_id = t.id AND e3.status_label = 'Closed'
+           ORDER BY e3.created_at DESC LIMIT 1) = $${pageParams.length}`,
+      )
+    }
+
     const pageWhereSql = pageWhere.length ? `WHERE ${pageWhere.join(' AND ')}` : ''
 
     const countResult = await query(
