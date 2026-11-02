@@ -251,7 +251,13 @@ router.get('/', authorize('All tickets', 'v'), async (req: AuthedRequest, res) =
                 ORDER BY e.created_at DESC LIMIT 1) AS last_update_at
        ${ticketListJoins}
        ${pageWhereSql}
-       ORDER BY t.raised_at DESC
+       ${
+         // Under repair ("Update" tab) is sorted by the most recent update, latest first;
+         // other tabs stay on raised date. Tickets without an update fall back to raised date.
+         filters.tab === 'urp'
+           ? `ORDER BY last_update_at DESC NULLS LAST, t.raised_at DESC`
+           : `ORDER BY t.raised_at DESC`
+       }
        LIMIT $${pageParams.length - 1} OFFSET $${pageParams.length}`,
       pageParams,
     )
